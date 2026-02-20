@@ -25,7 +25,8 @@ type TaskDef struct {
 type DAGDef struct {
 	ID          string    `yaml:"id"`
 	Description string    `yaml:"description"`
-	Schedule    string    `yaml:"schedule"` // Cron expression
+	Schedule    string    `yaml:"schedule"`          // Cron expression
+	Catchup     *bool     `yaml:"catchup,omitempty"` // Controls backfill behavior
 	Tasks       []TaskDef `yaml:"tasks"`
 }
 

@@ -358,3 +358,65 @@ func TestSchedulerAutoRetry(t *testing.T) {
 		t.Fatalf("Expected run to fail after retries exhausted, got %v", dbRun.Status)
 	}
 }
+
+func TestScheduler_CatchupTrue(t *testing.T) {
+	store, _ := models.NewStore("file::memory:?cache=shared&mode=memory")
+	defer store.Close()
+
+	sched := NewScheduler(store)
+
+	catchup := true
+	dagID := "catchup_true_dag"
+	sched.dags[dagID] = &models.DAGDef{
+		ID:       dagID,
+		Schedule: "* * * * *", // Every minute
+		Catchup:  &catchup,
+		Tasks: []models.TaskDef{
+			{ID: "t1"},
+		},
+	}
+
+	// Set last exec to 3 minutes and 10 seconds ago
+	now := time.Now()
+	sched.lastExec[dagID] = now.Add(-190 * time.Second)
+
+	if err := sched.Tick(); err != nil {
+		t.Fatalf("Tick failed: %v", err)
+	}
+
+	runs, _ := store.GetActiveDagRuns()
+	if len(runs) < 2 {
+		t.Fatalf("Expected multiple runs for catchup=true, got %d", len(runs))
+	}
+}
+
+func TestScheduler_CatchupFalse(t *testing.T) {
+	store, _ := models.NewStore("file::memory:?cache=shared&mode=memory")
+	defer store.Close()
+
+	sched := NewScheduler(store)
+
+	catchup := false
+	dagID := "catchup_false_dag"
+	sched.dags[dagID] = &models.DAGDef{
+		ID:       dagID,
+		Schedule: "* * * * *", // Every minute
+		Catchup:  &catchup,
+		Tasks: []models.TaskDef{
+			{ID: "t1"},
+		},
+	}
+
+	// Set last exec to 3 minutes and 10 seconds ago
+	now := time.Now()
+	sched.lastExec[dagID] = now.Add(-190 * time.Second)
+
+	if err := sched.Tick(); err != nil {
+		t.Fatalf("Tick failed: %v", err)
+	}
+
+	runs, _ := store.GetActiveDagRuns()
+	if len(runs) != 1 {
+		t.Fatalf("Expected exactly 1 run for catchup=false, got %d", len(runs))
+	}
+}

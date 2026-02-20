@@ -46,6 +46,64 @@ tasks:
 	}
 }
 
+func TestParseDAG_Catchup(t *testing.T) {
+	yamlContentFalse := []byte(`
+id: test_dag_false
+description: "A simple test DAG"
+schedule: "*/5 * * * *"
+catchup: false
+tasks:
+  - id: t1
+    type: command
+    command: "echo 1"
+`)
+	dagF, err := ParseDAG(yamlContentFalse)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if dagF.Catchup == nil || *dagF.Catchup != false {
+		t.Errorf("expected catchup false, got %v", dagF.Catchup)
+	}
+
+	yamlContentTrue := []byte(`
+id: test_dag_true
+description: "A simple test DAG"
+schedule: "*/5 * * * *"
+catchup: true
+tasks:
+  - id: t1
+    type: command
+    command: "echo 1"
+`)
+	dagT, err := ParseDAG(yamlContentTrue)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if dagT.Catchup == nil || *dagT.Catchup != true {
+		t.Errorf("expected catchup true, got %v", dagT.Catchup)
+	}
+
+	yamlContentMissing := []byte(`
+id: test_dag_missing
+description: "A simple test DAG"
+schedule: "*/5 * * * *"
+tasks:
+  - id: t1
+    type: command
+    command: "echo 1"
+`)
+	dagM, err := ParseDAG(yamlContentMissing)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if dagM.Catchup != nil {
+		t.Errorf("expected catchup nil, got %v", dagM.Catchup)
+	}
+}
+
 func TestParseDAGInvalidYAML(t *testing.T) {
 	yamlContent := []byte(`
 id: test_dag

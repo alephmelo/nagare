@@ -138,13 +138,25 @@ func (s *Scheduler) Tick() error {
 		if now.After(nextRunTime) || now.Equal(nextRunTime) {
 			log.Printf("Cron Triggering DAG %s", dag.ID)
 
-			_, err := s.createRun(dag, "scheduled")
-			if err != nil {
-				log.Printf("Cron failed to trigger %s: %v", dag.ID, err)
-				continue
+			if dag.Catchup != nil && *dag.Catchup {
+				// Catchup: create a run for every missed interval
+				currRunTime := nextRunTime
+				for now.After(currRunTime) || now.Equal(currRunTime) {
+					_, err := s.createRun(dag, "scheduled", currRunTime)
+					if err != nil {
+						log.Printf("Cron failed to trigger %s at %v: %v", dag.ID, currRunTime, err)
+					}
+					s.lastExec[dag.ID] = currRunTime
+					currRunTime = sched.Next(currRunTime)
+				}
+			} else {
+				// No catchup: trigger single run, advance lastExec to now
+				_, err := s.createRun(dag, "scheduled", now)
+				if err != nil {
+					log.Printf("Cron failed to trigger %s: %v", dag.ID, err)
+				}
+				s.lastExec[dag.ID] = now
 			}
-
-			s.lastExec[dag.ID] = now
 		}
 	}
 	s.mu.Unlock()
@@ -287,16 +299,16 @@ func (s *Scheduler) TriggerDAG(dagID string, triggerType string) (*models.DagRun
 		return nil, fmt.Errorf("DAG %s not found in memory map", dagID)
 	}
 
-	return s.createRun(dag, triggerType)
+	return s.createRun(dag, triggerType, time.Now())
 }
 
-func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string) (*models.DagRun, error) {
+func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate time.Time) (*models.DagRun, error) {
 	now := time.Now()
 	run := &models.DagRun{
 		ID:          fmt.Sprintf("%s_%d", dag.ID, now.UnixNano()),
 		DAGID:       dag.ID,
 		Status:      models.RunRunning,
-		ExecDate:    now,
+		ExecDate:    execDate,
 		TriggerType: triggerType,
 		CreatedAt:   now,
 	}
