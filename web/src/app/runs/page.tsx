@@ -203,7 +203,7 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
                     lineHeight: 1.7,
                     backgroundColor: "transparent",
                     border: "none",
-                    color: a.Status === "failed" ? "var(--mantine-color-red-4)" : "var(--mantine-color-green-4)",
+                    color: a.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-success)",
                   }}
                 >
                   {a.Output || "No output for this attempt."}
@@ -212,7 +212,7 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
             ))}
           </Tabs>
         ) : (
-          <Box p="md" style={{ backgroundColor: "var(--mantine-color-dark-8, #0b0f19)" }}>
+          <Box p="md" style={{ backgroundColor: "var(--log-bg)" }}>
             <Group gap="xs" mb="xs">
               <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
               <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Output Log</Text>
@@ -227,7 +227,7 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
                 lineHeight: 1.7,
                 backgroundColor: "transparent",
                 border: "none",
-                color: task.Status === "failed" ? "var(--mantine-color-red-4)" : "var(--mantine-color-green-4)",
+                color: task.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-success)",
               }}
             >
               {task.Output || "No output generated yet."}

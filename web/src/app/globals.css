@@ -3,6 +3,10 @@
   --panel-bg: #141414;
   --panel-hover: #1f1f1f;
   --border-color: rgba(255, 255, 255, 0.1);
+  --log-bg: #0b0f19;
+  --log-text-success: var(--mantine-color-green-4);
+  --log-text-failed: var(--mantine-color-red-4);
+  --log-text-default: #d1d5db;
 }
 
 :root[data-mantine-color-scheme="light"] {
@@ -10,6 +14,10 @@
   --panel-bg: #ffffff;
   --panel-hover: #f1f5f9;
   --border-color: rgba(0, 0, 0, 0.08);
+  --log-bg: #f3f4f6;
+  --log-text-success: var(--mantine-color-green-8);
+  --log-text-failed: var(--mantine-color-red-8);
+  --log-text-default: #1f2937;
 }
 
 body {
