@@ -49,8 +49,8 @@ interface Run {
 const dagreGraph = new dagre.graphlib.Graph();
 dagreGraph.setDefaultEdgeLabel(() => ({}));
 
-const nodeWidth = 200;
-const nodeHeight = 50;
+const nodeWidth = 280;
+const nodeHeight = 60;
 
 const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => {
   const isHorizontal = direction === 'LR';
@@ -132,7 +132,14 @@ export default function DagDetails() {
             borderRadius: '8px',
             padding: '10px 15px',
             fontSize: '12px',
-            fontWeight: 600
+            fontWeight: 600,
+            width: nodeWidth,
+            wordBreak: 'break-word' as const,
+            whiteSpace: 'pre-wrap' as const,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            textAlign: 'center' as const
           }
         })) || [];
 
