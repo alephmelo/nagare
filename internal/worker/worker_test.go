@@ -25,7 +25,7 @@ func TestWorkerPoolExecution(t *testing.T) {
 		return d, ok
 	}
 
-	triggerDAG := func(id string) (*models.DagRun, error) {
+	triggerDAG := func(id string, triggerType string) (*models.DagRun, error) {
 		return &models.DagRun{ID: "dummy_run", DAGID: id}, nil
 	}
 
@@ -83,11 +83,11 @@ func TestWorkerPoolTriggerDagExecution(t *testing.T) {
 	}
 
 	triggered := false
-	triggerDAG := func(id string) (*models.DagRun, error) {
+	triggerDAG := func(id string, triggerType string) (*models.DagRun, error) {
 		if id == "downstream_dag" {
 			triggered = true
 		}
-		return &models.DagRun{ID: "downstream_run_1", DAGID: id}, nil
+		return &models.DagRun{ID: "downstream_run_1", DAGID: id, TriggerType: triggerType}, nil
 	}
 
 	pool := NewPool(store, getDAG, triggerDAG, 1)

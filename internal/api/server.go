@@ -83,7 +83,7 @@ func (s *Server) handleTriggerDAG(w http.ResponseWriter, r *http.Request) {
 	}
 	dagID := parts[3]
 
-	run, err := s.scheduler.TriggerDAG(dagID)
+	run, err := s.scheduler.TriggerDAG(dagID, "manual")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

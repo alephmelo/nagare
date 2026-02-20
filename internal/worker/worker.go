@@ -14,7 +14,7 @@ import (
 type Pool struct {
 	store      *models.Store
 	getDAG     func(string) (*models.DAGDef, bool)
-	triggerDAG func(string) (*models.DagRun, error)
+	triggerDAG func(string, string) (*models.DagRun, error)
 	taskQueue  chan models.TaskInstance
 	workerSize int
 	wg         sync.WaitGroup
@@ -23,7 +23,7 @@ type Pool struct {
 }
 
 // NewPool initializes a new worker pool
-func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string) (*models.DagRun, error), size int) *Pool {
+func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string, string) (*models.DagRun, error), size int) *Pool {
 	return &Pool{
 		store:      store,
 		getDAG:     getDAG,
@@ -112,7 +112,7 @@ func (p *Pool) executeTask(ti models.TaskInstance, workerID int) {
 	}
 
 	if taskDef.Type == "trigger_dag" {
-		triggeredRun, err := p.triggerDAG(taskDef.DagID)
+		triggeredRun, err := p.triggerDAG(taskDef.DagID, "triggered")
 		if err != nil {
 			output := fmt.Sprintf("Failed to trigger DAG %s: %v", taskDef.DagID, err)
 			log.Printf("Worker %d: Task %s FAILED: %s", workerID, ti.ID, output)

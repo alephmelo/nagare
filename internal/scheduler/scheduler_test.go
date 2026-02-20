@@ -163,7 +163,7 @@ func TestSchedulerTriggerDAG(t *testing.T) {
 		},
 	}
 
-	run, err := sched.TriggerDAG("manual_dag")
+	run, err := sched.TriggerDAG("manual_dag", "manual")
 	if err != nil {
 		t.Fatalf("TriggerDAG failed: %v", err)
 	}

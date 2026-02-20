@@ -278,7 +278,7 @@ func (s *Scheduler) PromotePendingTasks() error {
 }
 
 // TriggerDAG forcefully instantiates a new run of a DAG manually bypassing cron
-func (s *Scheduler) TriggerDAG(dagID string) (*models.DagRun, error) {
+func (s *Scheduler) TriggerDAG(dagID string, triggerType string) (*models.DagRun, error) {
 	s.mu.RLock()
 	dag, exists := s.dags[dagID]
 	s.mu.RUnlock()
@@ -287,7 +287,7 @@ func (s *Scheduler) TriggerDAG(dagID string) (*models.DagRun, error) {
 		return nil, fmt.Errorf("DAG %s not found in memory map", dagID)
 	}
 
-	return s.createRun(dag, "manual")
+	return s.createRun(dag, triggerType)
 }
 
 func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string) (*models.DagRun, error) {

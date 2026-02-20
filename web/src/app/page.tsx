@@ -301,6 +301,7 @@ export default function Dashboard() {
                         { value: 'all', label: 'All Triggers' },
                         { value: 'manual', label: 'Manual' },
                         { value: 'scheduled', label: 'Scheduled' },
+                        { value: 'triggered', label: 'Triggered' },
                       ].map(opt => (
                         <Menu.Item 
                           key={opt.value}
@@ -341,8 +342,10 @@ export default function Dashboard() {
                   <Table.Td>
                     {run.TriggerType === 'manual' ? (
                       <Badge variant="light" color="blue" size="sm" leftSection={<IconUser size={12} style={{ display: 'flex', alignItems: 'center', marginTop: '2px' }}/>}>Manual</Badge>
-                    ) : (
+                    ) : run.TriggerType === 'scheduled' ? (
                       <Badge variant="light" color="teal" size="sm" leftSection={<IconRobot size={12} style={{ display: 'flex', alignItems: 'center', marginTop: '2px' }}/>}>Scheduled</Badge>
+                    ) : (
+                      <Badge variant="light" color="violet" size="sm" leftSection={<IconActivity size={12} style={{ display: 'flex', alignItems: 'center', marginTop: '2px' }}/>}>Triggered</Badge>
                     )}
                   </Table.Td>
                   <Table.Td>

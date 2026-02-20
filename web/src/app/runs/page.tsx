@@ -423,7 +423,7 @@ function RunDetailsContent() {
             </div>
             <div>
               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Trigger</Text>
-              <Text fw={600} size="sm" mt={4}>{run.TriggerType === "manual" ? "Manual" : "Scheduled"}</Text>
+              <Text fw={600} size="sm" mt={4}>{run.TriggerType === "manual" ? "Manual" : run.TriggerType === "scheduled" ? "Scheduled" : "Triggered"}</Text>
             </div>
             <div>
               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Started At</Text>
