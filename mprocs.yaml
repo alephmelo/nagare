@@ -1,6 +1,6 @@
 procs:
   backend:
-    shell: "air"
+    shell: "go run github.com/air-verse/air@v1.52.2"
   frontend:
     shell: "npm run dev"
     cwd: "web"
