@@ -44,11 +44,12 @@ func TestStoreQueries(t *testing.T) {
 	defer store.Close()
 
 	run := DagRun{
-		ID:        "run_1",
-		DAGID:     "my_dag",
-		Status:    RunRunning,
-		ExecDate:  time.Now(),
-		CreatedAt: time.Now(),
+		ID:          "run_1",
+		DAGID:       "my_dag",
+		Status:      RunRunning,
+		ExecDate:    time.Now(),
+		TriggerType: "scheduled",
+		CreatedAt:   time.Now(),
 	}
 
 	if err := store.CreateDagRun(&run); err != nil {
@@ -98,11 +99,12 @@ func TestGetDagRunsPaginationAndFiltering(t *testing.T) {
 	// Insert 5 runs for dag_A
 	for i := 0; i < 5; i++ {
 		run := DagRun{
-			ID:        fmt.Sprintf("run_A_%d", i),
-			DAGID:     "dag_A",
-			Status:    RunSuccess,
-			ExecDate:  time.Now(),
-			CreatedAt: time.Now().Add(time.Duration(-i) * time.Minute), // earlier ones created later to test ordering
+			ID:          fmt.Sprintf("run_A_%d", i),
+			DAGID:       "dag_A",
+			Status:      RunSuccess,
+			ExecDate:    time.Now(),
+			TriggerType: "scheduled",
+			CreatedAt:   time.Now().Add(time.Duration(-i) * time.Minute), // earlier ones created later to test ordering
 		}
 		if err := store.CreateDagRun(&run); err != nil {
 			t.Fatalf("failed to create dag run: %v", err)
@@ -112,11 +114,12 @@ func TestGetDagRunsPaginationAndFiltering(t *testing.T) {
 	// Insert 3 runs for dag_B
 	for i := 0; i < 3; i++ {
 		run := DagRun{
-			ID:        fmt.Sprintf("run_B_%d", i),
-			DAGID:     "dag_B",
-			Status:    RunSuccess,
-			ExecDate:  time.Now(),
-			CreatedAt: time.Now().Add(time.Duration(-i) * time.Minute),
+			ID:          fmt.Sprintf("run_B_%d", i),
+			DAGID:       "dag_B",
+			Status:      RunSuccess,
+			ExecDate:    time.Now(),
+			TriggerType: "scheduled",
+			CreatedAt:   time.Now().Add(time.Duration(-i) * time.Minute),
 		}
 		if err := store.CreateDagRun(&run); err != nil {
 			t.Fatalf("failed to create dag run: %v", err)

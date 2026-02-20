@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton, Select, Pagination, RingProgress, Center, Alert, List } from "@mantine/core";
-import { IconPlayerPlay, IconRefresh, IconCheck, IconX, IconActivity, IconAlertCircle, IconArrowRight } from "@tabler/icons-react";
+import { IconPlayerPlay, IconRefresh, IconCheck, IconX, IconActivity, IconAlertCircle, IconArrowRight, IconRobot, IconUser } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 
 interface Run {
@@ -10,6 +10,7 @@ interface Run {
   DAGID: string;
   Status: string;
   ExecDate: string;
+  TriggerType: string;
   UpdatedAt: string;
   CreatedAt: string;
 }
@@ -43,12 +44,17 @@ export default function Dashboard() {
         fetch("/api/dags/errors")
       ]);
       
-      const runsData = await runsRes.json();
-      setRuns(runsData.data || []);
-      setTotalRuns(runsData.total || 0);
+      if (runsRes.ok) {
+        const runsData = await runsRes.json();
+        setRuns(runsData.data || []);
+        setTotalRuns(runsData.total || 0);
+      } else {
+        setRuns([]);
+        setTotalRuns(0);
+      }
       
-      setDags(await dagsRes.json());
-      setDagErrors(await errorsRes.json() || {});
+      if (dagsRes.ok) setDags(await dagsRes.json());
+      if (errorsRes.ok) setDagErrors(await errorsRes.json() || {});
     } catch (err) {
       console.error("Failed to fetch data", err);
     } finally {
@@ -225,6 +231,7 @@ export default function Dashboard() {
                 <Table.Th>DAG ID</Table.Th>
                 <Table.Th>Status</Table.Th>
                 <Table.Th>Execution Date</Table.Th>
+                <Table.Th>Trigger</Table.Th>
                 <Table.Th>Elapsed Time</Table.Th>
               </Table.Tr>
             </Table.Thead>
@@ -246,6 +253,13 @@ export default function Dashboard() {
                     <Text size="sm">{new Date(run.ExecDate).toLocaleString()}</Text>
                   </Table.Td>
                   <Table.Td>
+                    {run.TriggerType === 'manual' ? (
+                      <Badge variant="light" color="blue" size="sm" leftSection={<IconUser size={12} style={{ display: 'flex', alignItems: 'center', marginTop: '2px' }}/>}>Manual</Badge>
+                    ) : (
+                      <Badge variant="light" color="teal" size="sm" leftSection={<IconRobot size={12} style={{ display: 'flex', alignItems: 'center', marginTop: '2px' }}/>}>Scheduled</Badge>
+                    )}
+                  </Table.Td>
+                  <Table.Td>
                     <Text size="sm" c="dimmed">
                       {run.UpdatedAt && run.CreatedAt 
                         ? `${Math.max(1, Math.floor((new Date(run.UpdatedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
@@ -256,7 +270,7 @@ export default function Dashboard() {
               ))}
               {(!runs || runs.length === 0) && !loading && (
                   <Table.Tr>
-                    <Table.Td colSpan={5} align="center" py="xl">
+                    <Table.Td colSpan={6} align="center" py="xl">
                       <Text c="dimmed">No runs found for this configuration.</Text>
                     </Table.Td>
                   </Table.Tr>

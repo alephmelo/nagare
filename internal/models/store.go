@@ -33,6 +33,7 @@ type DagRun struct {
 	DAGID       string
 	Status      RunStatus
 	ExecDate    time.Time
+	TriggerType string
 	CreatedAt   time.Time
 	CompletedAt *time.Time
 }
@@ -83,6 +84,7 @@ func (s *Store) InitSchema() error {
 		dag_id TEXT NOT NULL,
 		status TEXT NOT NULL,
 		exec_date DATETIME NOT NULL,
+		trigger_type TEXT DEFAULT 'scheduled',
 		created_at DATETIME NOT NULL,
 		completed_at DATETIME
 	);`
@@ -105,13 +107,18 @@ func (s *Store) InitSchema() error {
 	if _, err := s.db.Exec(taskInstancesSchema); err != nil {
 		return err
 	}
+
+	// Active Migrations
+	// Ignore error if column already exists
+	s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN trigger_type TEXT DEFAULT 'scheduled'`)
+
 	return nil
 }
 
 // CreateDagRun inserts a new DagRun into the database
 func (s *Store) CreateDagRun(run *DagRun) error {
-	query := `INSERT INTO dag_runs (id, dag_id, status, exec_date, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, run.ID, run.DAGID, run.Status, run.ExecDate, run.CreatedAt, run.CompletedAt)
+	query := `INSERT INTO dag_runs (id, dag_id, status, exec_date, trigger_type, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, run.ID, run.DAGID, run.Status, run.ExecDate, run.TriggerType, run.CreatedAt, run.CompletedAt)
 	return err
 }
 
@@ -135,10 +142,10 @@ func (s *Store) GetDagRuns(limit int, offset int, dagID string) ([]DagRun, error
 	var err error
 
 	if dagID != "" {
-		query = `SELECT id, dag_id, status, exec_date, created_at FROM dag_runs WHERE dag_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`
+		query = `SELECT id, dag_id, status, exec_date, trigger_type, created_at FROM dag_runs WHERE dag_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`
 		rows, err = s.db.Query(query, dagID, limit, offset)
 	} else {
-		query = `SELECT id, dag_id, status, exec_date, created_at FROM dag_runs ORDER BY created_at DESC LIMIT ? OFFSET ?`
+		query = `SELECT id, dag_id, status, exec_date, trigger_type, created_at FROM dag_runs ORDER BY created_at DESC LIMIT ? OFFSET ?`
 		rows, err = s.db.Query(query, limit, offset)
 	}
 
@@ -150,7 +157,7 @@ func (s *Store) GetDagRuns(limit int, offset int, dagID string) ([]DagRun, error
 	var runs []DagRun
 	for rows.Next() {
 		var r DagRun
-		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		runs = append(runs, r)
@@ -178,7 +185,7 @@ func (s *Store) GetDagRunsCount(dagID string) (int, error) {
 
 // GetActiveDagRuns retrieves all DAG runs currently markes as 'running'
 func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
-	query := `SELECT id, dag_id, status, exec_date, created_at FROM dag_runs WHERE status = ?`
+	query := `SELECT id, dag_id, status, exec_date, trigger_type, created_at FROM dag_runs WHERE status = ?`
 	rows, err := s.db.Query(query, RunRunning)
 	if err != nil {
 		return nil, err
@@ -188,7 +195,7 @@ func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
 	var runs []DagRun
 	for rows.Next() {
 		var r DagRun
-		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		runs = append(runs, r)
@@ -258,11 +265,11 @@ func (s *Store) GetQueuedTasks() ([]TaskInstance, error) {
 
 // GetDagRun retrieves a DagRun by ID
 func (s *Store) GetDagRun(runID string) (*DagRun, error) {
-	query := `SELECT id, dag_id, status, exec_date, created_at FROM dag_runs WHERE id = ?`
+	query := `SELECT id, dag_id, status, exec_date, trigger_type, created_at FROM dag_runs WHERE id = ?`
 	row := s.db.QueryRow(query, runID)
 
 	var r DagRun
-	if err := row.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.CreatedAt); err != nil {
+	if err := row.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &r, nil

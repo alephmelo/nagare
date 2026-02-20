@@ -189,11 +189,12 @@ func TestSchedulerRetryTask(t *testing.T) {
 
 	// Seed a failed run
 	run := &models.DagRun{
-		ID:        runID,
-		DAGID:     "some_dag",
-		Status:    models.RunFailed,
-		ExecDate:  now,
-		CreatedAt: now,
+		ID:          runID,
+		DAGID:       "some_dag",
+		Status:      models.RunFailed,
+		ExecDate:    now,
+		TriggerType: "scheduled",
+		CreatedAt:   now,
 	}
 	store.CreateDagRun(run)
 

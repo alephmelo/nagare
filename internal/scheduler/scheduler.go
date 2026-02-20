@@ -134,7 +134,7 @@ func (s *Scheduler) Tick() error {
 		if now.After(nextRunTime) || now.Equal(nextRunTime) {
 			log.Printf("Cron Triggering DAG %s", dag.ID)
 
-			_, err := s.createRun(dag)
+			_, err := s.createRun(dag, "scheduled")
 			if err != nil {
 				log.Printf("Cron failed to trigger %s: %v", dag.ID, err)
 				continue
@@ -257,17 +257,18 @@ func (s *Scheduler) TriggerDAG(dagID string) (*models.DagRun, error) {
 		return nil, fmt.Errorf("DAG %s not found in memory map", dagID)
 	}
 
-	return s.createRun(dag)
+	return s.createRun(dag, "manual")
 }
 
-func (s *Scheduler) createRun(dag *models.DAGDef) (*models.DagRun, error) {
+func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string) (*models.DagRun, error) {
 	now := time.Now()
 	run := &models.DagRun{
-		ID:        fmt.Sprintf("%s_%d", dag.ID, now.UnixNano()),
-		DAGID:     dag.ID,
-		Status:    models.RunRunning,
-		ExecDate:  now,
-		CreatedAt: now,
+		ID:          fmt.Sprintf("%s_%d", dag.ID, now.UnixNano()),
+		DAGID:       dag.ID,
+		Status:      models.RunRunning,
+		ExecDate:    now,
+		TriggerType: triggerType,
+		CreatedAt:   now,
 	}
 
 	if err := s.store.CreateDagRun(run); err != nil {

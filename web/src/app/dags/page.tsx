@@ -15,11 +15,12 @@ import {
   Pagination,
   Alert
 } from "@mantine/core";
-import { IconArrowLeft, IconAlertCircle, IconPlayerPlay } from "@tabler/icons-react";
+import { IconArrowLeft, IconAlertCircle, IconPlayerPlay, IconRobot, IconUser } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { ReactFlow, Controls, Background, useNodesState, useEdgesState, Position, MarkerType, Node, Edge } from "@xyflow/react";
 import '@xyflow/react/dist/style.css';
 import dagre from "dagre";
+import { notifications } from '@mantine/notifications';
 
 // Types
 interface TaskDef {
@@ -41,6 +42,7 @@ interface Run {
   DAGID: string;
   Status: string;
   ExecDate: string;
+  TriggerType: string;
   UpdatedAt: string;
   CreatedAt: string;
 }
@@ -192,9 +194,14 @@ export default function DagDetails() {
     const fetchRuns = async () => {
       try {
         const runsRes = await fetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${id}`);
-        const runsData = await runsRes.json();
-        setRuns(runsData.data || []);
-        setTotalRuns(runsData.total || 0);
+        if (runsRes.ok) {
+          const runsData = await runsRes.json();
+          setRuns(runsData.data || []);
+          setTotalRuns(runsData.total || 0);
+        } else {
+          setRuns([]);
+          setTotalRuns(0);
+        }
       } catch(err) {
         console.error("Failed to query runs", err);
       }
@@ -213,11 +220,25 @@ export default function DagDetails() {
       const res = await fetch(`/api/dags/${id}/runs`, { method: "POST" });
       if (res.ok) {
         setPage(1); // Reset to first page so they see it
+        notifications.show({
+          title: 'Pipeline Triggered',
+          message: `Successfully enqueued a fresh manual run for ${id}`,
+          color: 'green',
+        });
       } else {
-        alert("Failed to manual trigger DAG");
+        notifications.show({
+          title: 'Trigger Failed',
+          message: `Failed to enqueue manual run for ${id}.`,
+          color: 'red',
+        });
       }
     } catch (err) {
       console.error(err);
+      notifications.show({
+        title: 'Network Error',
+        message: 'Could not communicate with the API.',
+        color: 'red',
+      });
     } finally {
       setTriggering(false);
     }
@@ -307,6 +328,7 @@ export default function DagDetails() {
                       <Table.Th>Run ID</Table.Th>
                       <Table.Th>Status</Table.Th>
                       <Table.Th>Execution Date</Table.Th>
+                      <Table.Th>Trigger</Table.Th>
                       <Table.Th>Elapsed Time</Table.Th>
                     </Table.Tr>
                   </Table.Thead>
@@ -325,6 +347,13 @@ export default function DagDetails() {
                           <Text size="sm">{new Date(run.ExecDate).toLocaleString()}</Text>
                         </Table.Td>
                         <Table.Td>
+                          {run.TriggerType === 'manual' ? (
+                            <Badge variant="light" color="blue" size="sm" leftSection={<IconUser size={12} style={{ display: 'flex', alignItems: 'center', marginTop: '2px' }}/>}>Manual</Badge>
+                          ) : (
+                            <Badge variant="light" color="teal" size="sm" leftSection={<IconRobot size={12} style={{ display: 'flex', alignItems: 'center', marginTop: '2px' }}/>}>Scheduled</Badge>
+                          )}
+                        </Table.Td>
+                        <Table.Td>
                           <Text size="sm" c="dimmed">
                             {run.UpdatedAt && run.CreatedAt 
                               ? `${Math.max(1, Math.floor((new Date(run.UpdatedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
@@ -335,7 +364,7 @@ export default function DagDetails() {
                     ))}
                     {(!runs || runs.length === 0) && (
                         <Table.Tr>
-                          <Table.Td colSpan={5} align="center" py="xl">
+                          <Table.Td colSpan={6} align="center" py="xl">
                             <Text c="dimmed">No past runs found for this DAG.</Text>
                           </Table.Td>
                         </Table.Tr>

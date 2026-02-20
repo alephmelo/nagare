@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { Title, Card, Code, Table, Badge, Button, Group, Text, Loader, Center, ActionIcon } from "@mantine/core";
 import { IconArrowLeft, IconRefresh, IconPlayerPlay } from "@tabler/icons-react";
 import { useCallback } from "react";
+import { notifications } from '@mantine/notifications';
 
 interface RunTask {
   ID: string;
@@ -47,12 +48,25 @@ function RunDetailsContent() {
       const res = await fetch(`/api/runs/${id}/tasks/${taskID}/retry`, { method: "POST" });
       if (res.ok) {
         fetchTasks();
+        notifications.show({
+          title: 'Task Requeued',
+          message: `Successfully sent task ${taskID} back to pending state.`,
+          color: 'green',
+        });
       } else {
-        alert("Failed to queue task for retry");
+        notifications.show({
+          title: 'Retry Failed',
+          message: `Failed to queue task ${taskID} for retry.`,
+          color: 'red',
+        });
       }
     } catch (err) {
       console.error(err);
-      alert("Error queueing task retry");
+      notifications.show({
+        title: 'Network Error',
+        message: 'Could not communicate with the API.',
+        color: 'red',
+      });
     }
   };
 

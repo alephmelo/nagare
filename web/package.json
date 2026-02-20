@@ -11,6 +11,7 @@
   "dependencies": {
     "@mantine/core": "^8.3.15",
     "@mantine/hooks": "^8.3.15",
+    "@mantine/notifications": "^8.3.15",
     "@tabler/icons-react": "^3.37.1",
     "@xyflow/react": "^12.10.1",
     "clsx": "^2.1.1",
