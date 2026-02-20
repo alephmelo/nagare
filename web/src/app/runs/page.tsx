@@ -165,7 +165,7 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
         ) : hasMultipleAttempts && attempts.length > 0 ? (
           <Tabs
             defaultValue={String(attempts[attempts.length - 1].Attempt)}
-            style={{ backgroundColor: "var(--mantine-color-dark-8, #0b0f19)" }}
+            style={{ backgroundColor: "var(--log-bg)" }}
           >
             <Tabs.List px="md" pt="xs">
               {attempts.map((a) => (
