@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Title,
@@ -266,18 +266,19 @@ export default function DagDetails() {
     <>
       <Group justify="space-between" mb="xs">
         <Group>
-          <Button variant="subtle" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/')} color="gray">
+          <Button variant="subtle" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/')} color="gray" radius="md">
             Back
           </Button>
           <Title order={2}>{id}</Title>
-          {dag && <Badge variant="light" color="cyan" size="lg">{dag.Schedule}</Badge>}
+          {dag && <Badge variant="light" color="indigo" size="xl" radius="md">{dag.Schedule}</Badge>}
         </Group>
         {dag && (
           <Button 
             leftSection={<IconPlayerPlay size={16} />} 
-            color="blue" 
+            color="indigo" 
             onClick={handleTrigger}
             loading={triggering}
+            radius="md"
           >
             Trigger Pipeline
           </Button>
@@ -304,7 +305,7 @@ export default function DagDetails() {
           </Tabs.List>
 
           <Tabs.Panel value="graph" pt="xl">
-            <Card shadow="sm" radius="md" withBorder style={{ height: '60vh', minHeight: '500px' }} p="0">
+            <Card shadow="sm" radius="lg" withBorder style={{ height: '60vh', minHeight: '500px', backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }} p="0">
                 <ReactFlow
                   nodes={nodes}
                   edges={edges}
@@ -320,23 +321,23 @@ export default function DagDetails() {
           </Tabs.Panel>
 
           <Tabs.Panel value="table" pt="xl">
-             <Card shadow="sm" radius="md" withBorder padding="0" style={{ overflow: "hidden" }}>
+             <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ overflow: "hidden", backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
               <Table.ScrollContainer minWidth={800}>
-                <Table verticalSpacing="sm" striped highlightOnHover>
+                <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
                   <Table.Thead>
                     <Table.Tr>
-                      <Table.Th>Run ID</Table.Th>
-                      <Table.Th>Status</Table.Th>
-                      <Table.Th>Execution Date</Table.Th>
-                      <Table.Th>Trigger</Table.Th>
-                      <Table.Th>Elapsed Time</Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Run ID</Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Status</Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Execution Date</Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Trigger</Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Elapsed Time</Table.Th>
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
                     {runs?.map((run) => (
                       <Table.Tr key={run.ID} onClick={() => router.push(`/runs/?id=${run.ID}`)} style={{ cursor: "pointer" }}>
                         <Table.Td>
-                          <Text size="sm" fw={500} c="cyan">{run.ID}</Text>
+                          <Text size="sm" fw={600} c="indigo">{run.ID}</Text>
                         </Table.Td>
                         <Table.Td>
                           <Badge color={getStatusColor(run.Status)} variant="light" size="sm">
@@ -380,7 +381,7 @@ export default function DagDetails() {
                     total={Math.ceil(totalRuns / limit)}
                     value={page}
                     onChange={setPage}
-                    color="cyan"
+                    color="indigo"
                     withEdges
                   />
                 </Group>

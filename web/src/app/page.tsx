@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton, Select, Pagination, RingProgress, Center, Alert, List } from "@mantine/core";
-import { IconPlayerPlay, IconRefresh, IconCheck, IconX, IconActivity, IconAlertCircle, IconArrowRight, IconRobot, IconUser } from "@tabler/icons-react";
+import { IconRefresh, IconCheck, IconX, IconActivity, IconAlertCircle, IconArrowRight, IconRobot, IconUser } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 
 interface Run {
@@ -119,27 +119,31 @@ export default function Dashboard() {
       ) : (
         <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} mb="xl">
           {dags?.map(dag => (
-            <Card key={dag.ID} shadow="sm" radius="md" padding="lg" withBorder>
-              <Group justify="space-between" mt="0" mb="xs">
-                <Text fw={600} size="lg">{dag.ID}</Text>
-                <Badge variant="light" color="cyan">{dag.Schedule}</Badge>
+            <Card key={dag.ID} shadow="sm" radius="lg" padding="xl" withBorder style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)' }}>
+              <Group justify="space-between" mt="0" mb="sm">
+                <Text fw={700} size="xl">{dag.ID}</Text>
+                <Badge variant="light" color="indigo" size="lg">{dag.Schedule}</Badge>
               </Group>
-              <Text size="sm" c="dimmed" mb="md" style={{ minHeight: '40px' }}>
+              <Text size="sm" c="dimmed" mb="xl" style={{ minHeight: '40px', lineHeight: 1.6 }}>
                 {dag.Description}
               </Text>
-              <Button 
-                variant="light" 
-                color="blue" 
-                fullWidth 
-                mt="md" 
-                radius="md" 
-                leftSection={<IconArrowRight size={16} />}
-                onClick={() => {
-                   router.push(`/dags?id=${dag.ID}`);
-                }}
-              >
-                View Details
-              </Button>
+              <Card.Section inheritPadding py="md" style={{ borderTop: '1px solid var(--border-color)', backgroundColor: 'rgba(0,0,0,0.1)' }}>
+                <Button 
+                  variant="light" 
+                  color="indigo" 
+                  fullWidth 
+                  radius="md" 
+                  leftSection={<IconArrowRight size={16} />}
+                  onClick={() => {
+                     router.push(`/dags?id=${dag.ID}`);
+                  }}
+                  style={{ transition: 'transform 0.2s ease' }}
+                  onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
+                  onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+                >
+                  View Details
+                </Button>
+              </Card.Section>
             </Card>
           ))}
           {(!dags || dags.length === 0) && (
@@ -169,7 +173,7 @@ export default function Dashboard() {
 
       {/* Metrics Cards */}
       <SimpleGrid cols={{ base: 1, sm: 3 }} mb="xl">
-        <Card shadow="sm" radius="md" withBorder padding="md">
+        <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
            <Group>
              <RingProgress
                 size={80}
@@ -185,7 +189,7 @@ export default function Dashboard() {
            </Group>
         </Card>
         
-        <Card shadow="sm" radius="md" withBorder padding="md">
+        <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
            <Group>
              <RingProgress
                 size={80}
@@ -203,7 +207,7 @@ export default function Dashboard() {
            </Group>
         </Card>
 
-        <Card shadow="sm" radius="md" withBorder padding="md">
+        <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
            <Group>
              <RingProgress
                 size={80}
@@ -222,24 +226,24 @@ export default function Dashboard() {
         </Card>
       </SimpleGrid>
 
-      <Card shadow="sm" radius="md" withBorder padding="0" style={{ overflow: "hidden" }}>
+      <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
         <Table.ScrollContainer minWidth={800}>
-          <Table verticalSpacing="sm" striped highlightOnHover>
+          <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
             <Table.Thead>
               <Table.Tr>
-                <Table.Th>Run ID</Table.Th>
-                <Table.Th>DAG ID</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Execution Date</Table.Th>
-                <Table.Th>Trigger</Table.Th>
-                <Table.Th>Elapsed Time</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Run ID</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>DAG ID</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Status</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Execution Date</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Trigger</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Elapsed Time</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
               {runs?.map((run) => (
                 <Table.Tr key={run.ID} onClick={() => router.push(`/runs/?id=${run.ID}`)} style={{ cursor: "pointer" }}>
                   <Table.Td>
-                    <Text size="sm" fw={500} c="cyan">{run.ID}</Text>
+                    <Text size="sm" fw={600} c="indigo">{run.ID}</Text>
                   </Table.Td>
                   <Table.Td>
                     <Badge variant="outline" color="gray">{run.DAGID}</Badge>

@@ -88,27 +88,27 @@ function RunDetailsContent() {
     <>
       <Group justify="space-between" mb="xl">
         <Group>
-          <Button variant="subtle" color="gray" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push("/")}>
+          <Button variant="subtle" color="gray" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push("/")} radius="md">
             Back
           </Button>
           <Title order={3}>Run Details</Title>
-          <Badge size="lg" variant="outline" color="cyan" radius="sm">{id}</Badge>
+          <Badge size="lg" variant="outline" color="indigo" radius="md">{id}</Badge>
         </Group>
-        <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={fetchTasks} loading={loading}>
-          Refresh
+        <Button variant="light" color="indigo" leftSection={<IconRefresh size={16} />} onClick={fetchTasks} loading={loading} radius="md">
+           Refresh
         </Button>
       </Group>
 
-      <Card shadow="sm" radius="md" withBorder padding="0" style={{ overflow: 'hidden' }}>
+      <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ overflow: 'hidden', backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
         <Table.ScrollContainer minWidth={800}>
-          <Table striped highlightOnHover verticalSpacing="sm">
+          <Table striped highlightOnHover verticalSpacing="md" horizontalSpacing="md">
             <Table.Thead>
               <Table.Tr>
-                <Table.Th>Task ID</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Output Log</Table.Th>
-                <Table.Th>Updated At</Table.Th>
-                <Table.Th>Action</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Task ID</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Status</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Output Log</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Updated At</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Action</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
@@ -121,7 +121,7 @@ function RunDetailsContent() {
                     </Badge>
                   </Table.Td>
                   <Table.Td style={{ maxWidth: '400px' }}>
-                    <Code block style={{ whiteSpace: 'pre-wrap', maxHeight: '200px', overflowY: 'auto', backgroundColor: 'var(--mantine-color-dark-8)' }}>
+                    <Code block style={{ whiteSpace: 'pre-wrap', maxHeight: '200px', overflowY: 'auto', backgroundColor: 'rgba(0,0,0,0.3)', border: '1px solid var(--border-color)', color: '#d1d5db' }}>
                       {task.Output || "No output generated yet."}
                     </Code>
                   </Table.Td>

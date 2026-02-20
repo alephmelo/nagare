@@ -16,8 +16,38 @@ export const metadata: Metadata = {
 };
 
 const theme = createTheme({
-  primaryColor: 'cyan',
+  primaryColor: 'indigo',
   fontFamily: inter.style.fontFamily,
+  defaultRadius: 'lg',
+  headings: {
+    fontFamily: inter.style.fontFamily,
+    fontWeight: '700',
+    sizes: {
+      h1: { fontSize: '2.5rem' },
+      h2: { fontSize: '2rem' },
+      h3: { fontSize: '1.5rem' },
+    },
+  },
+  components: {
+    Card: {
+      defaultProps: {
+        radius: 'lg',
+        shadow: 'sm',
+      },
+    },
+    Button: {
+      defaultProps: {
+        radius: 'md',
+        size: 'sm',
+      },
+    },
+    Table: {
+      defaultProps: {
+        striped: true,
+        highlightOnHover: true,
+      }
+    }
+  }
 });
 
 export default function RootLayout({
