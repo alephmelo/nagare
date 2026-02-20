@@ -20,6 +20,7 @@ import {
   ThemeIcon,
   Tooltip,
   Box,
+  Tabs,
 } from "@mantine/core";
 import {
   IconArrowLeft,
@@ -156,14 +157,65 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
         </Group>
       </Group>
 
-      {/* Expandable Log Output */}
+      {/* Expandable Log Output — tabs per attempt when retried */}
       <Collapse in={expanded}>
         <Divider />
-        {hasOutput && (
+        {loadingAttempts ? (
+          <Box p="md"><Loader size="xs" /></Box>
+        ) : hasMultipleAttempts && attempts.length > 0 ? (
+          <Tabs
+            defaultValue={String(attempts[attempts.length - 1].Attempt)}
+            style={{ backgroundColor: "var(--mantine-color-dark-8, #0b0f19)" }}
+          >
+            <Tabs.List px="md" pt="xs">
+              {attempts.map((a) => (
+                <Tabs.Tab
+                  key={a.Attempt}
+                  value={String(a.Attempt)}
+                  leftSection={<StatusIcon status={a.Status} />}
+                  rightSection={
+                    <Badge
+                      size="xs"
+                      color={getStatusColor(a.Status)}
+                      variant="light"
+                      radius="sm"
+                    >
+                      {a.Status.toUpperCase()}
+                    </Badge>
+                  }
+                >
+                  <Text size="xs" fw={600}>Attempt #{a.Attempt}</Text>
+                </Tabs.Tab>
+              ))}
+            </Tabs.List>
+            {attempts.map((a) => (
+              <Tabs.Panel key={a.Attempt} value={String(a.Attempt)} p="md">
+                <Text size="xs" c="dimmed" mb="xs">
+                  {new Date(a.UpdatedAt).toLocaleString()}
+                </Text>
+                <Code
+                  block
+                  style={{
+                    whiteSpace: "pre-wrap",
+                    maxHeight: "280px",
+                    overflowY: "auto",
+                    fontSize: "12px",
+                    lineHeight: 1.7,
+                    backgroundColor: "transparent",
+                    border: "none",
+                    color: a.Status === "failed" ? "var(--mantine-color-red-4)" : "var(--mantine-color-green-4)",
+                  }}
+                >
+                  {a.Output || "No output for this attempt."}
+                </Code>
+              </Tabs.Panel>
+            ))}
+          </Tabs>
+        ) : (
           <Box p="md" style={{ backgroundColor: "var(--mantine-color-dark-8, #0b0f19)" }}>
             <Group gap="xs" mb="xs">
               <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-              <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Current Output (Attempt #{task.Attempt})</Text>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Output Log</Text>
             </Group>
             <Code
               block
@@ -178,52 +230,9 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
                 color: task.Status === "failed" ? "var(--mantine-color-red-4)" : "var(--mantine-color-green-4)",
               }}
             >
-              {task.Output}
+              {task.Output || "No output generated yet."}
             </Code>
           </Box>
-        )}
-
-        {/* Attempt History */}
-        {hasMultipleAttempts && (
-          <>
-            <Divider label={<Text size="xs" c="dimmed" tt="uppercase" fw={700}>Attempt History</Text>} labelPosition="left" mx="md" />
-            {loadingAttempts ? (
-              <Box p="md"><Loader size="xs" /></Box>
-            ) : (
-              <Stack gap={0}>
-                {attempts.slice(0, -1).map((a) => (
-                  <Box key={a.ID} px="md" py="sm" style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}>
-                    <Group justify="space-between" mb="xs">
-                      <Group gap="xs">
-                        <StatusIcon status={a.Status} />
-                        <Text size="xs" fw={600}>Attempt #{a.Attempt}</Text>
-                        <Text size="xs" c="dimmed">{new Date(a.UpdatedAt).toLocaleString()}</Text>
-                      </Group>
-                      <Badge color={getStatusColor(a.Status)} variant="outline" radius="sm" size="xs">
-                        {a.Status.toUpperCase()}
-                      </Badge>
-                    </Group>
-                    {a.Output && (
-                      <Code
-                        block
-                        style={{
-                          whiteSpace: "pre-wrap",
-                          maxHeight: "150px",
-                          overflowY: "auto",
-                          fontSize: "11px",
-                          lineHeight: 1.6,
-                          backgroundColor: "var(--mantine-color-dark-8, #0b0f19)",
-                          color: a.Status === "failed" ? "var(--mantine-color-red-4)" : "var(--mantine-color-green-4)",
-                        }}
-                      >
-                        {a.Output}
-                      </Code>
-                    )}
-                  </Box>
-                ))}
-              </Stack>
-            )}
-          </>
         )}
       </Collapse>
     </Card>
