@@ -142,10 +142,10 @@ func (s *Store) GetDagRuns(limit int, offset int, dagID string) ([]DagRun, error
 	var err error
 
 	if dagID != "" {
-		query = `SELECT id, dag_id, status, exec_date, trigger_type, created_at FROM dag_runs WHERE dag_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`
+		query = `SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs WHERE dag_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`
 		rows, err = s.db.Query(query, dagID, limit, offset)
 	} else {
-		query = `SELECT id, dag_id, status, exec_date, trigger_type, created_at FROM dag_runs ORDER BY created_at DESC LIMIT ? OFFSET ?`
+		query = `SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs ORDER BY created_at DESC LIMIT ? OFFSET ?`
 		rows, err = s.db.Query(query, limit, offset)
 	}
 
@@ -157,7 +157,7 @@ func (s *Store) GetDagRuns(limit int, offset int, dagID string) ([]DagRun, error
 	var runs []DagRun
 	for rows.Next() {
 		var r DagRun
-		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
 		runs = append(runs, r)
@@ -185,7 +185,7 @@ func (s *Store) GetDagRunsCount(dagID string) (int, error) {
 
 // GetActiveDagRuns retrieves all DAG runs currently markes as 'running'
 func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
-	query := `SELECT id, dag_id, status, exec_date, trigger_type, created_at FROM dag_runs WHERE status = ?`
+	query := `SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs WHERE status = ?`
 	rows, err := s.db.Query(query, RunRunning)
 	if err != nil {
 		return nil, err
@@ -195,7 +195,7 @@ func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
 	var runs []DagRun
 	for rows.Next() {
 		var r DagRun
-		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
 		runs = append(runs, r)
@@ -265,11 +265,11 @@ func (s *Store) GetQueuedTasks() ([]TaskInstance, error) {
 
 // GetDagRun retrieves a DagRun by ID
 func (s *Store) GetDagRun(runID string) (*DagRun, error) {
-	query := `SELECT id, dag_id, status, exec_date, trigger_type, created_at FROM dag_runs WHERE id = ?`
+	query := `SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs WHERE id = ?`
 	row := s.db.QueryRow(query, runID)
 
 	var r DagRun
-	if err := row.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt); err != nil {
+	if err := row.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt, &r.CompletedAt); err != nil {
 		return nil, err
 	}
 	return &r, nil

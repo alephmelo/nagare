@@ -43,8 +43,8 @@ interface Run {
   Status: string;
   ExecDate: string;
   TriggerType: string;
-  UpdatedAt: string;
   CreatedAt: string;
+  CompletedAt?: string;
 }
 
 // Dagre Layout config
@@ -355,9 +355,11 @@ export default function DagDetails() {
                         </Table.Td>
                         <Table.Td>
                           <Text size="sm" c="dimmed">
-                            {run.UpdatedAt && run.CreatedAt 
-                              ? `${Math.max(1, Math.floor((new Date(run.UpdatedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
-                              : "-"}
+                            {run.CompletedAt 
+                              ? `${Math.max(1, Math.floor((new Date(run.CompletedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
+                              : run.Status === 'running'
+                                ? `${Math.max(1, Math.floor((new Date().getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
+                                : "-"}
                           </Text>
                         </Table.Td>
                       </Table.Tr>
