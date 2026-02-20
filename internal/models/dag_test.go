@@ -57,3 +57,112 @@ id: test_dag
 		t.Fatal("expected error on invalid YAML, got nil")
 	}
 }
+
+func TestValidate_ValidDAG(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "valid_dag",
+		Schedule: "*/5 * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Type: "command", Command: "echo 1"},
+			{ID: "t2", Type: "command", Command: "echo 2", DependsOn: []string{"t1"}},
+		},
+	}
+	if err := dag.Validate(); err != nil {
+		t.Errorf("expected valid DAG to have no errors, got: %v", err)
+	}
+}
+
+func TestValidate_EmptyDAG(t *testing.T) {
+	dag := &DAGDef{ID: ""}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for empty DAG ID")
+	}
+
+	dag = &DAGDef{ID: "no_tasks", Schedule: "* * * * *"}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for DAG with no tasks")
+	}
+}
+
+func TestValidate_InvalidCron(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "invalid_cron",
+		Schedule: "invalid cron string",
+		Tasks: []TaskDef{
+			{ID: "t1", Type: "command", Command: "echo 1"},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for invalid cron schedule")
+	}
+}
+
+func TestValidate_DuplicateTaskID(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "dup_tasks",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Type: "command", Command: "echo 1"},
+			{ID: "t1", Type: "command", Command: "echo 2"},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for duplicated task ID 't1'")
+	}
+}
+
+func TestValidate_MissingDependency(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "missing_dep",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Type: "command", Command: "echo 1"},
+			{ID: "t2", Type: "command", Command: "echo 2", DependsOn: []string{"t3"}},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for missing dependency 't3'")
+	}
+}
+
+func TestValidate_SelfReference(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "self_ref",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Type: "command", Command: "echo 1", DependsOn: []string{"t1"}},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for self-referencing dependency 't1'")
+	}
+}
+
+func TestValidate_CircularDependency(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "circular_dep",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Type: "command", Command: "echo 1", DependsOn: []string{"t2"}},
+			{ID: "t2", Type: "command", Command: "echo 2", DependsOn: []string{"t1"}},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for circular dependency between 't1' and 't2'")
+	}
+}
+
+func TestValidate_ComplexCircularDependency(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "complex_circular",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Type: "command", Command: "echo 1", DependsOn: []string{"t3"}},
+			{ID: "t2", Type: "command", Command: "echo 2", DependsOn: []string{"t1"}},
+			{ID: "t3", Type: "command", Command: "echo 3", DependsOn: []string{"t2"}},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for complex circular dependency (t1 -> t3 -> t2 -> t1)")
+	}
+}

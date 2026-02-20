@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton, Select, Pagination, RingProgress, Center } from "@mantine/core";
-import { IconPlayerPlay, IconRefresh, IconCheck, IconX, IconActivity } from "@tabler/icons-react";
+import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton, Select, Pagination, RingProgress, Center, Alert, List, Code } from "@mantine/core";
+import { IconPlayerPlay, IconRefresh, IconCheck, IconX, IconActivity, IconAlertCircle } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 
 interface Run {
@@ -23,6 +23,7 @@ interface Dag {
 export default function Dashboard() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [dags, setDags] = useState<Dag[]>([]);
+  const [dagErrors, setDagErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   
   // Pagination & Filtering state
@@ -36,9 +37,10 @@ export default function Dashboard() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [runsRes, dagsRes] = await Promise.all([
+      const [runsRes, dagsRes, errorsRes] = await Promise.all([
         fetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}`),
-        fetch("/api/dags")
+        fetch("/api/dags"),
+        fetch("/api/dags/errors")
       ]);
       
       const runsData = await runsRes.json();
@@ -46,6 +48,7 @@ export default function Dashboard() {
       setTotalRuns(runsData.total || 0);
       
       setDags(await dagsRes.json());
+      setDagErrors(await errorsRes.json() || {});
     } catch (err) {
       console.error("Failed to fetch data", err);
     } finally {
@@ -77,6 +80,28 @@ export default function Dashboard() {
           Refresh
         </Button>
       </Group>
+
+      {Object.keys(dagErrors).length > 0 && (
+        <Alert 
+          variant="light" 
+          color="red" 
+          title="DAG Validation Errors" 
+          icon={<IconAlertCircle />} 
+          mb="xl"
+          p="md"
+        >
+          <Text size="sm" mb="xs">
+            The following DAG configurations have problems and were safely skipped by the scheduler:
+          </Text>
+          <List size="sm" spacing="xs">
+            {Object.entries(dagErrors).map(([file, err]) => (
+              <List.Item key={file}>
+                <strong>{file}</strong>: <Text span c="dimmed" fs="italic">{err}</Text>
+              </List.Item>
+            ))}
+          </List>
+        </Alert>
+      )}
 
       <Title order={4} mb="md" c="dimmed">Loaded Workflows</Title>
       {loading && dags.length === 0 ? (

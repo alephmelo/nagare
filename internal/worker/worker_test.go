@@ -20,7 +20,12 @@ func TestWorkerPoolExecution(t *testing.T) {
 		},
 	}
 
-	pool := NewPool(store, dags, 1)
+	getDAG := func(id string) (*models.DAGDef, bool) {
+		d, ok := dags[id]
+		return d, ok
+	}
+
+	pool := NewPool(store, getDAG, 1)
 
 	// Inject a run and task instance directly
 	_ = store.CreateDagRun(&models.DagRun{

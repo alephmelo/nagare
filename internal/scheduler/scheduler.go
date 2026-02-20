@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/alephmelo/nagare/internal/models"
@@ -13,23 +14,35 @@ import (
 
 // Scheduler manages the ingestion of DAGs and the scheduling of runs
 type Scheduler struct {
-	store    *models.Store
-	dags     map[string]*models.DAGDef
-	lastExec map[string]time.Time
+	store     *models.Store
+	mu        sync.RWMutex
+	dags      map[string]*models.DAGDef
+	lastExec  map[string]time.Time
+	dagErrors map[string]string
 }
 
 // NewScheduler creates a new scheduler instance
 func NewScheduler(store *models.Store) *Scheduler {
 	return &Scheduler{
-		store:    store,
-		dags:     make(map[string]*models.DAGDef),
-		lastExec: make(map[string]time.Time),
+		store:     store,
+		dags:      make(map[string]*models.DAGDef),
+		lastExec:  make(map[string]time.Time),
+		dagErrors: make(map[string]string),
 	}
 }
 
 // GetDAGs returns the loaded DAG definitions
 func (s *Scheduler) GetDAGs() map[string]*models.DAGDef {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.dags
+}
+
+// GetDAGErrors returns the map of file paths to validation errors
+func (s *Scheduler) GetDAGErrors() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dagErrors
 }
 
 // LoadDAGs parses YAML files from a directory and loads them into memory
@@ -41,27 +54,60 @@ func (s *Scheduler) LoadDAGs(dirPath string) error {
 		return err
 	}
 
+	// Reset dag errors on each load to clear resolved issues
+	newErrors := make(map[string]string)
+	newDags := make(map[string]*models.DAGDef)
+
 	for _, entry := range entries {
 		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".yaml" {
 			filePath := filepath.Join(dirPath, entry.Name())
 			content, err := os.ReadFile(filePath)
 			if err != nil {
-				log.Printf("Failed to read %s: %v", filePath, err)
+				errMsg := fmt.Sprintf("Failed to read: %v", err)
+				log.Printf("%s: %s", filePath, errMsg)
+				newErrors[entry.Name()] = errMsg
 				continue
 			}
 
 			dag, err := models.ParseDAG(content)
 			if err != nil {
-				log.Printf("Failed to parse %s as DAG: %v", filePath, err)
+				errMsg := fmt.Sprintf("Failed to parse YAML: %v", err)
+				log.Printf("%s: %s", filePath, errMsg)
+				newErrors[entry.Name()] = errMsg
 				continue
 			}
 
-			s.dags[dag.ID] = dag
-			// Initialize lastExec to 1 minute ago so it triggers immediately on boot for testing
-			if _, exists := s.lastExec[dag.ID]; !exists {
-				s.lastExec[dag.ID] = time.Now().Add(-1 * time.Minute)
+			if err := dag.Validate(); err != nil {
+				errMsg := fmt.Sprintf("Validation failed: %v", err)
+				log.Printf("%s: %s", filePath, errMsg)
+				newErrors[entry.Name()] = errMsg
+				continue
 			}
+
+			// Check for duplicate DAG IDs across different files
+			if _, exists := newDags[dag.ID]; exists {
+				errMsg := fmt.Sprintf("Conflict: DAG ID '%s' is already defined by another loaded file.", dag.ID)
+				log.Printf("%s: %s", filePath, errMsg)
+				newErrors[entry.Name()] = errMsg
+				continue
+			}
+
+			newDags[dag.ID] = dag
 			log.Printf("Loaded DAG: %s", dag.ID)
+		}
+	}
+
+	// Safely swap the maps
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.dags = newDags
+	s.dagErrors = newErrors
+
+	// Initialize lastExec for new DAGs to 1 minute ago so they trigger immediately on boot for testing
+	for id := range s.dags {
+		if _, exists := s.lastExec[id]; !exists {
+			s.lastExec[id] = time.Now().Add(-1 * time.Minute)
 		}
 	}
 
@@ -73,6 +119,7 @@ func (s *Scheduler) Tick() error {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	now := time.Now()
 
+	s.mu.Lock()
 	for _, dag := range s.dags {
 		sched, err := parser.Parse(dag.Schedule)
 		if err != nil {
@@ -122,6 +169,7 @@ func (s *Scheduler) Tick() error {
 			s.lastExec[dag.ID] = now
 		}
 	}
+	s.mu.Unlock()
 
 	// Now promote any pending tasks whose dependencies are met
 	if err := s.PromotePendingTasks(); err != nil {
@@ -183,9 +231,12 @@ func (s *Scheduler) PromotePendingTasks() error {
 			continue
 		}
 
+		s.mu.RLock()
 		dag, ok := s.dags[run.DAGID]
 		if !ok {
-			log.Printf("DAG %s not found in memory", run.DAGID)
+			s.mu.RUnlock()
+			log.Printf("DAG %s not found in memory. Marking pending task %s as failed.", run.DAGID, ti.ID)
+			s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
 			continue
 		}
 
@@ -197,6 +248,7 @@ func (s *Scheduler) PromotePendingTasks() error {
 				break
 			}
 		}
+		s.mu.RUnlock()
 
 		if taskDef == nil {
 			log.Printf("Task %s not found in DAG %s", ti.TaskID, dag.ID)

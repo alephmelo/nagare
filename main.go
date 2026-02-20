@@ -41,9 +41,12 @@ func main() {
 	}
 
 	// 3. Initialize Worker Pool
-	// Passing the dags map from scheduler for task lookups.
-	// We'll use a small fixed pool of 4 workers for the MVP.
-	pool := worker.NewPool(store, sched.GetDAGs(), 4)
+	// Passing a closure to dynamically look up DAGs
+	getDAG := func(id string) (*models.DAGDef, bool) {
+		d, ok := sched.GetDAGs()[id]
+		return d, ok
+	}
+	pool := worker.NewPool(store, getDAG, 4)
 
 	// 4. Initialize API Server
 	apiServer := api.NewServer(store, sched)
@@ -87,6 +90,11 @@ func main() {
 			return
 
 		case <-ticker.C:
+			// Live reload DAGs from the filesystem natively
+			if err := sched.LoadDAGs("dags"); err != nil {
+				log.Printf("Scheduler DAG reload error: %v", err)
+			}
+
 			// Run the scheduler tick to evaluate crons and check dependencies
 			if err := sched.Tick(); err != nil {
 				log.Printf("Scheduler tick error: %v", err)

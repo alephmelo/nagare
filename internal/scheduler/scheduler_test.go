@@ -1,8 +1,10 @@
 package scheduler
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,4 +76,74 @@ func TestSchedulerTick(t *testing.T) {
 	if rows[0].TaskID != "t1" {
 		t.Errorf("expected queued task to be t1, got %s", rows[0].TaskID)
 	}
+}
+
+func TestSchedulerConcurrentAccess(t *testing.T) {
+	store, _ := models.NewStore("file::memory:?cache=shared&mode=memory")
+	defer store.Close()
+
+	sched := NewScheduler(store)
+	tmpDir := t.TempDir()
+
+	// Write a valid initial DAG
+	initialYaml := []byte(`
+id: concurrent_dag
+description: "Test DAG"
+schedule: "* * * * *"
+tasks:
+  - id: t1
+    type: command
+    command: "echo test"
+`)
+	os.WriteFile(filepath.Join(tmpDir, "test.yaml"), initialYaml, 0644)
+	sched.LoadDAGs(tmpDir)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Spawn 5 reader goroutines
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					dags := sched.GetDAGs()
+					_ = len(dags)
+					errs := sched.GetDAGErrors()
+					_ = len(errs)
+					_ = sched.Tick()
+					_ = sched.PromotePendingTasks()
+					time.Sleep(2 * time.Millisecond)
+				}
+			}
+		}()
+	}
+
+	// Writer goroutine simulating hot-reloads
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			// rewrite file
+			newYaml := []byte(fmt.Sprintf(`
+id: concurrent_dag_%d
+description: "Test DAG"
+schedule: "* * * * *"
+tasks:
+  - id: t1
+    type: command
+    command: "echo test"
+`, i))
+			os.WriteFile(filepath.Join(tmpDir, "test.yaml"), newYaml, 0644)
+			sched.LoadDAGs(tmpDir)
+			time.Sleep(10 * time.Millisecond)
+		}
+		close(stop)
+	}()
+
+	wg.Wait()
 }

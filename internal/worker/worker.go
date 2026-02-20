@@ -12,17 +12,17 @@ import (
 // Pool manages a group of worker goroutines
 type Pool struct {
 	store      *models.Store
-	dags       map[string]*models.DAGDef
+	getDAG     func(string) (*models.DAGDef, bool)
 	taskQueue  chan models.TaskInstance
 	workerSize int
 	wg         sync.WaitGroup
 }
 
 // NewPool initializes a new worker pool
-func NewPool(store *models.Store, dags map[string]*models.DAGDef, size int) *Pool {
+func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), size int) *Pool {
 	return &Pool{
 		store:      store,
-		dags:       dags,
+		getDAG:     getDAG,
 		taskQueue:  make(chan models.TaskInstance, 100),
 		workerSize: size,
 	}
@@ -86,7 +86,7 @@ func (p *Pool) executeTask(ti models.TaskInstance, workerID int) {
 		return
 	}
 
-	dag, ok := p.dags[run.DAGID]
+	dag, ok := p.getDAG(run.DAGID)
 	if !ok {
 		p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
 		return

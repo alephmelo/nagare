@@ -55,6 +55,13 @@ func (s *Server) handleGetDAGs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(dagsList)
 }
 
+func (s *Server) handleGetDAGErrors(w http.ResponseWriter, r *http.Request) {
+	errorsMap := s.scheduler.GetDAGErrors()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(errorsMap)
+}
+
 func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
@@ -124,6 +131,7 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/dags", corsMiddleware(s.handleGetDAGs))
+	mux.HandleFunc("/api/dags/errors", corsMiddleware(s.handleGetDAGErrors))
 	mux.HandleFunc("/api/runs", corsMiddleware(s.handleGetRuns))
 	// Generic handler for anything starting with /api/runs/ to catch /api/runs/{id}/tasks
 	mux.HandleFunc("/api/runs/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {

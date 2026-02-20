@@ -1,0 +1,19 @@
+id: sample_dag2
+description: "A simple bash pipeline to test Nagare"
+schedule: "*/10 * * * *" # every 10 seconds
+tasks:
+  - id: download_data
+    type: command
+    command: "echo 'Downloading data...' && sleep 2 && echo 'Data downloaded!'"
+
+  - id: generate_report
+    type: command
+    command: "echo 'Genereting report...' && sleep 1 && echo 'Report done!'"
+    depends_on:
+      - download_data
+  
+  - id: generate_report2
+    type: command
+    command: "echo 'Genereting report...' && sleep 1 && echo 'Report done!'"
+    depends_on:
+      - download_data
