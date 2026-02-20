@@ -210,7 +210,7 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
                     lineHeight: 1.7,
                     backgroundColor: "transparent",
                     border: "none",
-                    color: a.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-success)",
+                    color: a.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-default)",
                   }}
                 >
                   {a.Output || "No output for this attempt."}
@@ -234,7 +234,7 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
                 lineHeight: 1.7,
                 backgroundColor: "transparent",
                 border: "none",
-                color: task.Status === "failed" ? "var(--log-text-failed)" : "white",
+                color: task.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-default)",
               }}
             >
               {task.Output || "No output generated yet."}
