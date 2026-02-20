@@ -1,6 +1,6 @@
 procs:
   backend:
-    cmd: ["air"]
+    shell: "air"
   frontend:
-    cmd: ["npm", "run", "dev"]
+    shell: "npm run dev"
     cwd: "web"
