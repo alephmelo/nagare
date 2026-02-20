@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -53,6 +54,10 @@ func (s *Server) handleGetDAGs(w http.ResponseWriter, r *http.Request) {
 	for _, dag := range dagsMap {
 		dagsList = append(dagsList, dag)
 	}
+
+	sort.Slice(dagsList, func(i, j int) bool {
+		return dagsList[i].ID < dagsList[j].ID
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(dagsList)
