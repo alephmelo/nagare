@@ -1,0 +1,7 @@
+id: test_kill
+schedule: "@yearly"
+description: Long running DAG to test kill functionality
+tasks:
+  - id: sleep_step
+    type: bash
+    command: "echo 'Starting long sleep...'; sleep 60; echo 'Done!'"

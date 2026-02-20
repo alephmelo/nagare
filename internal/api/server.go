@@ -10,19 +10,22 @@ import (
 
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/alephmelo/nagare/internal/scheduler"
+	"github.com/alephmelo/nagare/internal/worker"
 )
 
 // Server encapsulates the dependencies for the HTTP API
 type Server struct {
 	store     *models.Store
 	scheduler *scheduler.Scheduler
+	pool      *worker.Pool
 }
 
 // NewServer creates a new API Server instance
-func NewServer(store *models.Store, sched *scheduler.Scheduler) *Server {
+func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Pool) *Server {
 	return &Server{
 		store:     store,
 		scheduler: sched,
+		pool:      pool,
 	}
 }
 
@@ -224,6 +227,54 @@ func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Task queued for retry successfully"})
 }
 
+func (s *Server) handleKillRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	runID := parts[3]
+
+	err := s.scheduler.KillDagRun(runID, s.pool)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Run killed successfully"})
+}
+
+func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 7 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	// /api/runs/{run_id}/tasks/{task_id}/kill
+	_ = parts[3] // runID
+	taskID := parts[5]
+
+	err := s.pool.KillTask(taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Task killed successfully"})
+}
+
 // Start launches the HTTP server
 func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux := http.NewServeMux()
@@ -243,6 +294,14 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux.HandleFunc("/api/runs/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/retry") && r.Method == http.MethodPost {
 			s.handleRetryTask(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/kill") && r.Method == http.MethodPost {
+			if strings.Contains(r.URL.Path, "/tasks/") {
+				s.handleKillTask(w, r)
+			} else {
+				s.handleKillRun(w, r)
+			}
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/attempts") {

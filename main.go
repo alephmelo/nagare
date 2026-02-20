@@ -49,7 +49,7 @@ func main() {
 	pool := worker.NewPool(store, getDAG, 4)
 
 	// 4. Initialize API Server
-	apiServer := api.NewServer(store, sched)
+	apiServer := api.NewServer(store, sched, pool)
 
 	// Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

@@ -20,7 +20,7 @@ import {
   ActionIcon,
   Tooltip
 } from "@mantine/core";
-import { IconArrowLeft, IconAlertCircle, IconPlayerPlay, IconRobot, IconUser, IconFilter, IconCheck } from "@tabler/icons-react";
+import { IconArrowLeft, IconAlertCircle, IconPlayerPlay, IconRobot, IconUser, IconFilter, IconCheck, IconPlayerStop } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { ReactFlow, Controls, Background, useNodesState, useEdgesState, Position, MarkerType, Node, Edge } from "@xyflow/react";
 import '@xyflow/react/dist/style.css';
@@ -193,26 +193,27 @@ export default function DagDetails() {
     initializeView();
   }, [id, setNodes, setEdges]);
 
+  // Periodic fetching runs list to sync paginated data
+  const fetchRuns = async () => {
+    if (!id) return;
+    try {
+      const url = `/api/runs?page=${page}&limit=${limit}&dag_id=${id}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`;
+      const runsRes = await fetch(url);
+      if (runsRes.ok) {
+        const runsData = await runsRes.json();
+        setRuns(runsData.data || []);
+        setTotalRuns(runsData.total || 0);
+      } else {
+        setRuns([]);
+        setTotalRuns(0);
+      }
+    } catch(err) {
+      console.error("Failed to query runs", err);
+    }
+  }
+
   useEffect(() => {
     if (!id) return;
-
-    // Periodic fetching runs list to sync paginated data
-    const fetchRuns = async () => {
-      try {
-        const url = `/api/runs?page=${page}&limit=${limit}&dag_id=${id}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`;
-        const runsRes = await fetch(url);
-        if (runsRes.ok) {
-          const runsData = await runsRes.json();
-          setRuns(runsData.data || []);
-          setTotalRuns(runsData.total || 0);
-        } else {
-          setRuns([]);
-          setTotalRuns(0);
-        }
-      } catch(err) {
-        console.error("Failed to query runs", err);
-      }
-    }
 
     fetchRuns();
     const interval = setInterval(fetchRuns, 5000);
@@ -248,6 +249,25 @@ export default function DagDetails() {
       });
     } finally {
       setTriggering(false);
+    }
+  };
+
+  const handleKillRun = async (e: React.MouseEvent, runID: string) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/runs/${runID}/kill`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        notifications.show({
+          title: 'Run Terminated',
+          message: `Termination signal sent to run ${runID}.`,
+          color: 'orange',
+        });
+        fetchRuns();
+      }
+    } catch (err) {
+      console.error("Failed to kill run:", err);
     }
   };
 
@@ -377,6 +397,9 @@ export default function DagDetails() {
                       <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
                         <Text size="sm" fw={700}>Elapsed Time</Text>
                       </Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                        <Text size="sm" fw={700}>Actions</Text>
+                      </Table.Th>
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
@@ -409,11 +432,25 @@ export default function DagDetails() {
                                 : "-"}
                           </Text>
                         </Table.Td>
+                        <Table.Td>
+                          {run.Status === 'running' && (
+                            <Tooltip label="Kill Run">
+                              <ActionIcon 
+                                variant="light" 
+                                color="red" 
+                                onClick={(e) => handleKillRun(e, run.ID)}
+                                size="sm"
+                              >
+                                <IconPlayerStop size={14} />
+                              </ActionIcon>
+                            </Tooltip>
+                          )}
+                        </Table.Td>
                       </Table.Tr>
                     ))}
                     {(!runs || runs.length === 0) && (
                         <Table.Tr>
-                          <Table.Td colSpan={5} align="center" py="xl">
+                          <Table.Td colSpan={6} align="center" py="xl">
                             <Text c="dimmed">No past runs found for this DAG.</Text>
                           </Table.Td>
                         </Table.Tr>

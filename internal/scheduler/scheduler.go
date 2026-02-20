@@ -324,3 +324,25 @@ func (s *Scheduler) RetryTask(runID, taskID string) error {
 	log.Printf("Staged retry attempt %s for task %s on run %s", newID, taskID, runID)
 	return nil
 }
+
+// KillDagRun terminates all active tasks for a run and marks it as failed
+func (s *Scheduler) KillDagRun(runID string, pool interface {
+	KillTask(string) error
+}) error {
+	tasks, err := s.store.GetTaskInstancesByRun(runID)
+	if err != nil {
+		return err
+	}
+
+	for _, ti := range tasks {
+		if ti.Status == models.TaskRunning || ti.Status == models.TaskQueued {
+			if err := pool.KillTask(ti.ID); err != nil {
+				log.Printf("Failed to kill task %s: %v", ti.ID, err)
+			}
+		} else if ti.Status == models.TaskPending {
+			s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskCancelled)
+		}
+	}
+
+	return s.store.UpdateDagRunStatus(runID, models.RunCancelled)
+}

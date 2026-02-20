@@ -16,6 +16,8 @@ type Pool struct {
 	taskQueue  chan models.TaskInstance
 	workerSize int
 	wg         sync.WaitGroup
+	running    map[string]*exec.Cmd
+	rmu        sync.RWMutex
 }
 
 // NewPool initializes a new worker pool
@@ -25,6 +27,7 @@ func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), si
 		getDAG:     getDAG,
 		taskQueue:  make(chan models.TaskInstance, 100),
 		workerSize: size,
+		running:    make(map[string]*exec.Cmd),
 	}
 }
 
@@ -107,15 +110,55 @@ func (p *Pool) executeTask(ti models.TaskInstance, workerID int) {
 
 	// Execute the command natively
 	cmd := exec.Command("sh", "-c", cmdStr)
+
+	p.rmu.Lock()
+	p.running[ti.ID] = cmd
+	p.rmu.Unlock()
+
+	defer func() {
+		p.rmu.Lock()
+		delete(p.running, ti.ID)
+		p.rmu.Unlock()
+	}()
+
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
 		log.Printf("Worker %d: Task %s FAILED: %v\nOutput: %s", workerID, ti.ID, err, string(output))
+
+		// Check if it was cancelled/killed externally before marking as failed
+		latest, getErr := p.store.GetTaskInstance(ti.ID)
+		if getErr == nil && latest.Status == models.TaskCancelled {
+			log.Printf("Worker %d: Task %s was already marked as CANCELLED, skipping failure update", workerID, ti.ID)
+			return
+		}
+
 		p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, string(output))
 	} else {
 		log.Printf("Worker %d: Task %s SUCCESS\nOutput: %s", workerID, ti.ID, string(output))
 		p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, string(output))
 	}
+}
+
+// KillTask terminates a running task process
+func (p *Pool) KillTask(taskInstanceID string) error {
+	p.rmu.RLock()
+	cmd, ok := p.running[taskInstanceID]
+	p.rmu.RUnlock()
+
+	if !ok {
+		// If not in memory, it might be and already finished or in queue.
+		// We still mark it as cancelled in DB to be sure.
+		return p.store.UpdateTaskInstanceStatus(taskInstanceID, models.TaskCancelled)
+	}
+
+	if cmd != nil && cmd.Process != nil {
+		if err := cmd.Process.Kill(); err != nil {
+			return err
+		}
+	}
+
+	return p.store.UpdateTaskInstanceStatus(taskInstanceID, models.TaskCancelled)
 }
 
 // Stop gracefully shuts down the pool

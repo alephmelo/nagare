@@ -25,7 +25,6 @@ import {
 import {
   IconArrowLeft,
   IconRefresh,
-  IconPlayerPlay,
   IconCheck,
   IconX,
   IconClock,
@@ -33,6 +32,8 @@ import {
   IconChevronRight,
   IconTerminal2,
   IconAlertCircle,
+  IconPlayerStop,
+  IconPlayerPlay,
 } from "@tabler/icons-react";
 import { notifications } from "@mantine/notifications";
 
@@ -66,12 +67,14 @@ function StatusIcon({ status }: { status: string }) {
       return <ThemeIcon color="blue" variant="light" size="md" radius="xl"><Loader size={12} color="blue" /></ThemeIcon>;
     case "queued":
       return <ThemeIcon color="yellow" variant="light" size="md" radius="xl"><IconClock size={14} /></ThemeIcon>;
+    case "cancelled":
+      return <ThemeIcon color="gray" variant="light" size="md" radius="xl"><IconPlayerStop size={14} /></ThemeIcon>;
     default:
       return <ThemeIcon color="gray" variant="light" size="md" radius="xl"><IconAlertCircle size={14} /></ThemeIcon>;
   }
 }
 
-function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRetry: (taskID: string) => void }) {
+function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: string; onRetry: (taskID: string) => void; onKill: (taskID: string) => void }) {
   const [expanded, setExpanded] = useState(task.Status === "failed");
   const [attempts, setAttempts] = useState<RunTask[]>([]);
   const [loadingAttempts, setLoadingAttempts] = useState(false);
@@ -102,13 +105,13 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
       case "failed": return "red";
       case "running": return "blue";
       case "queued": return "yellow";
+      case "cancelled": return "gray";
       default: return "gray";
     }
   };
 
   return (
     <Card padding="0" mb="xs" style={{ border: task.Status === "failed" ? "1px solid var(--mantine-color-red-3)" : "1px solid var(--mantine-color-default-border)" }}>
-      {/* Task Header Row */}
       <Group
         px="md"
         py="sm"
@@ -126,7 +129,7 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
               )}
             </Group>
             <Text size="xs" c="dimmed">
-              Updated {new Date(task.UpdatedAt).toLocaleTimeString()}
+              Last Updated {new Date(task.UpdatedAt).toLocaleTimeString()}
             </Text>
           </div>
         </Group>
@@ -134,18 +137,33 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
           <Badge color={getStatusColor(task.Status)} variant="light" radius="sm" size="sm">
             {task.Status.toUpperCase()}
           </Badge>
-          {(task.Status === "success" || task.Status === "failed") && (
-            <Tooltip label="Retry Task">
+          {(task.Status === "success" || task.Status === "failed" || task.Status === "cancelled") && (
+             <Tooltip label="Retry Task">
+               <ActionIcon
+                 variant="light"
+                 color="blue"
+                 size="sm"
+                 onClick={(e) => {
+                   e.stopPropagation();
+                   onRetry(task.TaskID);
+                 }}
+               >
+                 <IconPlayerPlay size={12} />
+               </ActionIcon>
+             </Tooltip>
+           )}
+          {task.Status === "running" && (
+            <Tooltip label="Kill Task">
               <ActionIcon
                 variant="light"
-                color="blue"
+                color="red"
                 size="sm"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onRetry(task.TaskID);
+                  onKill(task.TaskID);
                 }}
               >
-                <IconPlayerPlay size={12} />
+                <IconPlayerStop size={12} />
               </ActionIcon>
             </Tooltip>
           )}
@@ -157,7 +175,6 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
         </Group>
       </Group>
 
-      {/* Expandable Log Output — tabs per attempt when retried */}
       <Collapse in={expanded}>
         <Divider />
         {loadingAttempts ? (
@@ -173,16 +190,6 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
                   key={a.Attempt}
                   value={String(a.Attempt)}
                   leftSection={<StatusIcon status={a.Status} />}
-                  rightSection={
-                    <Badge
-                      size="xs"
-                      color={getStatusColor(a.Status)}
-                      variant="light"
-                      radius="sm"
-                    >
-                      {a.Status.toUpperCase()}
-                    </Badge>
-                  }
                 >
                   <Text size="xs" fw={600}>Attempt #{a.Attempt}</Text>
                 </Tabs.Tab>
@@ -227,7 +234,7 @@ function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRet
                 lineHeight: 1.7,
                 backgroundColor: "transparent",
                 border: "none",
-                color: task.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-success)",
+                color: task.Status === "failed" ? "var(--log-text-failed)" : "white",
               }}
             >
               {task.Output || "No output generated yet."}
@@ -250,7 +257,6 @@ function RunDetailsContent() {
   const fetchTasks = useCallback(async () => {
     if (!id) return;
     try {
-      // Fetch both the task list and the run metadata in parallel
       const [tasksRes, runsRes] = await Promise.all([
         fetch(`/api/runs/${id}/tasks`),
         fetch(`/api/runs?page=1&limit=100`),
@@ -288,11 +294,32 @@ function RunDetailsContent() {
     }
   };
 
+  const handleKillTask = async (taskID: string) => {
+    try {
+      const res = await fetch(`/api/runs/${id}/tasks/${taskID}/kill`, { method: "POST" });
+      if (res.ok) {
+        fetchTasks();
+        notifications.show({ title: "Task Terminated", message: `Termination signal sent to ${taskID}.`, color: "orange" });
+      }
+    } catch { /* noop */ }
+  };
+
+  const handleKillRun = async () => {
+    try {
+      const res = await fetch(`/api/runs/${id}/kill`, { method: "POST" });
+      if (res.ok) {
+        fetchTasks();
+        notifications.show({ title: "Run Terminated", message: `Termination signal sent to run ${id}.`, color: "orange" });
+      }
+    } catch { /* noop */ }
+  };
+
   const getRunStatusColor = (status: string) => {
     switch (status) {
       case "success": return "green";
       case "failed": return "red";
       case "running": return "blue";
+      case "cancelled": return "gray";
       default: return "gray";
     }
   };
@@ -319,7 +346,6 @@ function RunDetailsContent() {
 
   return (
     <>
-      {/* Header */}
       <Group justify="space-between" mb="xl">
         <Group>
           <Button variant="subtle" color="gray" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push("/")}>
@@ -337,12 +363,23 @@ function RunDetailsContent() {
             <Text size="xs" c="dimmed" style={{ fontFamily: "monospace" }}>{id}</Text>
           </div>
         </Group>
-        <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={fetchTasks} loading={loading}>
-          Refresh
-        </Button>
+        <Group gap="sm">
+          {run && run.Status === "running" && (
+            <Button 
+              variant="light" 
+              color="red" 
+              leftSection={<IconPlayerStop size={16} />} 
+              onClick={handleKillRun}
+            >
+              Kill Run
+            </Button>
+          )}
+          <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={fetchTasks} loading={loading}>
+            Refresh
+          </Button>
+        </Group>
       </Group>
 
-      {/* Run Summary Banner */}
       {loading && !run ? (
         <Skeleton height={72} mb="xl" radius="md" />
       ) : run && (
@@ -382,7 +419,6 @@ function RunDetailsContent() {
         </Card>
       )}
 
-      {/* Task List */}
       <Title order={4} mb="md" c="dimmed">Task Execution Log</Title>
       {loading && tasks.length === 0 ? (
         <Stack gap="xs">
@@ -399,7 +435,7 @@ function RunDetailsContent() {
       ) : (
         <Stack gap="xs">
           {tasks.map((task) => (
-            <TaskRow key={task.ID} task={task} runID={id} onRetry={handleRetry} />
+            <TaskRow key={task.ID} task={task} runID={id} onRetry={handleRetry} onKill={handleKillTask} />
           ))}
         </Stack>
       )}

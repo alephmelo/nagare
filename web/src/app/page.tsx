@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Title, Card, Table, Badge, Text, Group, Button, Skeleton, Select, Pagination, Alert, List, ActionIcon, Tooltip, Menu, UnstyledButton } from "@mantine/core";
-import { IconRefresh, IconX, IconActivity, IconAlertCircle, IconRobot, IconUser, IconPlayerPlay, IconTimelineEvent, IconFilter, IconCheck, IconChevronDown } from "@tabler/icons-react";
+import { Title, Card, Table, Badge, Text, Group, Button, Skeleton, Select, Pagination, ActionIcon, Tooltip, Menu, UnstyledButton, Alert, List } from "@mantine/core";
+import { IconRefresh, IconX, IconActivity, IconAlertCircle, IconRobot, IconUser, IconPlayerPlay, IconTimelineEvent, IconFilter, IconCheck, IconPlayerStop } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { notifications } from '@mantine/notifications';
 
@@ -37,7 +37,6 @@ export default function Dashboard() {
   const [triggering, setTriggering] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   
-  // Pagination & Filtering state
   const [page, setPage] = useState(1);
   const [dagFilter, setDagFilter] = useState<string | null>("all");
   const [statusFilter, setStatusFilter] = useState<string | null>("all");
@@ -61,9 +60,6 @@ export default function Dashboard() {
         const runsData = await runsRes.json();
         setRuns(runsData.data || []);
         setTotalRuns(runsData.total || 0);
-      } else {
-        setRuns([]);
-        setTotalRuns(0);
       }
       
       if (dagsRes.ok) setDags(await dagsRes.json());
@@ -87,28 +83,26 @@ export default function Dashboard() {
     try {
       const res = await fetch(`/api/dags/${dagID}/runs`, { method: "POST" });
       if (res.ok) {
-        notifications.show({
-          title: 'Pipeline Triggered',
-          message: `Successfully enqueued a fresh manual run for ${dagID}.`,
-          color: 'green',
-        });
+        notifications.show({ title: 'Pipeline Triggered', message: `Successfully enqueued a fresh manual run for ${dagID}.`, color: 'green' });
         fetchData();
-      } else {
-        notifications.show({
-          title: 'Trigger Failed',
-          message: `The server rejected the request to trigger ${dagID}.`,
-          color: 'red',
-        });
       }
     } catch (err) {
       console.error(err);
-      notifications.show({
-        title: 'Network Error',
-        message: 'Could not communicate with the API.',
-        color: 'red',
-      });
     } finally {
       setTriggering(prev => ({ ...prev, [dagID]: false }));
+    }
+  };
+
+  const handleKillRun = async (e: React.MouseEvent, runID: string) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/runs/${runID}/kill`, { method: 'POST' });
+      if (res.ok) {
+        notifications.show({ title: 'Run Terminated', message: `Termination signal sent to run ${runID}.`, color: 'orange' });
+        fetchData();
+      }
+    } catch (err) {
+      console.error("Failed to kill run:", err);
     }
   };
 
@@ -118,6 +112,7 @@ export default function Dashboard() {
       case "failed": return "red";
       case "running": return "blue";
       case "queued": return "yellow";
+      case "cancelled": return "gray";
       default: return "gray";
     }
   };
@@ -132,25 +127,33 @@ export default function Dashboard() {
       </Group>
 
       {Object.keys(dagErrors).length > 0 && (
-        <Alert 
-          variant="light" 
-          color="red" 
-          title="DAG Validation Errors" 
-          icon={<IconAlertCircle />} 
-          mb="xl"
-          p="md"
-        >
-          <Text size="sm" mb="xs">
-            The following DAG configurations have problems and were safely skipped by the scheduler:
-          </Text>
+        <Alert variant="light" color="red" title="DAG Validation Errors" icon={<IconAlertCircle />} mb="xl">
+          <Text size="sm" mb="xs">Problematic DAG configurations:</Text>
           <List size="sm" spacing="xs">
             {Object.entries(dagErrors).map(([file, err]) => (
-              <List.Item key={file}>
-                <strong>{file}</strong>: <Text span c="dimmed" fs="italic">{err}</Text>
-              </List.Item>
+              <List.Item key={file}><strong>{file}</strong>: <Text span c="dimmed" fs="italic">{err}</Text></List.Item>
             ))}
           </List>
         </Alert>
+      )}
+
+      {stats && (
+        <Card padding="md" mb="xl">
+          <Group grow>
+            <div>
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Active Runs</Text>
+              <Group gap="xs" mt={4}><IconActivity size={18} color="var(--mantine-color-blue-filled)" /><Text fw={700} size="xl">{stats.active_runs}</Text></Group>
+            </div>
+            <div>
+               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Failed Runs (24h)</Text>
+               <Group gap="xs" mt={4}><IconX size={18} color={stats.failed_runs_24h > 0 ? "var(--mantine-color-red-filled)" : "var(--mantine-color-gray-5)"} /><Text fw={700} size="xl" c={stats.failed_runs_24h > 0 ? "red" : "inherit"}>{stats.failed_runs_24h}</Text></Group>
+            </div>
+            <div>
+               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Operations</Text>
+               <Group gap="xs" mt={4}><IconTimelineEvent size={18} color="var(--mantine-color-teal-filled)" /><Text fw={700} size="xl">{stats.total_runs}</Text></Group>
+            </div>
+          </Group>
+        </Card>
       )}
 
       <Title order={4} mb="md" c="dimmed">Loaded Workflows</Title>
@@ -162,9 +165,9 @@ export default function Dashboard() {
             <Table verticalSpacing="sm" horizontalSpacing="md" striped highlightOnHover>
               <Table.Thead>
                 <Table.Tr>
-                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Pipeline</Table.Th>
-                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Schedule</Table.Th>
-                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)', width: '80px', textAlign: 'right' }}>Actions</Table.Th>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}><Text size="sm" fw={700}>Pipeline</Text></Table.Th>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}><Text size="sm" fw={700}>Schedule</Text></Table.Th>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)', width: '80px', textAlign: 'right' }}><Text size="sm" fw={700}>Actions</Text></Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
@@ -210,47 +213,8 @@ export default function Dashboard() {
         </Card>
       )}
 
-      <Group justify="space-between" mt="xl" mb="md">
-        <Title order={4} c="dimmed">Recent Runs</Title>
-      </Group>
-
-      {/* System Health Banner */}
-      {stats && (
-        <Card padding="md" mb="xl">
-          <Group grow>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Active Runs</Text>
-              <Group gap="xs" mt={4}>
-                <IconActivity size={18} color="var(--mantine-color-blue-filled)" />
-                <Text fw={700} size="xl">{stats.active_runs}</Text>
-              </Group>
-            </div>
-            <div>
-               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Failed Runs (24h)</Text>
-               <Group gap="xs" mt={4}>
-                 <IconX size={18} color={stats.failed_runs_24h > 0 ? "var(--mantine-color-red-filled)" : "var(--mantine-color-gray-5)"} />
-                 <Text fw={700} size="xl" c={stats.failed_runs_24h > 0 ? "red" : "inherit"}>{stats.failed_runs_24h}</Text>
-               </Group>
-            </div>
-            <div>
-               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Operations</Text>
-               <Group gap="xs" mt={4}>
-                 <IconTimelineEvent size={18} color="var(--mantine-color-teal-filled)" />
-                 <Text fw={700} size="xl">{stats.total_runs}</Text>
-               </Group>
-            </div>
-            <div>
-               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Loaded Pipelines</Text>
-               <Group gap="xs" mt={4}>
-                 <IconRobot size={18} color="var(--mantine-color-indigo-filled)" />
-                 <Text fw={700} size="xl">{stats.loaded_dags}</Text>
-               </Group>
-            </div>
-          </Group>
-        </Card>
-      )}
-
-      <Card padding="0" style={{ overflow: "hidden" }}>
+      <Title order={4} mb="md" c="dimmed">Recent Runs</Title>
+      <Card padding="0">
         <Table.ScrollContainer minWidth={800}>
           <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
             <Table.Thead>
@@ -259,7 +223,7 @@ export default function Dashboard() {
                   <Text size="sm" fw={700}>Run ID</Text>
                 </Table.Th>
                 <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
-                  <Menu shadow="md" width={200}>
+                   <Menu shadow="md" width={200}>
                     <Menu.Target>
                       <UnstyledButton>
                         <Group gap={4}>
@@ -304,6 +268,7 @@ export default function Dashboard() {
                         { value: 'all', label: 'All Statuses' },
                         { value: 'success', label: 'Success' },
                         { value: 'failed', label: 'Failed' },
+                        { value: 'cancelled', label: 'Cancelled' },
                         { value: 'running', label: 'Running' },
                       ].map(opt => (
                         <Menu.Item 
@@ -351,10 +316,13 @@ export default function Dashboard() {
                 <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
                   <Text size="sm" fw={700}>Elapsed Time</Text>
                 </Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                  <Text size="sm" fw={700}>Actions</Text>
+                </Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
-              {runs?.map((run) => (
+              {runs.map((run) => (
                 <Table.Tr key={run.ID} onClick={() => router.push(`/runs/?id=${run.ID}`)} style={{ cursor: "pointer" }}>
                   <Table.Td>
                     <Text size="sm" fw={500}>{run.ID}</Text>
@@ -386,11 +354,20 @@ export default function Dashboard() {
                           : "-"}
                     </Text>
                   </Table.Td>
+                  <Table.Td>
+                    {run.Status === 'running' && (
+                      <Tooltip label="Kill Run">
+                        <ActionIcon variant="light" color="red" onClick={(e) => handleKillRun(e, run.ID)} size="sm">
+                          <IconPlayerStop size={14} />
+                        </ActionIcon>
+                      </Tooltip>
+                    )}
+                  </Table.Td>
                 </Table.Tr>
               ))}
               {(!runs || runs.length === 0) && !loading && (
                   <Table.Tr>
-                    <Table.Td colSpan={6} align="center" py="xl">
+                    <Table.Td colSpan={7} align="center" py="xl">
                       <Text c="dimmed">No runs found for this configuration.</Text>
                     </Table.Td>
                   </Table.Tr>

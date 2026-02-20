@@ -12,9 +12,10 @@ import (
 type RunStatus string
 
 const (
-	RunRunning RunStatus = "running"
-	RunSuccess RunStatus = "success"
-	RunFailed  RunStatus = "failed"
+	RunRunning   RunStatus = "running"
+	RunSuccess   RunStatus = "success"
+	RunFailed    RunStatus = "failed"
+	RunCancelled RunStatus = "cancelled"
 )
 
 // TaskStatus represents the state of a TaskInstance
@@ -28,11 +29,12 @@ type SystemStats struct {
 }
 
 const (
-	TaskPending TaskStatus = "pending"
-	TaskQueued  TaskStatus = "queued"
-	TaskRunning TaskStatus = "running"
-	TaskSuccess TaskStatus = "success"
-	TaskFailed  TaskStatus = "failed"
+	TaskPending   TaskStatus = "pending"
+	TaskQueued    TaskStatus = "queued"
+	TaskRunning   TaskStatus = "running"
+	TaskSuccess   TaskStatus = "success"
+	TaskFailed    TaskStatus = "failed"
+	TaskCancelled TaskStatus = "cancelled"
 )
 
 // DagRun represents a single execution of a DAG
@@ -401,6 +403,18 @@ func (s *Store) GetTasksByStatus(status TaskStatus) ([]TaskInstance, error) {
 // GetQueuedTasks retrieves all TaskInstances with 'queued' status
 func (s *Store) GetQueuedTasks() ([]TaskInstance, error) {
 	return s.GetTasksByStatus(TaskQueued)
+}
+
+// GetTaskInstance retrieves a specific TaskInstance by its unique ID
+func (s *Store) GetTaskInstance(id string) (*TaskInstance, error) {
+	query := `SELECT id, run_id, task_id, status, output, attempt, created_at, updated_at FROM task_instances WHERE id = ?`
+	row := s.db.QueryRow(query, id)
+
+	var ti TaskInstance
+	if err := row.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &ti.Output, &ti.Attempt, &ti.CreatedAt, &ti.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &ti, nil
 }
 
 // GetDagRun retrieves a DagRun by ID
