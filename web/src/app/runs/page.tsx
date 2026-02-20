@@ -40,6 +40,7 @@ interface RunTask {
   TaskID: string;
   Status: string;
   Output: string;
+  Attempt: number;
   CreatedAt: string;
   UpdatedAt: string;
 }
@@ -69,9 +70,30 @@ function StatusIcon({ status }: { status: string }) {
   }
 }
 
-function TaskRow({ task, onRetry }: { task: RunTask; onRetry: (taskID: string) => void }) {
+function TaskRow({ task, runID, onRetry }: { task: RunTask; runID: string; onRetry: (taskID: string) => void }) {
   const [expanded, setExpanded] = useState(task.Status === "failed");
+  const [attempts, setAttempts] = useState<RunTask[]>([]);
+  const [loadingAttempts, setLoadingAttempts] = useState(false);
   const hasOutput = task.Output && task.Output.trim().length > 0;
+  const hasMultipleAttempts = task.Attempt > 1;
+
+  const fetchAttempts = async () => {
+    if (attempts.length > 0 || task.Attempt <= 1) return;
+    setLoadingAttempts(true);
+    try {
+      const res = await fetch(`/api/runs/${runID}/tasks/${task.TaskID}/attempts`);
+      if (res.ok) setAttempts(await res.json());
+    } catch { /* noop */ }
+    finally { setLoadingAttempts(false); }
+  };
+
+  const handleExpand = () => {
+    if (hasOutput || hasMultipleAttempts) {
+      const next = !expanded;
+      setExpanded(next);
+      if (next) fetchAttempts();
+    }
+  };
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -90,13 +112,18 @@ function TaskRow({ task, onRetry }: { task: RunTask; onRetry: (taskID: string) =
         px="md"
         py="sm"
         justify="space-between"
-        style={{ cursor: hasOutput ? "pointer" : "default" }}
-        onClick={() => hasOutput && setExpanded((v) => !v)}
+        style={{ cursor: (hasOutput || hasMultipleAttempts) ? "pointer" : "default" }}
+        onClick={handleExpand}
       >
         <Group gap="sm">
           <StatusIcon status={task.Status} />
           <div>
-            <Text fw={600} size="sm">{task.TaskID}</Text>
+            <Group gap="xs">
+              <Text fw={600} size="sm">{task.TaskID}</Text>
+              {hasMultipleAttempts && (
+                <Badge size="xs" variant="dot" color="orange">Attempt #{task.Attempt}</Badge>
+              )}
+            </Group>
             <Text size="xs" c="dimmed">
               Updated {new Date(task.UpdatedAt).toLocaleTimeString()}
             </Text>
@@ -121,7 +148,7 @@ function TaskRow({ task, onRetry }: { task: RunTask; onRetry: (taskID: string) =
               </ActionIcon>
             </Tooltip>
           )}
-          {hasOutput && (
+          {(hasOutput || hasMultipleAttempts) && (
             <ActionIcon variant="transparent" size="sm" color="dimmed">
               {expanded ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
             </ActionIcon>
@@ -132,27 +159,72 @@ function TaskRow({ task, onRetry }: { task: RunTask; onRetry: (taskID: string) =
       {/* Expandable Log Output */}
       <Collapse in={expanded}>
         <Divider />
-        <Box p="md" style={{ backgroundColor: "var(--mantine-color-dark-8, #0b0f19)" }}>
-          <Group gap="xs" mb="xs">
-            <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-            <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Output Log</Text>
-          </Group>
-          <Code
-            block
-            style={{
-              whiteSpace: "pre-wrap",
-              maxHeight: "300px",
-              overflowY: "auto",
-              fontSize: "12px",
-              lineHeight: 1.7,
-              backgroundColor: "transparent",
-              border: "none",
-              color: task.Status === "failed" ? "var(--mantine-color-red-4)" : "var(--mantine-color-green-4)",
-            }}
-          >
-            {task.Output || "No output generated yet."}
-          </Code>
-        </Box>
+        {hasOutput && (
+          <Box p="md" style={{ backgroundColor: "var(--mantine-color-dark-8, #0b0f19)" }}>
+            <Group gap="xs" mb="xs">
+              <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
+              <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Current Output (Attempt #{task.Attempt})</Text>
+            </Group>
+            <Code
+              block
+              style={{
+                whiteSpace: "pre-wrap",
+                maxHeight: "300px",
+                overflowY: "auto",
+                fontSize: "12px",
+                lineHeight: 1.7,
+                backgroundColor: "transparent",
+                border: "none",
+                color: task.Status === "failed" ? "var(--mantine-color-red-4)" : "var(--mantine-color-green-4)",
+              }}
+            >
+              {task.Output}
+            </Code>
+          </Box>
+        )}
+
+        {/* Attempt History */}
+        {hasMultipleAttempts && (
+          <>
+            <Divider label={<Text size="xs" c="dimmed" tt="uppercase" fw={700}>Attempt History</Text>} labelPosition="left" mx="md" />
+            {loadingAttempts ? (
+              <Box p="md"><Loader size="xs" /></Box>
+            ) : (
+              <Stack gap={0}>
+                {attempts.slice(0, -1).map((a) => (
+                  <Box key={a.ID} px="md" py="sm" style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}>
+                    <Group justify="space-between" mb="xs">
+                      <Group gap="xs">
+                        <StatusIcon status={a.Status} />
+                        <Text size="xs" fw={600}>Attempt #{a.Attempt}</Text>
+                        <Text size="xs" c="dimmed">{new Date(a.UpdatedAt).toLocaleString()}</Text>
+                      </Group>
+                      <Badge color={getStatusColor(a.Status)} variant="outline" radius="sm" size="xs">
+                        {a.Status.toUpperCase()}
+                      </Badge>
+                    </Group>
+                    {a.Output && (
+                      <Code
+                        block
+                        style={{
+                          whiteSpace: "pre-wrap",
+                          maxHeight: "150px",
+                          overflowY: "auto",
+                          fontSize: "11px",
+                          lineHeight: 1.6,
+                          backgroundColor: "var(--mantine-color-dark-8, #0b0f19)",
+                          color: a.Status === "failed" ? "var(--mantine-color-red-4)" : "var(--mantine-color-green-4)",
+                        }}
+                      >
+                        {a.Output}
+                      </Code>
+                    )}
+                  </Box>
+                ))}
+              </Stack>
+            )}
+          </>
+        )}
       </Collapse>
     </Card>
   );
@@ -318,7 +390,7 @@ function RunDetailsContent() {
       ) : (
         <Stack gap="xs">
           {tasks.map((task) => (
-            <TaskRow key={task.ID} task={task} onRetry={handleRetry} />
+            <TaskRow key={task.ID} task={task} runID={id} onRetry={handleRetry} />
           ))}
         </Stack>
       )}

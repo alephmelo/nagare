@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -52,6 +53,7 @@ type TaskInstance struct {
 	TaskID    string
 	Status    TaskStatus
 	Output    string
+	Attempt   int
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -103,6 +105,7 @@ func (s *Store) InitSchema() error {
 		task_id TEXT NOT NULL,
 		status TEXT NOT NULL,
 		output TEXT,
+		attempt INT NOT NULL DEFAULT 1,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
 		FOREIGN KEY(run_id) REFERENCES dag_runs(id)
@@ -115,9 +118,9 @@ func (s *Store) InitSchema() error {
 		return err
 	}
 
-	// Active Migrations
-	// Ignore error if column already exists
+	// Active Migrations — ignore errors if columns already exist
 	s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN trigger_type TEXT DEFAULT 'scheduled'`)
+	s.db.Exec(`ALTER TABLE task_instances ADD COLUMN attempt INT NOT NULL DEFAULT 1`)
 
 	return nil
 }
@@ -238,34 +241,94 @@ func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
 	return runs, nil
 }
 
-// GetTaskInstancesByRun retrieves all task instances for a specific run
+// GetTaskInstancesByRun retrieves all task instances for a specific run.
+// Returns the latest attempt for each task (for backward compatibility).
 func (s *Store) GetTaskInstancesByRun(runID string) ([]TaskInstance, error) {
-	query := `SELECT id, run_id, task_id, status, output, created_at, updated_at FROM task_instances WHERE run_id = ? ORDER BY created_at ASC`
+	return s.GetLatestTaskAttempts(runID)
+}
+
+// GetLatestTaskAttempts returns the most recent attempt for each task in a run.
+func (s *Store) GetLatestTaskAttempts(runID string) ([]TaskInstance, error) {
+	query := `
+		SELECT id, run_id, task_id, status, COALESCE(output,''), attempt, created_at, updated_at
+		FROM task_instances
+		WHERE run_id = ?
+		  AND attempt = (
+			SELECT MAX(t2.attempt)
+			FROM task_instances t2
+			WHERE t2.run_id = task_instances.run_id
+			  AND t2.task_id = task_instances.task_id
+		  )
+		ORDER BY created_at ASC`
 	rows, err := s.db.Query(query, runID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return s.scanTaskInstances(rows)
+}
 
+// GetTaskAttempts returns all attempts for a single task within a run, ordered oldest first.
+func (s *Store) GetTaskAttempts(runID, taskID string) ([]TaskInstance, error) {
+	query := `
+		SELECT id, run_id, task_id, status, COALESCE(output,''), attempt, created_at, updated_at
+		FROM task_instances
+		WHERE run_id = ? AND task_id = ?
+		ORDER BY attempt ASC`
+	rows, err := s.db.Query(query, runID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return s.scanTaskInstances(rows)
+}
+
+// CreateNewTaskAttempt inserts a new queued TaskInstance row for a task,
+// incrementing the attempt counter. Returns the new instance's ID.
+func (s *Store) CreateNewTaskAttempt(runID, taskID string) (string, error) {
+	var maxAttempt int
+	err := s.db.QueryRow(
+		`SELECT COALESCE(MAX(attempt), 0) FROM task_instances WHERE run_id = ? AND task_id = ?`,
+		runID, taskID,
+	).Scan(&maxAttempt)
+	if err != nil {
+		return "", fmt.Errorf("finding max attempt for %s/%s: %w", runID, taskID, err)
+	}
+
+	newAttempt := maxAttempt + 1
+	newID := fmt.Sprintf("%s_%s_%d", runID, taskID, newAttempt)
+	now := time.Now()
+
+	_, err = s.db.Exec(
+		`INSERT INTO task_instances (id, run_id, task_id, status, attempt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		newID, runID, taskID, TaskQueued, newAttempt, now, now,
+	)
+	if err != nil {
+		return "", fmt.Errorf("inserting new attempt row: %w", err)
+	}
+	return newID, nil
+}
+
+// scanTaskInstances is a shared helper to scan rows into []TaskInstance.
+func (s *Store) scanTaskInstances(rows *sql.Rows) ([]TaskInstance, error) {
 	var tasks []TaskInstance
 	for rows.Next() {
 		var ti TaskInstance
-		var output sql.NullString
-		if err := rows.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &output, &ti.CreatedAt, &ti.UpdatedAt); err != nil {
+		if err := rows.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &ti.Output, &ti.Attempt, &ti.CreatedAt, &ti.UpdatedAt); err != nil {
 			return nil, err
-		}
-		if output.Valid {
-			ti.Output = output.String
 		}
 		tasks = append(tasks, ti)
 	}
-	return tasks, nil
+	return tasks, rows.Err()
 }
 
 // CreateTaskInstance inserts a new TaskInstance into the database
 func (s *Store) CreateTaskInstance(ti *TaskInstance) error {
-	query := `INSERT INTO task_instances (id, run_id, task_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, ti.ID, ti.RunID, ti.TaskID, ti.Status, ti.CreatedAt, ti.UpdatedAt)
+	if ti.Attempt == 0 {
+		ti.Attempt = 1
+	}
+	query := `INSERT INTO task_instances (id, run_id, task_id, status, output, attempt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, ti.ID, ti.RunID, ti.TaskID, ti.Status, ti.Output, ti.Attempt, ti.CreatedAt, ti.UpdatedAt)
 	return err
 }
 
@@ -310,9 +373,9 @@ func (s *Store) GetDagRun(runID string) (*DagRun, error) {
 	return &r, nil
 }
 
-// GetTaskStatus retrieves the status of a specific task within a run
+// GetTaskStatus retrieves the status of the latest attempt for a specific task within a run
 func (s *Store) GetTaskStatus(runID, taskID string) (TaskStatus, error) {
-	query := `SELECT status FROM task_instances WHERE run_id = ? AND task_id = ?`
+	query := `SELECT status FROM task_instances WHERE run_id = ? AND task_id = ? ORDER BY attempt DESC LIMIT 1`
 	var status TaskStatus
 	err := s.db.QueryRow(query, runID, taskID).Scan(&status)
 	return status, err

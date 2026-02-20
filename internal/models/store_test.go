@@ -61,6 +61,7 @@ func TestStoreQueries(t *testing.T) {
 		RunID:     "run_1",
 		TaskID:    "my_task",
 		Status:    TaskQueued,
+		Attempt:   1,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -85,6 +86,153 @@ func TestStoreQueries(t *testing.T) {
 	queuedTasksEmpty, _ := store.GetQueuedTasks()
 	if len(queuedTasksEmpty) != 0 {
 		t.Errorf("expected 0 queued tasks, got %d", len(queuedTasksEmpty))
+	}
+}
+
+// TestTaskAttemptDefaultsToOne verifies that the first task instance for a
+// task is automatically assigned attempt number 1.
+func TestTaskAttemptDefaultsToOne(t *testing.T) {
+	store, err := NewStore("file::memory:?cache=shared&mode=memory")
+	if err != nil {
+		t.Fatalf("failed to initialize store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.CreateDagRun(&DagRun{
+		ID: "run_a1", DAGID: "dag_a", Status: RunRunning,
+		ExecDate: time.Now(), TriggerType: "manual", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	ti := &TaskInstance{
+		ID: "run_a1_extract", RunID: "run_a1", TaskID: "extract",
+		Status: TaskQueued, Attempt: 1,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if err := store.CreateTaskInstance(ti); err != nil {
+		t.Fatalf("create task instance: %v", err)
+	}
+
+	tasks, err := store.GetLatestTaskAttempts("run_a1")
+	if err != nil {
+		t.Fatalf("GetLatestTaskAttempts: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].Attempt != 1 {
+		t.Errorf("expected attempt=1, got %d", tasks[0].Attempt)
+	}
+}
+
+// TestCreateNewAttemptOnRetry verifies that retrying a failed task inserts
+// a brand-new row (attempt=2) without modifying the original (attempt=1) row.
+func TestCreateNewAttemptOnRetry(t *testing.T) {
+	store, err := NewStore("file::memory:?cache=shared&mode=memory")
+	if err != nil {
+		t.Fatalf("failed to initialize store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.CreateDagRun(&DagRun{
+		ID: "run_b1", DAGID: "dag_b", Status: RunRunning,
+		ExecDate: time.Now(), TriggerType: "manual", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	// 1st attempt – fails
+	attempt1 := &TaskInstance{
+		ID: "run_b1_load_1", RunID: "run_b1", TaskID: "load",
+		Status: TaskFailed, Attempt: 1, Output: "exit code 1: connection refused",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if err := store.CreateTaskInstance(attempt1); err != nil {
+		t.Fatalf("create attempt 1: %v", err)
+	}
+
+	// Simulate the retry: create a 2nd attempt row
+	newID, err := store.CreateNewTaskAttempt("run_b1", "load")
+	if err != nil {
+		t.Fatalf("CreateNewTaskAttempt: %v", err)
+	}
+	if newID == "" {
+		t.Fatal("expected a non-empty new task instance ID")
+	}
+
+	// The original attempt row must be untouched
+	allAttempts, err := store.GetTaskAttempts("run_b1", "load")
+	if err != nil {
+		t.Fatalf("GetTaskAttempts: %v", err)
+	}
+	if len(allAttempts) != 2 {
+		t.Fatalf("expected 2 attempts, got %d", len(allAttempts))
+	}
+	if allAttempts[0].Attempt != 1 {
+		t.Errorf("first attempt should be 1, got %d", allAttempts[0].Attempt)
+	}
+	if allAttempts[0].Output != "exit code 1: connection refused" {
+		t.Errorf("original attempt output was overwritten: got %q", allAttempts[0].Output)
+	}
+	if allAttempts[1].Attempt != 2 {
+		t.Errorf("second attempt should be 2, got %d", allAttempts[1].Attempt)
+	}
+	if allAttempts[1].Status != TaskQueued {
+		t.Errorf("new attempt should start as queued, got %s", allAttempts[1].Status)
+	}
+}
+
+// TestGetLatestTaskAttemptsReturnsMostRecent verifies that when multiple
+// attempts exist for a task, GetLatestTaskAttempts returns only the most
+// recent one per task ID.
+func TestGetLatestTaskAttemptsReturnsMostRecent(t *testing.T) {
+	store, err := NewStore("file::memory:?cache=shared&mode=memory")
+	if err != nil {
+		t.Fatalf("failed to initialize store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.CreateDagRun(&DagRun{
+		ID: "run_c1", DAGID: "dag_c", Status: RunRunning,
+		ExecDate: time.Now(), TriggerType: "manual", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	// Insert two tasks, "extract" with 2 attempts and "load" with 1 attempt
+	instances := []TaskInstance{
+		{ID: "run_c1_extract_1", RunID: "run_c1", TaskID: "extract", Attempt: 1, Status: TaskFailed, Output: "fail log", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: "run_c1_extract_2", RunID: "run_c1", TaskID: "extract", Attempt: 2, Status: TaskSuccess, Output: "ok", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: "run_c1_load_1", RunID: "run_c1", TaskID: "load", Attempt: 1, Status: TaskSuccess, Output: "loaded 100 rows", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}
+	for _, ti := range instances {
+		tiCopy := ti
+		if err := store.CreateTaskInstance(&tiCopy); err != nil {
+			t.Fatalf("create task instance %s: %v", ti.ID, err)
+		}
+	}
+
+	latest, err := store.GetLatestTaskAttempts("run_c1")
+	if err != nil {
+		t.Fatalf("GetLatestTaskAttempts: %v", err)
+	}
+
+	// Should have exactly 2 tasks (extract and load), not 3 rows
+	if len(latest) != 2 {
+		t.Fatalf("expected 2 latest tasks, got %d", len(latest))
+	}
+
+	// Find extract in results and verify it's attempt 2
+	for _, task := range latest {
+		if task.TaskID == "extract" {
+			if task.Attempt != 2 {
+				t.Errorf("expected extract to show attempt=2, got %d", task.Attempt)
+			}
+			if task.Output != "ok" {
+				t.Errorf("expected extract output to be 'ok', got %q", task.Output)
+			}
+		}
 	}
 }
 

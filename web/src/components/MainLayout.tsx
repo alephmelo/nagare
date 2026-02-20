@@ -11,6 +11,7 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   const { setColorScheme } = useMantineColorScheme();
   const computedColorScheme = useComputedColorScheme("dark", { getInitialValueInEffect: true });
   const [mounted, setMounted] = useState(false);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setMounted(true); }, []);
   const router = useRouter();
   const pathname = usePathname();

@@ -169,6 +169,26 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(tasks)
 }
 
+func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
+	// Route: /api/runs/{runID}/tasks/{taskID}/attempts
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 7 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	runID := parts[3]
+	taskID := parts[5]
+
+	attempts, err := s.store.GetTaskAttempts(runID, taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(attempts)
+}
+
 func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -213,6 +233,10 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux.HandleFunc("/api/runs/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/retry") && r.Method == http.MethodPost {
 			s.handleRetryTask(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/attempts") {
+			s.handleGetTaskAttempts(w, r)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/tasks") {

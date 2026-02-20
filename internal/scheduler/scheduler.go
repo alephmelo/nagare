@@ -297,7 +297,8 @@ func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string) (*models.D
 	return run, nil
 }
 
-// RetryTask resets a specific task instance back to pending and sets its parent run to running
+// RetryTask creates a new attempt for a failed/succeeded task rather than
+// overwriting the existing row, preserving the full attempt history.
 func (s *Scheduler) RetryTask(runID, taskID string) error {
 	taskStatus, err := s.store.GetTaskStatus(runID, taskID)
 	if err != nil {
@@ -308,21 +309,18 @@ func (s *Scheduler) RetryTask(runID, taskID string) error {
 		return fmt.Errorf("cannot retry task %s that is currently %s", taskID, taskStatus)
 	}
 
-	// Fetch full internal task ID. We need the unique UUID format: runID_taskID
-	fullTaskID := fmt.Sprintf("%s_%s", runID, taskID)
-
-	// Wipe output trace and revert status to pending
-	err = s.store.UpdateTaskInstanceStatusAndOutput(fullTaskID, models.TaskPending, "")
+	// Insert a brand-new attempt row (increments attempt counter)
+	newID, err := s.store.CreateNewTaskAttempt(runID, taskID)
 	if err != nil {
-		return fmt.Errorf("failed resetting task instance %s to pending: %w", fullTaskID, err)
+		return fmt.Errorf("failed creating new attempt for task %s: %w", taskID, err)
 	}
 
-	// Flip the parent DagRun recursively back online
+	// Flip the parent DagRun back to running so the worker picks it up
 	err = s.store.UpdateDagRunStatus(runID, models.RunRunning)
 	if err != nil {
 		return fmt.Errorf("failed resetting dag run %s to running: %w", runID, err)
 	}
 
-	log.Printf("Successfully staged manual retry for task %s on run %s", taskID, runID)
+	log.Printf("Staged retry attempt %s for task %s on run %s", newID, taskID, runID)
 	return nil
 }

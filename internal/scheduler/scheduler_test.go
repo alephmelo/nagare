@@ -198,12 +198,14 @@ func TestSchedulerRetryTask(t *testing.T) {
 	}
 	store.CreateDagRun(run)
 
-	// Seed a failed task
+	// Seed the first attempt (failed)
 	ti := &models.TaskInstance{
-		ID:        runID + "_t2",
+		ID:        runID + "_t2_1",
 		RunID:     runID,
 		TaskID:    "t2",
 		Status:    models.TaskFailed,
+		Output:    "exit code 1: some error",
+		Attempt:   1,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -214,10 +216,28 @@ func TestSchedulerRetryTask(t *testing.T) {
 		t.Fatalf("RetryTask failed: %v", err)
 	}
 
-	// Verify Task Instance is pending
-	status, _ := store.GetTaskStatus(runID, "t2")
-	if status != models.TaskPending {
-		t.Fatalf("Expected task to be reverted to pending, got %v", status)
+	// Latest attempt should be queued (new attempt row was inserted)
+	status, err := store.GetTaskStatus(runID, "t2")
+	if err != nil {
+		t.Fatalf("GetTaskStatus failed: %v", err)
+	}
+	if status != models.TaskQueued {
+		t.Errorf("Expected latest attempt to be queued, got %v", status)
+	}
+
+	// Original failed attempt must still exist with its output intact
+	attempts, err := store.GetTaskAttempts(runID, "t2")
+	if err != nil {
+		t.Fatalf("GetTaskAttempts failed: %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("Expected 2 attempts after retry, got %d", len(attempts))
+	}
+	if attempts[0].Output != "exit code 1: some error" {
+		t.Errorf("Original attempt output was overwritten: got %q", attempts[0].Output)
+	}
+	if attempts[1].Attempt != 2 {
+		t.Errorf("New attempt should have attempt=2, got %d", attempts[1].Attempt)
 	}
 
 	// Verify Run is back online
