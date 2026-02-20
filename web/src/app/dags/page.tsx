@@ -13,9 +13,14 @@ import {
   Grid,
   Skeleton,
   Pagination,
-  Alert
+  Alert,
+  Select,
+  Menu,
+  UnstyledButton,
+  ActionIcon,
+  Tooltip
 } from "@mantine/core";
-import { IconArrowLeft, IconAlertCircle, IconPlayerPlay, IconRobot, IconUser } from "@tabler/icons-react";
+import { IconArrowLeft, IconAlertCircle, IconPlayerPlay, IconRobot, IconUser, IconFilter, IconCheck } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { ReactFlow, Controls, Background, useNodesState, useEdgesState, Position, MarkerType, Node, Edge } from "@xyflow/react";
 import '@xyflow/react/dist/style.css';
@@ -96,8 +101,9 @@ export default function DagDetails() {
   const [error, setError] = useState<string | null>(null);
   const [triggering, setTriggering] = useState(false);
 
-  // Pagination bounds
   const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState<string | null>("all");
+  const [triggerFilter, setTriggerFilter] = useState<string | null>("all");
   const [totalRuns, setTotalRuns] = useState(0);
   const limit = 10;
 
@@ -193,7 +199,8 @@ export default function DagDetails() {
     // Periodic fetching runs list to sync paginated data
     const fetchRuns = async () => {
       try {
-        const runsRes = await fetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${id}`);
+        const url = `/api/runs?page=${page}&limit=${limit}&dag_id=${id}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`;
+        const runsRes = await fetch(url);
         if (runsRes.ok) {
           const runsData = await runsRes.json();
           setRuns(runsData.data || []);
@@ -211,7 +218,7 @@ export default function DagDetails() {
     const interval = setInterval(fetchRuns, 5000);
     return () => clearInterval(interval);
 
-  }, [id, page]);
+  }, [id, page, statusFilter, triggerFilter]);
 
   const handleTrigger = async () => {
     if (!id) return;
@@ -304,11 +311,72 @@ export default function DagDetails() {
                 <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
                   <Table.Thead>
                     <Table.Tr>
-                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Run ID</Table.Th>
-                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Status</Table.Th>
-                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Execution Date</Table.Th>
-                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Trigger</Table.Th>
-                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Elapsed Time</Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                        <Text size="sm" fw={700}>Run ID</Text>
+                      </Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                        <Menu shadow="md" width={150}>
+                          <Menu.Target>
+                            <UnstyledButton>
+                              <Group gap={4}>
+                                <Text size="sm" fw={700} c={statusFilter !== 'all' ? 'blue' : undefined}>Status</Text>
+                                <IconFilter size={14} color={statusFilter !== 'all' ? 'var(--mantine-color-blue-filled)' : 'var(--mantine-color-gray-5)'} />
+                              </Group>
+                            </UnstyledButton>
+                          </Menu.Target>
+                          <Menu.Dropdown>
+                            <Menu.Label>Filter by Status</Menu.Label>
+                            {[
+                              { value: 'all', label: 'All Statuses' },
+                              { value: 'success', label: 'Success' },
+                              { value: 'failed', label: 'Failed' },
+                              { value: 'running', label: 'Running' },
+                            ].map(opt => (
+                              <Menu.Item 
+                                key={opt.value}
+                                onClick={() => { setStatusFilter(opt.value); setPage(1); }}
+                                leftSection={statusFilter === opt.value ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}
+                              >
+                                {opt.label}
+                              </Menu.Item>
+                            ))}
+                          </Menu.Dropdown>
+                        </Menu>
+                      </Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                        <Text size="sm" fw={700}>Execution Date</Text>
+                      </Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                        <Menu shadow="md" width={150}>
+                          <Menu.Target>
+                            <UnstyledButton>
+                              <Group gap={4}>
+                                <Text size="sm" fw={700} c={triggerFilter !== 'all' ? 'blue' : undefined}>Trigger</Text>
+                                <IconFilter size={14} color={triggerFilter !== 'all' ? 'var(--mantine-color-blue-filled)' : 'var(--mantine-color-gray-5)'} />
+                              </Group>
+                            </UnstyledButton>
+                          </Menu.Target>
+                          <Menu.Dropdown>
+                            <Menu.Label>Filter by Trigger</Menu.Label>
+                            {[
+                              { value: 'all', label: 'All Triggers' },
+                              { value: 'manual', label: 'Manual' },
+                              { value: 'scheduled', label: 'Scheduled' },
+                            ].map(opt => (
+                              <Menu.Item 
+                                key={opt.value}
+                                onClick={() => { setTriggerFilter(opt.value); setPage(1); }}
+                                leftSection={triggerFilter === opt.value ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}
+                              >
+                                {opt.label}
+                              </Menu.Item>
+                            ))}
+                          </Menu.Dropdown>
+                        </Menu>
+                      </Table.Th>
+                      <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                        <Text size="sm" fw={700}>Elapsed Time</Text>
+                      </Table.Th>
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>

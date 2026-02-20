@@ -145,19 +145,42 @@ func (s *Store) UpdateDagRunStatus(runID string, status RunStatus) error {
 	return err
 }
 
-// GetDagRuns retrieves recent DAG runs, optionally filtered by dagID, with pagination
-func (s *Store) GetDagRuns(limit int, offset int, dagID string) ([]DagRun, error) {
+// GetDagRuns retrieves recent DAG runs, optionally filtered by dagID, status, and triggerType, with pagination
+func (s *Store) GetDagRuns(limit int, offset int, dagID string, status string, triggerType string) ([]DagRun, error) {
 	var query string
 	var rows *sql.Rows
 	var err error
 
-	if dagID != "" {
-		query = `SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs WHERE dag_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`
-		rows, err = s.db.Query(query, dagID, limit, offset)
-	} else {
-		query = `SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs ORDER BY created_at DESC LIMIT ? OFFSET ?`
-		rows, err = s.db.Query(query, limit, offset)
+	where := ""
+	params := []interface{}{}
+
+	if dagID != "" && dagID != "all" {
+		where = "WHERE dag_id = ?"
+		params = append(params, dagID)
 	}
+
+	if status != "" && status != "all" {
+		if where == "" {
+			where = "WHERE status = ?"
+		} else {
+			where += " AND status = ?"
+		}
+		params = append(params, status)
+	}
+
+	if triggerType != "" && triggerType != "all" {
+		if where == "" {
+			where = "WHERE trigger_type = ?"
+		} else {
+			where += " AND trigger_type = ?"
+		}
+		params = append(params, triggerType)
+	}
+
+	query = fmt.Sprintf(`SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, where)
+	params = append(params, limit, offset)
+
+	rows, err = s.db.Query(query, params...)
 
 	if err != nil {
 		return nil, err
@@ -175,18 +198,37 @@ func (s *Store) GetDagRuns(limit int, offset int, dagID string) ([]DagRun, error
 	return runs, nil
 }
 
-// GetDagRunsCount gets the total number of runs, optionally filtered by dagID
-func (s *Store) GetDagRunsCount(dagID string) (int, error) {
+// GetDagRunsCount gets the total number of runs, optionally filtered by dagID, status, and triggerType
+func (s *Store) GetDagRunsCount(dagID string, status string, triggerType string) (int, error) {
 	var query string
-	var row *sql.Row
+	where := ""
+	params := []interface{}{}
 
-	if dagID != "" {
-		query = `SELECT COUNT(*) FROM dag_runs WHERE dag_id = ?`
-		row = s.db.QueryRow(query, dagID)
-	} else {
-		query = `SELECT COUNT(*) FROM dag_runs`
-		row = s.db.QueryRow(query)
+	if dagID != "" && dagID != "all" {
+		where = "WHERE dag_id = ?"
+		params = append(params, dagID)
 	}
+
+	if status != "" && status != "all" {
+		if where == "" {
+			where = "WHERE status = ?"
+		} else {
+			where += " AND status = ?"
+		}
+		params = append(params, status)
+	}
+
+	if triggerType != "" && triggerType != "all" {
+		if where == "" {
+			where = "WHERE trigger_type = ?"
+		} else {
+			where += " AND trigger_type = ?"
+		}
+		params = append(params, triggerType)
+	}
+
+	query = fmt.Sprintf(`SELECT COUNT(*) FROM dag_runs %s`, where)
+	row := s.db.QueryRow(query, params...)
 
 	var count int
 	err := row.Scan(&count)

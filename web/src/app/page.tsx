@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Title, Card, Table, Badge, Text, Group, Button, Skeleton, Select, Pagination, Alert, List, ActionIcon, Tooltip } from "@mantine/core";
-import { IconRefresh, IconX, IconActivity, IconAlertCircle, IconRobot, IconUser, IconPlayerPlay, IconTimelineEvent } from "@tabler/icons-react";
+import { Title, Card, Table, Badge, Text, Group, Button, Skeleton, Select, Pagination, Alert, List, ActionIcon, Tooltip, Menu, UnstyledButton } from "@mantine/core";
+import { IconRefresh, IconX, IconActivity, IconAlertCircle, IconRobot, IconUser, IconPlayerPlay, IconTimelineEvent, IconFilter, IconCheck, IconChevronDown } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { notifications } from '@mantine/notifications';
 
@@ -40,6 +40,8 @@ export default function Dashboard() {
   // Pagination & Filtering state
   const [page, setPage] = useState(1);
   const [dagFilter, setDagFilter] = useState<string | null>("all");
+  const [statusFilter, setStatusFilter] = useState<string | null>("all");
+  const [triggerFilter, setTriggerFilter] = useState<string | null>("all");
   const [totalRuns, setTotalRuns] = useState(0);
   const limit = 10;
   
@@ -49,7 +51,7 @@ export default function Dashboard() {
     try {
       setLoading(true);
       const [runsRes, dagsRes, errorsRes, statsRes] = await Promise.all([
-        fetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}`),
+        fetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`),
         fetch("/api/dags"),
         fetch("/api/dags/errors"),
         fetch("/api/stats")
@@ -78,7 +80,7 @@ export default function Dashboard() {
     fetchData();
     const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
-  }, [page, dagFilter]);
+  }, [page, dagFilter, statusFilter, triggerFilter]);
 
   const handleTrigger = async (dagID: string) => {
     setTriggering(prev => ({ ...prev, [dagID]: true }));
@@ -210,21 +212,6 @@ export default function Dashboard() {
 
       <Group justify="space-between" mt="xl" mb="md">
         <Title order={4} c="dimmed">Recent Runs</Title>
-        <Select
-          placeholder="Filter by DAG"
-          data={[
-            { value: "all", label: "All DAGs" },
-            ...dags.map(d => ({ value: d.ID, label: d.ID }))
-          ]}
-          value={dagFilter}
-          onChange={(val) => {
-            setDagFilter(val);
-            setPage(1); // Reset to page 1 on filter change
-          }}
-          disabled={loading && dags.length === 0}
-          clearable={false}
-          style={{ width: 250 }}
-        />
       </Group>
 
       {/* System Health Banner */}
@@ -268,12 +255,102 @@ export default function Dashboard() {
           <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
             <Table.Thead>
               <Table.Tr>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Run ID</Table.Th>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>DAG ID</Table.Th>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Status</Table.Th>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Execution Date</Table.Th>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Trigger</Table.Th>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Elapsed Time</Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                  <Text size="sm" fw={700}>Run ID</Text>
+                </Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                  <Menu shadow="md" width={200}>
+                    <Menu.Target>
+                      <UnstyledButton>
+                        <Group gap={4}>
+                          <Text size="sm" fw={700} c={dagFilter !== 'all' ? 'blue' : undefined}>Dag ID</Text>
+                          <IconFilter size={14} color={dagFilter !== 'all' ? 'var(--mantine-color-blue-filled)' : 'var(--mantine-color-gray-5)'} />
+                        </Group>
+                      </UnstyledButton>
+                    </Menu.Target>
+                    <Menu.Dropdown>
+                      <Menu.Label>Filter by DAG</Menu.Label>
+                      <Menu.Item 
+                        onClick={() => { setDagFilter('all'); setPage(1); }}
+                        leftSection={dagFilter === 'all' ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}
+                      >
+                        All DAGs
+                      </Menu.Item>
+                      {dags.map(d => (
+                        <Menu.Item 
+                          key={d.ID}
+                          onClick={() => { setDagFilter(d.ID); setPage(1); }}
+                          leftSection={dagFilter === d.ID ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}
+                        >
+                          {d.ID}
+                        </Menu.Item>
+                      ))}
+                    </Menu.Dropdown>
+                  </Menu>
+                </Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                   <Menu shadow="md" width={150}>
+                    <Menu.Target>
+                      <UnstyledButton>
+                        <Group gap={4}>
+                          <Text size="sm" fw={700} c={statusFilter !== 'all' ? 'blue' : undefined}>Status</Text>
+                          <IconFilter size={14} color={statusFilter !== 'all' ? 'var(--mantine-color-blue-filled)' : 'var(--mantine-color-gray-5)'} />
+                        </Group>
+                      </UnstyledButton>
+                    </Menu.Target>
+                    <Menu.Dropdown>
+                      <Menu.Label>Filter by Status</Menu.Label>
+                      {[
+                        { value: 'all', label: 'All Statuses' },
+                        { value: 'success', label: 'Success' },
+                        { value: 'failed', label: 'Failed' },
+                        { value: 'running', label: 'Running' },
+                      ].map(opt => (
+                        <Menu.Item 
+                          key={opt.value}
+                          onClick={() => { setStatusFilter(opt.value); setPage(1); }}
+                          leftSection={statusFilter === opt.value ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}
+                        >
+                          {opt.label}
+                        </Menu.Item>
+                      ))}
+                    </Menu.Dropdown>
+                  </Menu>
+                </Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                  <Text size="sm" fw={700}>Execution Date</Text>
+                </Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                  <Menu shadow="md" width={150}>
+                    <Menu.Target>
+                      <UnstyledButton>
+                        <Group gap={4}>
+                          <Text size="sm" fw={700} c={triggerFilter !== 'all' ? 'blue' : undefined}>Trigger</Text>
+                          <IconFilter size={14} color={triggerFilter !== 'all' ? 'var(--mantine-color-blue-filled)' : 'var(--mantine-color-gray-5)'} />
+                        </Group>
+                      </UnstyledButton>
+                    </Menu.Target>
+                    <Menu.Dropdown>
+                      <Menu.Label>Filter by Trigger</Menu.Label>
+                      {[
+                        { value: 'all', label: 'All Triggers' },
+                        { value: 'manual', label: 'Manual' },
+                        { value: 'scheduled', label: 'Scheduled' },
+                      ].map(opt => (
+                        <Menu.Item 
+                          key={opt.value}
+                          onClick={() => { setTriggerFilter(opt.value); setPage(1); }}
+                          leftSection={triggerFilter === opt.value ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}
+                        >
+                          {opt.label}
+                        </Menu.Item>
+                      ))}
+                    </Menu.Dropdown>
+                  </Menu>
+                </Table.Th>
+                <Table.Th style={{ borderBottom: '2px solid var(--border-color)', height: '45px' }}>
+                  <Text size="sm" fw={700}>Elapsed Time</Text>
+                </Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>

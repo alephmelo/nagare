@@ -107,15 +107,25 @@ func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
 		dagID = ""
 	}
 
+	status := query.Get("status")
+	if status == "all" {
+		status = ""
+	}
+
+	trigger := query.Get("trigger")
+	if trigger == "all" {
+		trigger = ""
+	}
+
 	offset := (page - 1) * limit
 
-	runs, err := s.store.GetDagRuns(limit, offset, dagID)
+	runs, err := s.store.GetDagRuns(limit, offset, dagID, status, trigger)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	total, err := s.store.GetDagRunsCount(dagID)
+	total, err := s.store.GetDagRunsCount(dagID, status, trigger)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

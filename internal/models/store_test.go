@@ -275,32 +275,32 @@ func TestGetDagRunsPaginationAndFiltering(t *testing.T) {
 	}
 
 	// Test GetDagRunsCount
-	countA, err := store.GetDagRunsCount("dag_A")
+	countA, err := store.GetDagRunsCount("dag_A", "", "")
 	if err != nil || countA != 5 {
 		t.Errorf("expected 5 runs for dag_A, got %d", countA)
 	}
 
-	countAll, err := store.GetDagRunsCount("")
+	countAll, err := store.GetDagRunsCount("", "", "")
 	if err != nil || countAll != 8 {
 		t.Errorf("expected 8 total runs, got %d", countAll)
 	}
 
 	// Test Pagination for All Runs
 	// limit 3, offset 0 -> 3 runs
-	runs, err := store.GetDagRuns(3, 0, "")
+	runs, err := store.GetDagRuns(3, 0, "", "", "")
 	if err != nil || len(runs) != 3 {
 		t.Errorf("expected 3 runs with limit 3, got %d", len(runs))
 	}
 
 	// Test Pagination with Filtering
 	// dag_A, limit 2, offset 2 -> should get 2 runs
-	runsA, err := store.GetDagRuns(2, 2, "dag_A")
+	runsA, err := store.GetDagRuns(2, 2, "dag_A", "", "")
 	if err != nil || len(runsA) != 2 {
 		t.Errorf("expected 2 runs for dag_A with limit 2, got %d", len(runsA))
 	}
 
 	// dag_B, limit 5, offset 0 -> should get 3 runs
-	runsB, err := store.GetDagRuns(5, 0, "dag_B")
+	runsB, err := store.GetDagRuns(5, 0, "dag_B", "", "")
 	if err != nil || len(runsB) != 3 {
 		t.Errorf("expected 3 runs for dag_B, got %d", len(runsB))
 	}
