@@ -1,0 +1,17 @@
+id: sample_loop
+description: "A DAG using dynamic WithItems to fan-out processing."
+schedule: "*/10 * * * *" # every 10 seconds
+tasks:
+  - id: download_file
+    type: command
+    command: "echo 'Downloading {{item}}...' && sleep 2"
+    with_items:
+      - "dataset_A"
+      - "dataset_B"
+      - "dataset_C"
+
+  - id: process_all
+    type: command
+    command: "echo 'All arrays finished successfully!'"
+    depends_on:
+      - download_file

@@ -166,3 +166,56 @@ func TestValidate_ComplexCircularDependency(t *testing.T) {
 		t.Error("expected error for complex circular dependency (t1 -> t3 -> t2 -> t1)")
 	}
 }
+
+func TestParseDAGWithItems(t *testing.T) {
+	validYAML := []byte(`
+id: sample_loop
+description: "Test Loop"
+schedule: "* * * * *"
+tasks:
+  - id: download
+    type: command
+    command: "curl http://api/{{item}}"
+    with_items:
+      - "a"
+      - "b"
+  - id: process
+    type: command
+    command: "echo process"
+    depends_on:
+      - download
+`)
+
+	dag, err := ParseDAG(validYAML)
+	if err != nil {
+		t.Fatalf("Expected valid DAG to parse, got error: %v", err)
+	}
+
+	if len(dag.Tasks) != 3 {
+		t.Fatalf("Expected 3 tasks after expansion, got %d", len(dag.Tasks))
+	}
+
+	taskMap := make(map[string]TaskDef)
+	for _, tDef := range dag.Tasks {
+		taskMap[tDef.ID] = tDef
+	}
+
+	downloadA, ok := taskMap["download_a"]
+	if !ok || downloadA.Command != "curl http://api/a" {
+		t.Errorf("Expected download_a task with replaced command, got %+v", downloadA)
+	}
+
+	downloadB, ok := taskMap["download_b"]
+	if !ok || downloadB.Command != "curl http://api/b" {
+		t.Errorf("Expected download_b task with replaced command, got %+v", downloadB)
+	}
+
+	process, ok := taskMap["process"]
+	if !ok {
+		t.Fatalf("Expected process task to exist")
+	}
+
+	if len(process.DependsOn) != 2 || process.DependsOn[0] != "download_a" || process.DependsOn[1] != "download_b" {
+		t.Errorf("Expected process to depend on download_a and download_b, got %v", process.DependsOn)
+	}
+}

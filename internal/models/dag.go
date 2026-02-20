@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
@@ -13,6 +14,7 @@ type TaskDef struct {
 	Type      string   `yaml:"type"` // e.g. "command"
 	Command   string   `yaml:"command"`
 	DependsOn []string `yaml:"depends_on"`
+	WithItems []string `yaml:"with_items,omitempty"`
 }
 
 // DAGDef defines the workflow graph of Tasks
@@ -23,13 +25,54 @@ type DAGDef struct {
 	Tasks       []TaskDef `yaml:"tasks"`
 }
 
-// ParseDAG parses a YAML byte slice into a DAGDef
 func ParseDAG(data []byte) (*DAGDef, error) {
 	var dag DAGDef
 	err := yaml.Unmarshal(data, &dag)
 	if err != nil {
 		return nil, err
 	}
+
+	// Expand Tasks with WithItems
+	var expandedTasks []TaskDef
+
+	// Track expansions: map[original_task_id][]new_task_ids
+	expansions := make(map[string][]string)
+
+	for _, t := range dag.Tasks {
+		if len(t.WithItems) > 0 {
+			var newIDs []string
+			for _, item := range t.WithItems {
+				clone := t
+				clone.ID = fmt.Sprintf("%s_%s", t.ID, item)
+				clone.Command = strings.ReplaceAll(t.Command, "{{item}}", item)
+
+				// Empty the specific WithItems list so it doesn't duplicate loop logic inherently
+				clone.WithItems = nil
+
+				expandedTasks = append(expandedTasks, clone)
+				newIDs = append(newIDs, clone.ID)
+			}
+			expansions[t.ID] = newIDs
+		} else {
+			expandedTasks = append(expandedTasks, t)
+		}
+	}
+
+	// Rewrite dependencies
+	for i := range expandedTasks {
+		var newDeps []string
+		for _, dep := range expandedTasks[i].DependsOn {
+			if expandedNewIDs, found := expansions[dep]; found {
+				newDeps = append(newDeps, expandedNewIDs...)
+			} else {
+				newDeps = append(newDeps, dep)
+			}
+		}
+		expandedTasks[i].DependsOn = newDeps
+	}
+
+	dag.Tasks = expandedTasks
+
 	return &dag, nil
 }
 
