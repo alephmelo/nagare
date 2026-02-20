@@ -89,10 +89,12 @@ func (d *DAGDef) Validate() error {
 		return fmt.Errorf("DAG %s has no tasks defined", d.ID)
 	}
 
-	// 1. Validate Cron Schedule
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	if _, err := parser.Parse(d.Schedule); err != nil {
-		return fmt.Errorf("invalid cron schedule '%s' for DAG %s: %v", d.Schedule, d.ID, err)
+	// 1. Validate Cron Schedule (allow empty or workflow_dispatch)
+	if d.Schedule != "" && d.Schedule != "workflow_dispatch" {
+		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+		if _, err := parser.Parse(d.Schedule); err != nil {
+			return fmt.Errorf("invalid cron schedule '%s' for DAG %s: %v", d.Schedule, d.ID, err)
+		}
 	}
 
 	taskIDs := make(map[string]bool)

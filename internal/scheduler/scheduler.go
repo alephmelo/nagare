@@ -121,6 +121,10 @@ func (s *Scheduler) Tick() error {
 
 	s.mu.Lock()
 	for _, dag := range s.dags {
+		if dag.Schedule == "" || dag.Schedule == "workflow_dispatch" {
+			continue // Skip cron evaluation for manual DAGs
+		}
+
 		sched, err := parser.Parse(dag.Schedule)
 		if err != nil {
 			log.Printf("Invalid cron schedule for DAG %s: %v", dag.ID, err)
