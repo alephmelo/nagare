@@ -9,6 +9,7 @@ It is designed as a lightweight alternative to heavy data pipeline tools like Ap
 - **Embedded State Machine**: Uses SQLite natively out-of-the-box for robust, local state tracking of DAG Runs and Task Instances.
 - **Cron Scheduling**: Native evaluation of cron schedules to trigger DAGs exactly when they are needed.
 - **Topological Execution**: Evaluates parent/child task dependencies natively (e.g. `process_data` waits for `download_data` to finish).
+- **Process Management**: Gracefully terminate stuck or runaway DAG runs and individual task instances directly from the UI or via API endpoints.
 - **Single Binary Web UI**: The entire Next.js + Mantine dashboard is compiled into static files and embedded directly into the Go binary (`//go:embed all:web/out`). Drop the executable onto a server, and you get a production-ready engine + dashboard on port `8080` instantly.
 
 ---
@@ -49,6 +50,13 @@ tasks:
       - t1
 ```
 The scheduler evaluates schedules every 5 seconds. Once the cron condition is met, Nagare queues `t1`, waits for it to succeed, and then queues `t2`.
+
+### 3. Managing Execution
+If a step takes too long or you need to cancel a DAG run:
+- Navigate to the **Dashboard** (`http://localhost:8080`) to see active runs.
+- Click the stop icon next to any `RUNNING` workflow to kill the entire run.
+- Click the Run ID to view individual step logs.
+- Click the stop icon next to any `RUNNING` step to kill that specific task.
 
 ---
 ## Development

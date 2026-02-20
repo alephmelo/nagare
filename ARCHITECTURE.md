@@ -23,6 +23,7 @@ There are two core tables:
 - `dag_runs`: Tracks entire workflow executions (Status, Execution Date).
 - `task_instances`: Tracks individual units of work within a run. 
   - Statuses advance linearly: `pending` -> `queued` -> `running` -> `success` | `failed`.
+  - Runs and tasks can also be moved to `cancelled` if terminated by the user.
 
 ### 3. The Scheduler (`internal/scheduler/scheduler.go`)
 The brain of the operation. It runs on a continuous `time.Ticker` cycle (e.g. every 5 seconds).
@@ -35,6 +36,7 @@ The muscle. Instead of distributed workers communicating over HTTP/RPC, Nagare u
 - A **Dispatcher** continually polls the SQLite DB for explicitly `queued` tasks and pushes them into a buffered Go **Channel** (`chan models.TaskInstance`).
 - A **Worker Pool** (configurable, currently a set of fixed goroutines) constantly listens to this channel.
 - Workers pop a task off the channel, update the DB state to `running`, execute the shell command locally via `os/exec`, and report `success` or `failed` back to the store.
+- Workers keep a thread-safe registry of active `os/exec.Cmd` processes, mapped to task IDs. This enables the API/Scheduler to signal a process termination (`RunCancelled` / `TaskCancelled`) gracefully.
 
 ## Developing 
 We adhere strictly to TDD (`go test ./...` should pass cleanly at all times).
