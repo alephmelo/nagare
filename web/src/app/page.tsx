@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton, Select, Pagination, RingProgress, Center, Alert, List, Code } from "@mantine/core";
-import { IconPlayerPlay, IconRefresh, IconCheck, IconX, IconActivity, IconAlertCircle } from "@tabler/icons-react";
+import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton, Select, Pagination, RingProgress, Center, Alert, List } from "@mantine/core";
+import { IconPlayerPlay, IconRefresh, IconCheck, IconX, IconActivity, IconAlertCircle, IconArrowRight } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 
 interface Run {
@@ -127,12 +127,12 @@ export default function Dashboard() {
                 fullWidth 
                 mt="md" 
                 radius="md" 
-                leftSection={<IconPlayerPlay size={16} />}
+                leftSection={<IconArrowRight size={16} />}
                 onClick={() => {
-                   alert("Trigger API not currently implemented!");
+                   router.push(`/dags?id=${dag.ID}`);
                 }}
               >
-                Trigger
+                View Details
               </Button>
             </Card>
           ))}
