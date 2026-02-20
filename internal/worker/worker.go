@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os/exec"
 	"sync"
@@ -13,6 +14,7 @@ import (
 type Pool struct {
 	store      *models.Store
 	getDAG     func(string) (*models.DAGDef, bool)
+	triggerDAG func(string) (*models.DagRun, error)
 	taskQueue  chan models.TaskInstance
 	workerSize int
 	wg         sync.WaitGroup
@@ -21,10 +23,11 @@ type Pool struct {
 }
 
 // NewPool initializes a new worker pool
-func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), size int) *Pool {
+func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string) (*models.DagRun, error), size int) *Pool {
 	return &Pool{
 		store:      store,
 		getDAG:     getDAG,
+		triggerDAG: triggerDAG,
 		taskQueue:  make(chan models.TaskInstance, 100),
 		workerSize: size,
 		running:    make(map[string]*exec.Cmd),
@@ -95,14 +98,34 @@ func (p *Pool) executeTask(ti models.TaskInstance, workerID int) {
 		return
 	}
 
-	var cmdStr string
-	for _, t := range dag.Tasks {
-		if t.ID == ti.TaskID {
-			cmdStr = t.Command
+	var taskDef *models.TaskDef
+	for i := range dag.Tasks {
+		if dag.Tasks[i].ID == ti.TaskID {
+			taskDef = &dag.Tasks[i]
 			break
 		}
 	}
 
+	if taskDef == nil {
+		p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+		return
+	}
+
+	if taskDef.Type == "trigger_dag" {
+		triggeredRun, err := p.triggerDAG(taskDef.DagID)
+		if err != nil {
+			output := fmt.Sprintf("Failed to trigger DAG %s: %v", taskDef.DagID, err)
+			log.Printf("Worker %d: Task %s FAILED: %s", workerID, ti.ID, output)
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, output)
+		} else {
+			output := fmt.Sprintf("Successfully triggered DAG run: %s", triggeredRun.ID)
+			log.Printf("Worker %d: Task %s SUCCESS\nOutput: %s", workerID, ti.ID, output)
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, output)
+		}
+		return
+	}
+
+	cmdStr := taskDef.Command
 	if cmdStr == "" {
 		p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
 		return

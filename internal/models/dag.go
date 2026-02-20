@@ -11,8 +11,9 @@ import (
 // TaskDef defines a unit of work within a DAG
 type TaskDef struct {
 	ID                string   `yaml:"id"`
-	Type              string   `yaml:"type"` // e.g. "command"
-	Command           string   `yaml:"command"`
+	Type              string   `yaml:"type"`             // e.g. "command" or "trigger_dag"
+	DagID             string   `yaml:"dag_id,omitempty"` // For "trigger_dag" tasks
+	Command           string   `yaml:"command,omitempty"`
 	Retries           int      `yaml:"retries,omitempty"`
 	RetryDelaySeconds int      `yaml:"retry_delay_seconds,omitempty"`
 	DependsOn         []string `yaml:"depends_on"`

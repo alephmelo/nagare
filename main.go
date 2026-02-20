@@ -46,7 +46,7 @@ func main() {
 		d, ok := sched.GetDAGs()[id]
 		return d, ok
 	}
-	pool := worker.NewPool(store, getDAG, 4)
+	pool := worker.NewPool(store, getDAG, sched.TriggerDAG, 4)
 
 	// 4. Initialize API Server
 	apiServer := api.NewServer(store, sched, pool)

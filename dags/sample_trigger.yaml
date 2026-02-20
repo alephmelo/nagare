@@ -1,0 +1,19 @@
+id: master_trigger_dag
+description: "A DAG that triggers another downstream DAG (sample_dag)"
+schedule: "0 * * * *" # Runs every hour
+tasks:
+  - id: prepare_trigger
+    type: command
+    command: "echo 'Preparing to trigger the downstream pipeline...'"
+
+  - id: trigger_downstream
+    type: trigger_dag
+    dag_id: "sample_dag" # Triggers the DAG defined in sample.yaml
+    depends_on:
+      - prepare_trigger
+
+  - id: post_trigger_cleanup
+    type: command
+    command: "echo 'Trigger dispatched successfully! Cleaning up...'"
+    depends_on:
+      - trigger_downstream
