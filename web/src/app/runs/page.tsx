@@ -2,8 +2,8 @@
 
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { Title, Card, Code, Table, Badge, Button, Group, Text, Loader, Center } from "@mantine/core";
-import { IconArrowLeft, IconRefresh } from "@tabler/icons-react";
+import { Title, Card, Code, Table, Badge, Button, Group, Text, Loader, Center, ActionIcon } from "@mantine/core";
+import { IconArrowLeft, IconRefresh, IconPlayerPlay } from "@tabler/icons-react";
 import { useCallback } from "react";
 
 interface RunTask {
@@ -41,6 +41,20 @@ function RunDetailsContent() {
     const interval = setInterval(fetchTasks, 3000);
     return () => clearInterval(interval);
   }, [fetchTasks]);
+
+  const handleRetry = async (taskID: string) => {
+    try {
+      const res = await fetch(`/api/runs/${id}/tasks/${taskID}/retry`, { method: "POST" });
+      if (res.ok) {
+        fetchTasks();
+      } else {
+        alert("Failed to queue task for retry");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error queueing task retry");
+    }
+  };
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -80,6 +94,7 @@ function RunDetailsContent() {
                 <Table.Th>Status</Table.Th>
                 <Table.Th>Output Log</Table.Th>
                 <Table.Th>Updated At</Table.Th>
+                <Table.Th>Action</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
@@ -97,11 +112,23 @@ function RunDetailsContent() {
                     </Code>
                   </Table.Td>
                   <Table.Td>{new Date(task.UpdatedAt).toLocaleString()}</Table.Td>
+                  <Table.Td>
+                    {(task.Status === "success" || task.Status === "failed") && (
+                      <ActionIcon 
+                         variant="light" 
+                         color="blue" 
+                         onClick={() => handleRetry(task.TaskID)}
+                         title="Retry Task"
+                      >
+                         <IconPlayerPlay size={16} />
+                      </ActionIcon>
+                    )}
+                  </Table.Td>
                 </Table.Tr>
               ))}
               {(!tasks || tasks.length === 0) && !loading && (
                   <Table.Tr>
-                    <Table.Td colSpan={4} align="center" py="xl">
+                    <Table.Td colSpan={5} align="center" py="xl">
                       <Text c="dimmed">No tasks found for this run.</Text>
                     </Table.Td>
                   </Table.Tr>

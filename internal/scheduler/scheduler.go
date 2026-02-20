@@ -132,38 +132,12 @@ func (s *Scheduler) Tick() error {
 
 		// If it's time to run
 		if now.After(nextRunTime) || now.Equal(nextRunTime) {
-			log.Printf("Triggering DAG %s", dag.ID)
+			log.Printf("Cron Triggering DAG %s", dag.ID)
 
-			run := &models.DagRun{
-				ID:        fmt.Sprintf("%s_%d", dag.ID, now.UnixNano()),
-				DAGID:     dag.ID,
-				Status:    models.RunRunning,
-				ExecDate:  now,
-				CreatedAt: now,
-			}
-
-			if err := s.store.CreateDagRun(run); err != nil {
-				log.Printf("Failed to create DagRun for %s: %v", dag.ID, err)
+			_, err := s.createRun(dag)
+			if err != nil {
+				log.Printf("Cron failed to trigger %s: %v", dag.ID, err)
 				continue
-			}
-
-			for _, tDef := range dag.Tasks {
-				status := models.TaskPending
-				if len(tDef.DependsOn) == 0 {
-					status = models.TaskQueued
-				}
-
-				ti := &models.TaskInstance{
-					ID:        fmt.Sprintf("%s_%s", run.ID, tDef.ID),
-					RunID:     run.ID,
-					TaskID:    tDef.ID,
-					Status:    status,
-					CreatedAt: now,
-					UpdatedAt: now,
-				}
-				if err := s.store.CreateTaskInstance(ti); err != nil {
-					log.Printf("Failed to create TaskInstance %s: %v", ti.ID, err)
-				}
 			}
 
 			s.lastExec[dag.ID] = now
@@ -270,5 +244,84 @@ func (s *Scheduler) PromotePendingTasks() error {
 			s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskQueued)
 		}
 	}
+	return nil
+}
+
+// TriggerDAG forcefully instantiates a new run of a DAG manually bypassing cron
+func (s *Scheduler) TriggerDAG(dagID string) (*models.DagRun, error) {
+	s.mu.RLock()
+	dag, exists := s.dags[dagID]
+	s.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("DAG %s not found in memory map", dagID)
+	}
+
+	return s.createRun(dag)
+}
+
+func (s *Scheduler) createRun(dag *models.DAGDef) (*models.DagRun, error) {
+	now := time.Now()
+	run := &models.DagRun{
+		ID:        fmt.Sprintf("%s_%d", dag.ID, now.UnixNano()),
+		DAGID:     dag.ID,
+		Status:    models.RunRunning,
+		ExecDate:  now,
+		CreatedAt: now,
+	}
+
+	if err := s.store.CreateDagRun(run); err != nil {
+		return nil, fmt.Errorf("Failed to create DagRun for %s: %v", dag.ID, err)
+	}
+
+	for _, tDef := range dag.Tasks {
+		status := models.TaskPending
+		if len(tDef.DependsOn) == 0 {
+			status = models.TaskQueued
+		}
+
+		ti := &models.TaskInstance{
+			ID:        fmt.Sprintf("%s_%s", run.ID, tDef.ID),
+			RunID:     run.ID,
+			TaskID:    tDef.ID,
+			Status:    status,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := s.store.CreateTaskInstance(ti); err != nil {
+			log.Printf("Failed to map TaskInstance %s: %v", ti.ID, err)
+		}
+	}
+
+	return run, nil
+}
+
+// RetryTask resets a specific task instance back to pending and sets its parent run to running
+func (s *Scheduler) RetryTask(runID, taskID string) error {
+	taskStatus, err := s.store.GetTaskStatus(runID, taskID)
+	if err != nil {
+		return fmt.Errorf("task %s not found in run %s: %w", taskID, runID, err)
+	}
+
+	if taskStatus == models.TaskRunning || taskStatus == models.TaskQueued {
+		return fmt.Errorf("cannot retry task %s that is currently %s", taskID, taskStatus)
+	}
+
+	// Fetch full internal task ID. We need the unique UUID format: runID_taskID
+	fullTaskID := fmt.Sprintf("%s_%s", runID, taskID)
+
+	// Wipe output trace and revert status to pending
+	err = s.store.UpdateTaskInstanceStatusAndOutput(fullTaskID, models.TaskPending, "")
+	if err != nil {
+		return fmt.Errorf("failed resetting task instance %s to pending: %w", fullTaskID, err)
+	}
+
+	// Flip the parent DagRun recursively back online
+	err = s.store.UpdateDagRunStatus(runID, models.RunRunning)
+	if err != nil {
+		return fmt.Errorf("failed resetting dag run %s to running: %w", runID, err)
+	}
+
+	log.Printf("Successfully staged manual retry for task %s on run %s", taskID, runID)
 	return nil
 }

@@ -62,6 +62,29 @@ func (s *Server) handleGetDAGErrors(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(errorsMap)
 }
 
+func (s *Server) handleTriggerDAG(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	dagID := parts[3]
+
+	run, err := s.scheduler.TriggerDAG(dagID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(run)
+}
+
 func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
@@ -126,15 +149,51 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(tasks)
 }
 
+func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Route mapping: /api/runs/{run_id}/tasks/{task_id}/retry
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 7 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	runID := parts[3]
+	taskID := parts[5]
+
+	err := s.scheduler.RetryTask(runID, taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Task queued for retry successfully"})
+}
+
 // Start launches the HTTP server
 func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/dags", corsMiddleware(s.handleGetDAGs))
 	mux.HandleFunc("/api/dags/errors", corsMiddleware(s.handleGetDAGErrors))
+	mux.HandleFunc("/api/dags/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/runs") && r.Method == http.MethodPost {
+			s.handleTriggerDAG(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
 	mux.HandleFunc("/api/runs", corsMiddleware(s.handleGetRuns))
-	// Generic handler for anything starting with /api/runs/ to catch /api/runs/{id}/tasks
+	// Generic handler for anything starting with /api/runs/ to catch /api/runs/{id}/tasks and retries
 	mux.HandleFunc("/api/runs/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/retry") && r.Method == http.MethodPost {
+			s.handleRetryTask(w, r)
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/tasks") {
 			s.handleGetRunTasks(w, r)
 			return

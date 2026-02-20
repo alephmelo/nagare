@@ -147,3 +147,81 @@ tasks:
 
 	wg.Wait()
 }
+
+func TestSchedulerTriggerDAG(t *testing.T) {
+	store, _ := models.NewStore("file::memory:?cache=shared&mode=memory")
+	defer store.Close()
+
+	sched := NewScheduler(store)
+
+	// Inject a dummy DAG manually
+	sched.dags["manual_dag"] = &models.DAGDef{
+		ID:       "manual_dag",
+		Schedule: "* * * * *",
+		Tasks: []models.TaskDef{
+			{ID: "t1"},
+		},
+	}
+
+	run, err := sched.TriggerDAG("manual_dag")
+	if err != nil {
+		t.Fatalf("TriggerDAG failed: %v", err)
+	}
+	if run == nil {
+		t.Fatalf("Expected run to be returned")
+	}
+
+	// Verify a DagRun was created
+	rows, _ := store.GetQueuedTasks()
+	if len(rows) != 1 || rows[0].TaskID != "t1" {
+		t.Fatalf("expected 1 queued task (t1)")
+	}
+}
+
+func TestSchedulerRetryTask(t *testing.T) {
+	store, _ := models.NewStore("file::memory:?cache=shared&mode=memory")
+	defer store.Close()
+
+	sched := NewScheduler(store)
+
+	now := time.Now()
+	runID := "run_retry_test"
+
+	// Seed a failed run
+	run := &models.DagRun{
+		ID:        runID,
+		DAGID:     "some_dag",
+		Status:    models.RunFailed,
+		ExecDate:  now,
+		CreatedAt: now,
+	}
+	store.CreateDagRun(run)
+
+	// Seed a failed task
+	ti := &models.TaskInstance{
+		ID:        runID + "_t2",
+		RunID:     runID,
+		TaskID:    "t2",
+		Status:    models.TaskFailed,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	store.CreateTaskInstance(ti)
+
+	err := sched.RetryTask(runID, "t2")
+	if err != nil {
+		t.Fatalf("RetryTask failed: %v", err)
+	}
+
+	// Verify Task Instance is pending
+	status, _ := store.GetTaskStatus(runID, "t2")
+	if status != models.TaskPending {
+		t.Fatalf("Expected task to be reverted to pending, got %v", status)
+	}
+
+	// Verify Run is back online
+	dbRun, _ := store.GetDagRun(runID)
+	if dbRun.Status != models.RunRunning {
+		t.Fatalf("Expected run to be reverted to running, got %v", dbRun.Status)
+	}
+}

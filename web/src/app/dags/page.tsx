@@ -15,7 +15,7 @@ import {
   Pagination,
   Alert
 } from "@mantine/core";
-import { IconArrowLeft, IconAlertCircle } from "@tabler/icons-react";
+import { IconArrowLeft, IconAlertCircle, IconPlayerPlay } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { ReactFlow, Controls, Background, useNodesState, useEdgesState, Position, MarkerType, Node, Edge } from "@xyflow/react";
 import '@xyflow/react/dist/style.css';
@@ -92,6 +92,7 @@ export default function DagDetails() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [triggering, setTriggering] = useState(false);
 
   // Pagination bounds
   const [page, setPage] = useState(1);
@@ -205,6 +206,23 @@ export default function DagDetails() {
 
   }, [id, page]);
 
+  const handleTrigger = async () => {
+    if (!id) return;
+    setTriggering(true);
+    try {
+      const res = await fetch(`/api/dags/${id}/runs`, { method: "POST" });
+      if (res.ok) {
+        setPage(1); // Reset to first page so they see it
+      } else {
+        alert("Failed to manual trigger DAG");
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setTriggering(false);
+    }
+  };
+
   const getStatusColor = (status: string) => {
     switch (status) {
       case "success": return "green";
@@ -233,6 +251,16 @@ export default function DagDetails() {
           <Title order={2}>{id}</Title>
           {dag && <Badge variant="light" color="cyan" size="lg">{dag.Schedule}</Badge>}
         </Group>
+        {dag && (
+          <Button 
+            leftSection={<IconPlayerPlay size={16} />} 
+            color="blue" 
+            onClick={handleTrigger}
+            loading={triggering}
+          >
+            Trigger Pipeline
+          </Button>
+        )}
       </Group>
       
       {dag && (
