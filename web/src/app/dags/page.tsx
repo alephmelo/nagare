@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Title,
@@ -90,7 +90,7 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => 
   return { nodes, edges };
 };
 
-export default function DagDetails() {
+function DagDetailsContent() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id");
   const router = useRouter();
@@ -489,5 +489,13 @@ export default function DagDetails() {
         </Grid>
       )}
     </>
+  );
+}
+
+export default function DagDetails() {
+  return (
+    <Suspense fallback={<Skeleton height={400} />}>
+      <DagDetailsContent />
+    </Suspense>
   );
 }
