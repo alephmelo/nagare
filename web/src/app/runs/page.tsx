@@ -1,34 +1,184 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useState, Suspense, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { Title, Card, Code, Table, Badge, Button, Group, Text, Loader, Center, ActionIcon } from "@mantine/core";
-import { IconArrowLeft, IconRefresh, IconPlayerPlay } from "@tabler/icons-react";
-import { useCallback } from "react";
-import { notifications } from '@mantine/notifications';
+import {
+  Title,
+  Card,
+  Code,
+  Badge,
+  Button,
+  Group,
+  Text,
+  Loader,
+  Center,
+  ActionIcon,
+  Collapse,
+  Stack,
+  Divider,
+  Skeleton,
+  ThemeIcon,
+  Tooltip,
+  Box,
+} from "@mantine/core";
+import {
+  IconArrowLeft,
+  IconRefresh,
+  IconPlayerPlay,
+  IconCheck,
+  IconX,
+  IconClock,
+  IconChevronDown,
+  IconChevronRight,
+  IconTerminal2,
+  IconAlertCircle,
+} from "@tabler/icons-react";
+import { notifications } from "@mantine/notifications";
 
 interface RunTask {
   ID: string;
   TaskID: string;
   Status: string;
   Output: string;
+  CreatedAt: string;
   UpdatedAt: string;
+}
+
+interface Run {
+  ID: string;
+  DAGID: string;
+  Status: string;
+  ExecDate: string;
+  TriggerType: string;
+  CreatedAt: string;
+  CompletedAt?: string;
+}
+
+function StatusIcon({ status }: { status: string }) {
+  switch (status) {
+    case "success":
+      return <ThemeIcon color="green" variant="light" size="md" radius="xl"><IconCheck size={14} /></ThemeIcon>;
+    case "failed":
+      return <ThemeIcon color="red" variant="light" size="md" radius="xl"><IconX size={14} /></ThemeIcon>;
+    case "running":
+      return <ThemeIcon color="blue" variant="light" size="md" radius="xl"><Loader size={12} color="blue" /></ThemeIcon>;
+    case "queued":
+      return <ThemeIcon color="yellow" variant="light" size="md" radius="xl"><IconClock size={14} /></ThemeIcon>;
+    default:
+      return <ThemeIcon color="gray" variant="light" size="md" radius="xl"><IconAlertCircle size={14} /></ThemeIcon>;
+  }
+}
+
+function TaskRow({ task, onRetry }: { task: RunTask; onRetry: (taskID: string) => void }) {
+  const [expanded, setExpanded] = useState(task.Status === "failed");
+  const hasOutput = task.Output && task.Output.trim().length > 0;
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "success": return "green";
+      case "failed": return "red";
+      case "running": return "blue";
+      case "queued": return "yellow";
+      default: return "gray";
+    }
+  };
+
+  return (
+    <Card padding="0" mb="xs" style={{ border: task.Status === "failed" ? "1px solid var(--mantine-color-red-3)" : "1px solid var(--mantine-color-default-border)" }}>
+      {/* Task Header Row */}
+      <Group
+        px="md"
+        py="sm"
+        justify="space-between"
+        style={{ cursor: hasOutput ? "pointer" : "default" }}
+        onClick={() => hasOutput && setExpanded((v) => !v)}
+      >
+        <Group gap="sm">
+          <StatusIcon status={task.Status} />
+          <div>
+            <Text fw={600} size="sm">{task.TaskID}</Text>
+            <Text size="xs" c="dimmed">
+              Updated {new Date(task.UpdatedAt).toLocaleTimeString()}
+            </Text>
+          </div>
+        </Group>
+        <Group gap="sm">
+          <Badge color={getStatusColor(task.Status)} variant="light" radius="sm" size="sm">
+            {task.Status.toUpperCase()}
+          </Badge>
+          {(task.Status === "success" || task.Status === "failed") && (
+            <Tooltip label="Retry Task">
+              <ActionIcon
+                variant="light"
+                color="blue"
+                size="sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRetry(task.TaskID);
+                }}
+              >
+                <IconPlayerPlay size={12} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+          {hasOutput && (
+            <ActionIcon variant="transparent" size="sm" color="dimmed">
+              {expanded ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+            </ActionIcon>
+          )}
+        </Group>
+      </Group>
+
+      {/* Expandable Log Output */}
+      <Collapse in={expanded}>
+        <Divider />
+        <Box p="md" style={{ backgroundColor: "var(--mantine-color-dark-8, #0b0f19)" }}>
+          <Group gap="xs" mb="xs">
+            <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
+            <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Output Log</Text>
+          </Group>
+          <Code
+            block
+            style={{
+              whiteSpace: "pre-wrap",
+              maxHeight: "300px",
+              overflowY: "auto",
+              fontSize: "12px",
+              lineHeight: 1.7,
+              backgroundColor: "transparent",
+              border: "none",
+              color: task.Status === "failed" ? "var(--mantine-color-red-4)" : "var(--mantine-color-green-4)",
+            }}
+          >
+            {task.Output || "No output generated yet."}
+          </Code>
+        </Box>
+      </Collapse>
+    </Card>
+  );
 }
 
 function RunDetailsContent() {
   const searchParams = useSearchParams();
-  const id = searchParams.get('id');
+  const id = searchParams.get("id");
   const router = useRouter();
   const [tasks, setTasks] = useState<RunTask[]>([]);
+  const [run, setRun] = useState<Run | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchTasks = useCallback(async () => {
     if (!id) return;
     try {
-      setLoading(true);
-      const res = await fetch(`/api/runs/${id}/tasks`);
-      if (res.ok) {
-        setTasks(await res.json());
+      // Fetch both the task list and the run metadata in parallel
+      const [tasksRes, runsRes] = await Promise.all([
+        fetch(`/api/runs/${id}/tasks`),
+        fetch(`/api/runs?page=1&limit=100`),
+      ]);
+      if (tasksRes.ok) setTasks(await tasksRes.json());
+      if (runsRes.ok) {
+        const runsData = await runsRes.json();
+        const matchedRun = (runsData.data || []).find((r: Run) => r.ID === id);
+        if (matchedRun) setRun(matchedRun);
       }
     } catch (err) {
       console.error("Failed to fetch tasks", err);
@@ -48,116 +198,137 @@ function RunDetailsContent() {
       const res = await fetch(`/api/runs/${id}/tasks/${taskID}/retry`, { method: "POST" });
       if (res.ok) {
         fetchTasks();
-        notifications.show({
-          title: 'Task Requeued',
-          message: `Successfully sent task ${taskID} back to pending state.`,
-          color: 'green',
-        });
+        notifications.show({ title: "Task Requeued", message: `Sent ${taskID} back to pending.`, color: "green" });
       } else {
-        notifications.show({
-          title: 'Retry Failed',
-          message: `Failed to queue task ${taskID} for retry.`,
-          color: 'red',
-        });
+        notifications.show({ title: "Retry Failed", message: `Could not retry ${taskID}.`, color: "red" });
       }
-    } catch (err) {
-      console.error(err);
-      notifications.show({
-        title: 'Network Error',
-        message: 'Could not communicate with the API.',
-        color: 'red',
-      });
+    } catch {
+      notifications.show({ title: "Network Error", message: "Could not communicate with the API.", color: "red" });
     }
   };
 
-  const getStatusColor = (status: string) => {
+  const getRunStatusColor = (status: string) => {
     switch (status) {
       case "success": return "green";
       case "failed": return "red";
       case "running": return "blue";
-      case "queued": return "yellow";
       default: return "gray";
     }
   };
 
+  const elapsedTime = run
+    ? run.CompletedAt
+      ? `${Math.max(1, Math.floor((new Date(run.CompletedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
+      : run.Status === "running"
+      ? `${Math.max(1, Math.floor((new Date().getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s elapsed`
+      : "—"
+    : null;
+
+  const successCount = tasks.filter((t) => t.Status === "success").length;
+  const failedCount = tasks.filter((t) => t.Status === "failed").length;
+  const runningCount = tasks.filter((t) => t.Status === "running").length;
+
   if (!id) {
-     return <Center h={200}><Title order={3} c="dimmed">No RUN ID provided</Title></Center>;
+    return (
+      <Center h={200}>
+        <Title order={3} c="dimmed">No Run ID provided</Title>
+      </Center>
+    );
   }
 
   return (
     <>
+      {/* Header */}
       <Group justify="space-between" mb="xl">
         <Group>
           <Button variant="subtle" color="gray" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push("/")}>
             Back
           </Button>
-          <Title order={3}>Run Details</Title>
-          <Badge size="lg" variant="outline" color="blue">{id}</Badge>
+          <div>
+            <Group gap="xs" align="center">
+              <Title order={3}>Run Details</Title>
+              {run && (
+                <Badge size="sm" color={getRunStatusColor(run.Status)} variant="light">
+                  {run.Status.toUpperCase()}
+                </Badge>
+              )}
+            </Group>
+            <Text size="xs" c="dimmed" style={{ fontFamily: "monospace" }}>{id}</Text>
+          </div>
         </Group>
         <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={fetchTasks} loading={loading}>
-           Refresh
+          Refresh
         </Button>
       </Group>
 
-      <Card padding="0" style={{ overflow: 'hidden' }}>
-        <Table.ScrollContainer minWidth={800}>
-          <Table striped highlightOnHover verticalSpacing="md" horizontalSpacing="md">
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Task ID</Table.Th>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Status</Table.Th>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Output Log</Table.Th>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Updated At</Table.Th>
-                <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Action</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {tasks?.map((task) => (
-                <Table.Tr key={task.ID}>
-                  <Table.Td fw={500}>{task.TaskID}</Table.Td>
-                  <Table.Td>
-                    <Badge color={getStatusColor(task.Status)} variant="light" radius="sm">
-                      {task.Status.toUpperCase()}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td style={{ maxWidth: '400px' }}>
-                    <Code block style={{ whiteSpace: 'pre-wrap', maxHeight: '200px', overflowY: 'auto', backgroundColor: 'rgba(0,0,0,0.3)', border: '1px solid var(--border-color)', color: '#d1d5db' }}>
-                      {task.Output || "No output generated yet."}
-                    </Code>
-                  </Table.Td>
-                  <Table.Td>{new Date(task.UpdatedAt).toLocaleString()}</Table.Td>
-                  <Table.Td>
-                    {(task.Status === "success" || task.Status === "failed") && (
-                      <ActionIcon 
-                         variant="light" 
-                         color="blue" 
-                         onClick={() => handleRetry(task.TaskID)}
-                         title="Retry Task"
-                      >
-                         <IconPlayerPlay size={16} />
-                      </ActionIcon>
-                    )}
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-              {(!tasks || tasks.length === 0) && !loading && (
-                  <Table.Tr>
-                    <Table.Td colSpan={5} align="center" py="xl">
-                      <Text c="dimmed">No tasks found for this run.</Text>
-                    </Table.Td>
-                  </Table.Tr>
-              )}
-            </Table.Tbody>
-          </Table>
-        </Table.ScrollContainer>
-      </Card>
+      {/* Run Summary Banner */}
+      {loading && !run ? (
+        <Skeleton height={72} mb="xl" radius="md" />
+      ) : run && (
+        <Card padding="md" mb="xl">
+          <Group grow>
+            <div>
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Pipeline</Text>
+              <Text fw={600} size="sm" mt={4}
+                style={{ cursor: "pointer", textDecoration: "underline", textUnderlineOffset: "3px" }}
+                onClick={() => router.push(`/dags?id=${run.DAGID}`)}
+              >
+                {run.DAGID}
+              </Text>
+            </div>
+            <div>
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Trigger</Text>
+              <Text fw={600} size="sm" mt={4}>{run.TriggerType === "manual" ? "Manual" : "Scheduled"}</Text>
+            </div>
+            <div>
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Started At</Text>
+              <Text fw={600} size="sm" mt={4}>{new Date(run.CreatedAt).toLocaleString()}</Text>
+            </div>
+            <div>
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Duration</Text>
+              <Text fw={600} size="sm" mt={4}>{elapsedTime ?? "—"}</Text>
+            </div>
+            <div>
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Tasks</Text>
+              <Group gap={4} mt={4}>
+                {successCount > 0 && <Badge size="xs" color="green" variant="light">{successCount} ok</Badge>}
+                {failedCount > 0 && <Badge size="xs" color="red" variant="light">{failedCount} failed</Badge>}
+                {runningCount > 0 && <Badge size="xs" color="blue" variant="light">{runningCount} running</Badge>}
+                {tasks.length === 0 && <Text size="xs" c="dimmed">—</Text>}
+              </Group>
+            </div>
+          </Group>
+        </Card>
+      )}
+
+      {/* Task List */}
+      <Title order={4} mb="md" c="dimmed">Task Execution Log</Title>
+      {loading && tasks.length === 0 ? (
+        <Stack gap="xs">
+          <Skeleton height={56} radius="md" />
+          <Skeleton height={56} radius="md" />
+          <Skeleton height={56} radius="md" />
+        </Stack>
+      ) : tasks.length === 0 ? (
+        <Card padding="xl">
+          <Center>
+            <Text c="dimmed">No tasks found for this run.</Text>
+          </Center>
+        </Card>
+      ) : (
+        <Stack gap="xs">
+          {tasks.map((task) => (
+            <TaskRow key={task.ID} task={task} onRetry={handleRetry} />
+          ))}
+        </Stack>
+      )}
     </>
   );
 }
 
 export default function RunDetails() {
   return (
-    <Suspense fallback={<Center h={200}><Loader color="cyan" /></Center>}>
+    <Suspense fallback={<Center h={200}><Loader color="blue" /></Center>}>
       <RunDetailsContent />
     </Suspense>
   );
