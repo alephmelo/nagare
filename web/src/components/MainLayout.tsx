@@ -4,11 +4,14 @@ import { AppShell, Burger, Group, Title, ActionIcon, useMantineColorScheme, useC
 import { useDisclosure } from "@mantine/hooks";
 import { IconActivity, IconSun, IconMoon, IconDashboard } from "@tabler/icons-react";
 import { useRouter, usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 export default function MainLayout({ children }: { children: React.ReactNode }) {
   const [opened, { toggle }] = useDisclosure();
   const { setColorScheme } = useMantineColorScheme();
   const computedColorScheme = useComputedColorScheme("dark", { getInitialValueInEffect: true });
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
   const router = useRouter();
   const pathname = usePathname();
 
@@ -35,7 +38,9 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
             size="lg"
             aria-label="Toggle color scheme"
           >
-            {computedColorScheme === "dark" ? <IconSun size={18} /> : <IconMoon size={18} />}
+            {mounted
+              ? (computedColorScheme === "dark" ? <IconSun size={18} /> : <IconMoon size={18} />)
+              : <IconMoon size={18} />}
           </ActionIcon>
         </Group>
       </AppShell.Header>
