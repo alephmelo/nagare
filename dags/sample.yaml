@@ -1,6 +1,6 @@
 id: sample_dag
 description: "A simple bash pipeline to test Nagare"
-schedule: "* * * * *"
+schedule: "*/2 * * * *"
 tasks:
   - id: download_data
     type: command

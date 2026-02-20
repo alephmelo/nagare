@@ -1,14 +1,30 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AppShell, Burger, Group, Title, Container, Table, Badge, Card, Text, ActionIcon, Stack } from "@mantine/core";
-import { useDisclosure } from "@mantine/hooks";
-import { IconRefresh, IconActivity } from "@tabler/icons-react";
+import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton } from "@mantine/core";
+import { IconPlayerPlay, IconRefresh } from "@tabler/icons-react";
+import { useRouter } from "next/navigation";
+
+interface Run {
+  ID: string;
+  DAGID: string;
+  Status: string;
+  ExecDate: string;
+  UpdatedAt: string;
+  CreatedAt: string;
+}
+
+interface Dag {
+  ID: string;
+  Schedule: string;
+  Description: string;
+}
 
 export default function Dashboard() {
-  const [opened, { toggle }] = useDisclosure();
-  const [runs, setRuns] = useState<any[]>([]);
-  const [dags, setDags] = useState<any[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [dags, setDags] = useState<Dag[]>([]);
+  const [loading, setLoading] = useState(true);
+  const router = useRouter();
 
   const fetchData = async () => {
     try {
@@ -20,12 +36,14 @@ export default function Dashboard() {
       setDags(await dagsRes.json());
     } catch (err) {
       console.error("Failed to fetch data", err);
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 3000); // poll every 3 seconds
+    const interval = setInterval(fetchData, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -40,90 +58,103 @@ export default function Dashboard() {
   };
 
   return (
-    <AppShell
-      header={{ height: 60 }}
-      navbar={{
-        width: 300,
-        breakpoint: "sm",
-        collapsed: { mobile: !opened },
-      }}
-      padding="md"
-    >
-      <AppShell.Header>
-        <Group h="100%" px="md" justify="space-between">
-          <Group>
-            <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" />
-            <IconActivity size={28} color="cyan" />
-            <Title order={3}>Nagare</Title>
-          </Group>
-          <ActionIcon variant="light" onClick={fetchData}>
-             <IconRefresh size={18} />
-          </ActionIcon>
-        </Group>
-      </AppShell.Header>
+    <>
+      <Group justify="space-between" mb="xl">
+        <Title order={2}>Dashboard</Title>
+        <Button leftSection={<IconRefresh size={16} />} variant="light" onClick={fetchData}>
+          Refresh
+        </Button>
+      </Group>
 
-      <AppShell.Navbar p="md">
-        <Title order={5} mb="md">Loaded DAGs</Title>
-        <Stack gap="sm">
+      <Title order={4} mb="md" c="dimmed">Loaded Workflows</Title>
+      {loading && dags.length === 0 ? (
+        <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} mb="xl">
+          <Skeleton height={120} radius="md" />
+          <Skeleton height={120} radius="md" />
+          <Skeleton height={120} radius="md" />
+        </SimpleGrid>
+      ) : (
+        <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} mb="xl">
           {dags?.map(dag => (
-            <Card key={dag.ID} shadow="xs" padding="sm" radius="md" withBorder>
-              <Text fw={500}>{dag.ID}</Text>
-              <Text size="xs" c="dimmed">{dag.Description}</Text>
-              <Badge mt="sm" size="xs" variant="light">{dag.Schedule}</Badge>
+            <Card key={dag.ID} shadow="sm" radius="md" padding="lg" withBorder>
+              <Group justify="space-between" mt="0" mb="xs">
+                <Text fw={600} size="lg">{dag.ID}</Text>
+                <Badge variant="light" color="cyan">{dag.Schedule}</Badge>
+              </Group>
+              <Text size="sm" c="dimmed" mb="md" style={{ minHeight: '40px' }}>
+                {dag.Description}
+              </Text>
+              <Button 
+                variant="light" 
+                color="blue" 
+                fullWidth 
+                mt="md" 
+                radius="md" 
+                leftSection={<IconPlayerPlay size={16} />}
+                onClick={() => {
+                   alert("Trigger API not currently implemented!");
+                }}
+              >
+                Trigger
+              </Button>
             </Card>
           ))}
-        </Stack>
-      </AppShell.Navbar>
+          {(!dags || dags.length === 0) && (
+            <Text c="dimmed">No DAGs loaded.</Text>
+          )}
+        </SimpleGrid>
+      )}
 
-      <AppShell.Main>
-        <Container fluid>
-          <Title order={4} mb="lg">Recent Runs</Title>
-          <Card shadow="sm" radius="md" withBorder>
-            <Table striped highlightOnHover>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Run ID</Table.Th>
-                  <Table.Th>DAG ID</Table.Th>
-                  <Table.Th>Status</Table.Th>
-                  <Table.Th>Execution Date</Table.Th>
-                  <Table.Th>Created At</Table.Th>
+      <Title order={4} mt="xl" mb="md" c="dimmed">Recent Runs</Title>
+      <Card shadow="sm" radius="md" withBorder padding="0" style={{ overflow: "hidden" }}>
+        <Table.ScrollContainer minWidth={800}>
+          <Table verticalSpacing="sm" striped highlightOnHover>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Run ID</Table.Th>
+                <Table.Th>DAG ID</Table.Th>
+                <Table.Th>Status</Table.Th>
+                <Table.Th>Execution Date</Table.Th>
+                <Table.Th>Elapsed Time</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {runs?.map((run) => (
+                <Table.Tr key={run.ID} onClick={() => router.push(`/runs/?id=${run.ID}`)} style={{ cursor: "pointer" }}>
+                  <Table.Td>
+                    <Text size="sm" fw={500} c="cyan">{run.ID}</Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Badge variant="outline" color="gray">{run.DAGID}</Badge>
+                  </Table.Td>
+                  <Table.Td>
+                    <Badge color={getStatusColor(run.Status)} variant="light" size="sm">
+                      {run.Status.toUpperCase()}
+                    </Badge>
+                  </Table.Td>
+                  <Table.Td>
+                    <Text size="sm">{new Date(run.ExecDate).toLocaleString()}</Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Text size="sm" c="dimmed">
+                      {run.UpdatedAt && run.CreatedAt 
+                        ? `${Math.max(1, Math.floor((new Date(run.UpdatedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
+                        : "-"}
+                    </Text>
+                  </Table.Td>
                 </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {runs?.map((run) => (
-                  <Table.Tr key={run.ID}>
-                    <Table.Td>
-                      <Badge 
-                        variant="dot" 
-                        size="lg" 
-                        style={{ cursor: "pointer" }}
-                        onClick={() => window.location.href = `/runs/?id=${run.ID}`}
-                      >
-                        {run.ID}
-                      </Badge>
+              ))}
+              {(!runs || runs.length === 0) && !loading && (
+                  <Table.Tr>
+                    <Table.Td colSpan={5} align="center" py="xl">
+                      <Text c="dimmed">No recent runs found.</Text>
                     </Table.Td>
-                    <Table.Td fw={500}>{run.DAGID}</Table.Td>
-                    <Table.Td>
-                      <Badge color={getStatusColor(run.Status)} variant="light">
-                        {run.Status}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>{new Date(run.ExecDate).toLocaleString()}</Table.Td>
-                    <Table.Td>{new Date(run.CreatedAt).toLocaleString()}</Table.Td>
                   </Table.Tr>
-                ))}
-                {(!runs || runs.length === 0) && (
-                   <Table.Tr>
-                     <Table.Td colSpan={5} align="center">
-                        <Text c="dimmed">No runs found.</Text>
-                     </Table.Td>
-                   </Table.Tr>
-                )}
-              </Table.Tbody>
-            </Table>
-          </Card>
-        </Container>
-      </AppShell.Main>
-    </AppShell>
+              )}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
+      </Card>
+    </>
   );
 }
