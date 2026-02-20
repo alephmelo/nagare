@@ -51,4 +51,30 @@ tasks:
 The scheduler evaluates schedules every 5 seconds. Once the cron condition is met, Nagare queues `t1`, waits for it to succeed, and then queues `t2`.
 
 ---
+## Development
+
+If you want to contribute to the Nagare codebase and run the Next.js React frontend and Go API backend simultaneously with hot-reloading:
+
+### Prerequisites:
+- Go 1.20+
+- Node.js & npm
+
+### Running the Dev Environment
+We use `mprocs` to multiplex the frontend and backend into a single readable terminal, and `air` to hot-reload the Go binary.
+
+```bash
+make dev
+```
+This command automatically:
+1. Installs `mprocs` (via Homebrew if on Mac) and `air` (via `go install`) if you don't have them.
+2. Boots up the UI on `http://localhost:3000` (`npm run dev`)
+3. Boots up the API on `http://localhost:8080` (`air`)
+4. Proxies all frontend `/api/*` requests to the Go backend seamlessly.
+
+### Exiting the Dev Environment
+Inside the `mprocs` TUI:
+- Press `<C-a> + q` (Control+A, then Q) to safely kill both the frontend and backend processes and exit the multiplexer.
+- You can navigate between the running Frontend and Backend logs using the `↑` and `↓` arrow keys.
+
+---
 *For information on how Nagare works under the hood, or if you wish to contribute to the Go codebase, please see [ARCHITECTURE.md](ARCHITECTURE.md).*
