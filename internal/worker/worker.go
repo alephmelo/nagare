@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"sync"
 
@@ -133,6 +134,13 @@ func (p *Pool) executeTask(ti models.TaskInstance, workerID int) {
 
 	// Execute the command natively
 	cmd := exec.Command("sh", "-c", cmdStr)
+
+	if len(taskDef.Env) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range taskDef.Env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
 
 	p.rmu.Lock()
 	p.running[ti.ID] = cmd
