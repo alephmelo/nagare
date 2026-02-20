@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton } from "@mantine/core";
-import { IconPlayerPlay, IconRefresh } from "@tabler/icons-react";
+import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton, Select, Pagination, RingProgress, Center } from "@mantine/core";
+import { IconPlayerPlay, IconRefresh, IconCheck, IconX, IconActivity } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 
 interface Run {
@@ -24,15 +24,27 @@ export default function Dashboard() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [dags, setDags] = useState<Dag[]>([]);
   const [loading, setLoading] = useState(true);
+  
+  // Pagination & Filtering state
+  const [page, setPage] = useState(1);
+  const [dagFilter, setDagFilter] = useState<string | null>("all");
+  const [totalRuns, setTotalRuns] = useState(0);
+  const limit = 10;
+  
   const router = useRouter();
 
   const fetchData = async () => {
     try {
+      setLoading(true);
       const [runsRes, dagsRes] = await Promise.all([
-        fetch("/api/runs"),
+        fetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}`),
         fetch("/api/dags")
       ]);
-      setRuns(await runsRes.json());
+      
+      const runsData = await runsRes.json();
+      setRuns(runsData.data || []);
+      setTotalRuns(runsData.total || 0);
+      
       setDags(await dagsRes.json());
     } catch (err) {
       console.error("Failed to fetch data", err);
@@ -43,9 +55,9 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 3000);
+    const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [page, dagFilter]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -105,7 +117,80 @@ export default function Dashboard() {
         </SimpleGrid>
       )}
 
-      <Title order={4} mt="xl" mb="md" c="dimmed">Recent Runs</Title>
+      <Group justify="space-between" mt="xl" mb="md">
+        <Title order={4} c="dimmed">Recent Runs</Title>
+        <Select
+          placeholder="Filter by DAG"
+          data={[
+            { value: "all", label: "All DAGs" },
+            ...dags.map(d => ({ value: d.ID, label: d.ID }))
+          ]}
+          value={dagFilter}
+          onChange={(val) => {
+            setDagFilter(val);
+            setPage(1); // Reset to page 1 on filter change
+          }}
+          disabled={loading && dags.length === 0}
+          clearable={false}
+          style={{ width: 250 }}
+        />
+      </Group>
+
+      {/* Metrics Cards */}
+      <SimpleGrid cols={{ base: 1, sm: 3 }} mb="xl">
+        <Card shadow="sm" radius="md" withBorder padding="md">
+           <Group>
+             <RingProgress
+                size={80}
+                roundCaps
+                thickness={8}
+                sections={[{ value: 100, color: 'blue' }]}
+                label={<Center><IconActivity size={20} /></Center>}
+             />
+             <div>
+               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Runs Recorded</Text>
+               <Text fw={700} size="xl">{totalRuns}</Text>
+             </div>
+           </Group>
+        </Card>
+        
+        <Card shadow="sm" radius="md" withBorder padding="md">
+           <Group>
+             <RingProgress
+                size={80}
+                roundCaps
+                thickness={8}
+                sections={[{ value: runs.length > 0 ? (runs.filter(r => r.Status === 'success').length / runs.length) * 100 : 0, color: 'teal' }]}
+                label={<Center><IconCheck size={20} color="teal" /></Center>}
+             />
+             <div>
+               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Page Success Rate</Text>
+               <Text fw={700} size="xl">
+                 {runs.length > 0 ? Math.round((runs.filter(r => r.Status === 'success').length / runs.length) * 100) : 0}%
+               </Text>
+             </div>
+           </Group>
+        </Card>
+
+        <Card shadow="sm" radius="md" withBorder padding="md">
+           <Group>
+             <RingProgress
+                size={80}
+                roundCaps
+                thickness={8}
+                sections={[{ value: runs.length > 0 ? (runs.filter(r => r.Status === 'failed').length / runs.length) * 100 : 0, color: 'red' }]}
+                label={<Center><IconX size={20} color="red" /></Center>}
+             />
+             <div>
+               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Page Failure Rate</Text>
+               <Text fw={700} size="xl">
+                 {runs.length > 0 ? Math.round((runs.filter(r => r.Status === 'failed').length / runs.length) * 100) : 0}%
+               </Text>
+             </div>
+           </Group>
+        </Card>
+      </SimpleGrid>
+
       <Card shadow="sm" radius="md" withBorder padding="0" style={{ overflow: "hidden" }}>
         <Table.ScrollContainer minWidth={800}>
           <Table verticalSpacing="sm" striped highlightOnHover>
@@ -147,13 +232,24 @@ export default function Dashboard() {
               {(!runs || runs.length === 0) && !loading && (
                   <Table.Tr>
                     <Table.Td colSpan={5} align="center" py="xl">
-                      <Text c="dimmed">No recent runs found.</Text>
+                      <Text c="dimmed">No runs found for this configuration.</Text>
                     </Table.Td>
                   </Table.Tr>
               )}
             </Table.Tbody>
           </Table>
         </Table.ScrollContainer>
+        {totalRuns > limit && (
+          <Group justify="center" p="md" style={{ borderTop: "1px solid var(--mantine-color-default-border)" }}>
+            <Pagination
+              total={Math.ceil(totalRuns / limit)}
+              value={page}
+              onChange={setPage}
+              color="cyan"
+              withEdges
+            />
+          </Group>
+        )}
       </Card>
     </>
   );

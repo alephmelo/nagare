@@ -128,10 +128,20 @@ func (s *Store) UpdateDagRunStatus(runID string, status RunStatus) error {
 	return err
 }
 
-// GetDagRuns retrieves recent DAG runs ordered by creation mostly recent first
-func (s *Store) GetDagRuns(limit int) ([]DagRun, error) {
-	query := `SELECT id, dag_id, status, exec_date, created_at FROM dag_runs ORDER BY created_at DESC LIMIT ?`
-	rows, err := s.db.Query(query, limit)
+// GetDagRuns retrieves recent DAG runs, optionally filtered by dagID, with pagination
+func (s *Store) GetDagRuns(limit int, offset int, dagID string) ([]DagRun, error) {
+	var query string
+	var rows *sql.Rows
+	var err error
+
+	if dagID != "" {
+		query = `SELECT id, dag_id, status, exec_date, created_at FROM dag_runs WHERE dag_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`
+		rows, err = s.db.Query(query, dagID, limit, offset)
+	} else {
+		query = `SELECT id, dag_id, status, exec_date, created_at FROM dag_runs ORDER BY created_at DESC LIMIT ? OFFSET ?`
+		rows, err = s.db.Query(query, limit, offset)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +156,24 @@ func (s *Store) GetDagRuns(limit int) ([]DagRun, error) {
 		runs = append(runs, r)
 	}
 	return runs, nil
+}
+
+// GetDagRunsCount gets the total number of runs, optionally filtered by dagID
+func (s *Store) GetDagRunsCount(dagID string) (int, error) {
+	var query string
+	var row *sql.Row
+
+	if dagID != "" {
+		query = `SELECT COUNT(*) FROM dag_runs WHERE dag_id = ?`
+		row = s.db.QueryRow(query, dagID)
+	} else {
+		query = `SELECT COUNT(*) FROM dag_runs`
+		row = s.db.QueryRow(query)
+	}
+
+	var count int
+	err := row.Scan(&count)
+	return count, err
 }
 
 // GetActiveDagRuns retrieves all DAG runs currently markes as 'running'

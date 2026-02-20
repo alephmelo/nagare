@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/alephmelo/nagare/internal/models"
@@ -55,14 +56,48 @@ func (s *Server) handleGetDAGs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
-	runs, err := s.store.GetDagRuns(50) // Fetch top 50 recent runs
+	query := r.URL.Query()
+
+	page := 1
+	if p := query.Get("page"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			page = parsed
+		}
+	}
+
+	limit := 10
+	if l := query.Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	dagID := query.Get("dag_id")
+	if dagID == "all" {
+		dagID = ""
+	}
+
+	offset := (page - 1) * limit
+
+	runs, err := s.store.GetDagRuns(limit, offset, dagID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	total, err := s.store.GetDagRunsCount(dagID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]interface{}{
+		"data":  runs,
+		"total": total,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(runs)
+	json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
