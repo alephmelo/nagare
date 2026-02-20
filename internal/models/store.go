@@ -19,6 +19,13 @@ const (
 // TaskStatus represents the state of a TaskInstance
 type TaskStatus string
 
+// SystemStats represents the high-level dashboard health metrics
+type SystemStats struct {
+	ActiveRuns    int `json:"active_runs"`
+	FailedRuns24h int `json:"failed_runs_24h"`
+	TotalRuns     int `json:"total_runs"`
+}
+
 const (
 	TaskPending TaskStatus = "pending"
 	TaskQueued  TaskStatus = "queued"
@@ -181,6 +188,34 @@ func (s *Store) GetDagRunsCount(dagID string) (int, error) {
 	var count int
 	err := row.Scan(&count)
 	return count, err
+}
+
+// GetSystemStats retrieves high-level metrics for the dashboard banner
+func (s *Store) GetSystemStats() (*SystemStats, error) {
+	stats := &SystemStats{}
+
+	// 1. Total Runs
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM dag_runs`).Scan(&stats.TotalRuns)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Active Runs
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM dag_runs WHERE status = ?`, RunRunning).Scan(&stats.ActiveRuns)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Failed Runs in last 24h
+	yesterday := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM dag_runs WHERE status = ? AND created_at >= ?`, RunFailed, yesterday).Scan(&stats.FailedRuns24h)
+	// SQLite created_at strings are comparable directly in iso8601
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM dag_runs WHERE status = ? AND created_at >= ?`, RunFailed, yesterday).Scan(&stats.FailedRuns24h)
+	if err != nil {
+		return nil, err
+	}
+
+	return stats, nil
 }
 
 // GetActiveDagRuns retrieves all DAG runs currently markes as 'running'

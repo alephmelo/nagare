@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Title, Card, Table, Badge, SimpleGrid, Text, Group, Button, Skeleton, Select, Pagination, RingProgress, Center, Alert, List } from "@mantine/core";
-import { IconRefresh, IconCheck, IconX, IconActivity, IconAlertCircle, IconArrowRight, IconRobot, IconUser } from "@tabler/icons-react";
+import { Title, Card, Table, Badge, Text, Group, Button, Skeleton, Select, Pagination, Alert, List, ActionIcon, Tooltip } from "@mantine/core";
+import { IconRefresh, IconX, IconActivity, IconAlertCircle, IconRobot, IconUser, IconPlayerPlay, IconTimelineEvent } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
+import { notifications } from '@mantine/notifications';
 
 interface Run {
   ID: string;
@@ -21,10 +22,19 @@ interface Dag {
   Description: string;
 }
 
+interface SystemStats {
+  active_runs: number;
+  failed_runs_24h: number;
+  total_runs: number;
+  loaded_dags: number;
+}
+
 export default function Dashboard() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [dags, setDags] = useState<Dag[]>([]);
   const [dagErrors, setDagErrors] = useState<Record<string, string>>({});
+  const [stats, setStats] = useState<SystemStats | null>(null);
+  const [triggering, setTriggering] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   
   // Pagination & Filtering state
@@ -38,10 +48,11 @@ export default function Dashboard() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [runsRes, dagsRes, errorsRes] = await Promise.all([
+      const [runsRes, dagsRes, errorsRes, statsRes] = await Promise.all([
         fetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}`),
         fetch("/api/dags"),
-        fetch("/api/dags/errors")
+        fetch("/api/dags/errors"),
+        fetch("/api/stats")
       ]);
       
       if (runsRes.ok) {
@@ -55,6 +66,7 @@ export default function Dashboard() {
       
       if (dagsRes.ok) setDags(await dagsRes.json());
       if (errorsRes.ok) setDagErrors(await errorsRes.json() || {});
+      if (statsRes.ok) setStats(await statsRes.json());
     } catch (err) {
       console.error("Failed to fetch data", err);
     } finally {
@@ -67,6 +79,36 @@ export default function Dashboard() {
     const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
   }, [page, dagFilter]);
+
+  const handleTrigger = async (dagID: string) => {
+    setTriggering(prev => ({ ...prev, [dagID]: true }));
+    try {
+      const res = await fetch(`/api/dags/${dagID}/runs`, { method: "POST" });
+      if (res.ok) {
+        notifications.show({
+          title: 'Pipeline Triggered',
+          message: `Successfully enqueued a fresh manual run for ${dagID}.`,
+          color: 'green',
+        });
+        fetchData();
+      } else {
+        notifications.show({
+          title: 'Trigger Failed',
+          message: `The server rejected the request to trigger ${dagID}.`,
+          color: 'red',
+        });
+      }
+    } catch (err) {
+      console.error(err);
+      notifications.show({
+        title: 'Network Error',
+        message: 'Could not communicate with the API.',
+        color: 'red',
+      });
+    } finally {
+      setTriggering(prev => ({ ...prev, [dagID]: false }));
+    }
+  };
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -111,48 +153,59 @@ export default function Dashboard() {
 
       <Title order={4} mb="md" c="dimmed">Loaded Workflows</Title>
       {loading && dags.length === 0 ? (
-        <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} mb="xl">
-          <Skeleton height={120} radius="md" />
-          <Skeleton height={120} radius="md" />
-          <Skeleton height={120} radius="md" />
-        </SimpleGrid>
+        <Skeleton height={200} mb="xl" radius="md" />
       ) : (
-        <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} mb="xl">
-          {dags?.map(dag => (
-            <Card 
-              key={dag.ID} 
-              padding="lg" 
-              style={{ transition: 'border-color 0.2s ease' }}
-              onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--mantine-color-blue-filled)'}
-              onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
-            >
-              <Group justify="space-between" mt="0" mb="sm">
-                <Text fw={700} size="lg">{dag.ID}</Text>
-                <Badge variant="light" color="blue">{dag.Schedule}</Badge>
-              </Group>
-              <Text size="sm" c="dimmed" mb="lg" style={{ minHeight: '40px', lineHeight: 1.5 }}>
-                {dag.Description}
-              </Text>
-              <Card.Section inheritPadding py="sm" style={{ borderTop: '1px solid var(--border-color)', backgroundColor: 'var(--panel-hover)' }}>
-                <Button 
-                  variant="subtle" 
-                  color="blue" 
-                  fullWidth 
-                  size="sm"
-                  leftSection={<IconArrowRight size={14} />}
-                  onClick={() => {
-                     router.push(`/dags?id=${dag.ID}`);
-                  }}
-                >
-                  View Details
-                </Button>
-              </Card.Section>
-            </Card>
-          ))}
-          {(!dags || dags.length === 0) && (
-            <Text c="dimmed">No DAGs loaded.</Text>
-          )}
-        </SimpleGrid>
+        <Card padding="0" mb="xl" style={{ overflow: "hidden" }}>
+          <Table.ScrollContainer minWidth={600}>
+            <Table verticalSpacing="sm" horizontalSpacing="md" striped highlightOnHover>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Pipeline</Table.Th>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}>Schedule</Table.Th>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)', width: '80px', textAlign: 'right' }}>Actions</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {dags?.map(dag => (
+                  <Table.Tr key={dag.ID} onClick={() => router.push(`/dags?id=${dag.ID}`)} style={{ cursor: 'pointer' }}>
+                    <Table.Td>
+                      <Text fw={600} size="sm">{dag.ID}</Text>
+                      <Text size="xs" c="dimmed" mt={2} style={{ maxWidth: '400px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {dag.Description}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge variant="light" color="blue" size="sm" radius="sm">{dag.Schedule}</Badge>
+                    </Table.Td>
+                    <Table.Td align="right">
+                      <Tooltip label="Trigger Pipeline" position="left">
+                        <ActionIcon 
+                          variant="light" 
+                          color="blue" 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleTrigger(dag.ID);
+                          }}
+                          loading={triggering[dag.ID]}
+                          disabled={triggering[dag.ID]}
+                        >
+                          <IconPlayerPlay size={16} />
+                        </ActionIcon>
+                      </Tooltip>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+                {(!dags || dags.length === 0) && (
+                  <Table.Tr>
+                    <Table.Td colSpan={3}>
+                      <Text c="dimmed" ta="center" py="md">No pipelines loaded.</Text>
+                    </Table.Td>
+                  </Table.Tr>
+                )}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
+        </Card>
       )}
 
       <Group justify="space-between" mt="xl" mb="md">
@@ -174,60 +227,41 @@ export default function Dashboard() {
         />
       </Group>
 
-      {/* Metrics Cards */}
-      <SimpleGrid cols={{ base: 1, sm: 3 }} mb="xl">
-        <Card padding="lg">
-           <Group>
-             <RingProgress
-                size={80}
-                roundCaps
-                thickness={8}
-                sections={[{ value: 100, color: 'blue' }]}
-                label={<Center><IconActivity size={20} /></Center>}
-             />
-             <div>
-               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Runs Recorded</Text>
-               <Text fw={700} size="xl">{totalRuns}</Text>
-             </div>
-           </Group>
+      {/* System Health Banner */}
+      {stats && (
+        <Card padding="md" mb="xl">
+          <Group grow>
+            <div>
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Active Runs</Text>
+              <Group gap="xs" mt={4}>
+                <IconActivity size={18} color="var(--mantine-color-blue-filled)" />
+                <Text fw={700} size="xl">{stats.active_runs}</Text>
+              </Group>
+            </div>
+            <div>
+               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Failed Runs (24h)</Text>
+               <Group gap="xs" mt={4}>
+                 <IconX size={18} color={stats.failed_runs_24h > 0 ? "var(--mantine-color-red-filled)" : "var(--mantine-color-gray-5)"} />
+                 <Text fw={700} size="xl" c={stats.failed_runs_24h > 0 ? "red" : "inherit"}>{stats.failed_runs_24h}</Text>
+               </Group>
+            </div>
+            <div>
+               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Operations</Text>
+               <Group gap="xs" mt={4}>
+                 <IconTimelineEvent size={18} color="var(--mantine-color-teal-filled)" />
+                 <Text fw={700} size="xl">{stats.total_runs}</Text>
+               </Group>
+            </div>
+            <div>
+               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Loaded Pipelines</Text>
+               <Group gap="xs" mt={4}>
+                 <IconRobot size={18} color="var(--mantine-color-indigo-filled)" />
+                 <Text fw={700} size="xl">{stats.loaded_dags}</Text>
+               </Group>
+            </div>
+          </Group>
         </Card>
-        
-        <Card padding="lg">
-           <Group>
-             <RingProgress
-                size={80}
-                roundCaps
-                thickness={8}
-                sections={[{ value: runs.length > 0 ? (runs.filter(r => r.Status === 'success').length / runs.length) * 100 : 0, color: 'teal' }]}
-                label={<Center><IconCheck size={20} color="teal" /></Center>}
-             />
-             <div>
-               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Page Success Rate</Text>
-               <Text fw={700} size="xl">
-                 {runs.length > 0 ? Math.round((runs.filter(r => r.Status === 'success').length / runs.length) * 100) : 0}%
-               </Text>
-             </div>
-           </Group>
-        </Card>
-
-        <Card padding="lg">
-           <Group>
-             <RingProgress
-                size={80}
-                roundCaps
-                thickness={8}
-                sections={[{ value: runs.length > 0 ? (runs.filter(r => r.Status === 'failed').length / runs.length) * 100 : 0, color: 'red' }]}
-                label={<Center><IconX size={20} color="red" /></Center>}
-             />
-             <div>
-               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Page Failure Rate</Text>
-               <Text fw={700} size="xl">
-                 {runs.length > 0 ? Math.round((runs.filter(r => r.Status === 'failed').length / runs.length) * 100) : 0}%
-               </Text>
-             </div>
-           </Group>
-        </Card>
-      </SimpleGrid>
+      )}
 
       <Card padding="0" style={{ overflow: "hidden" }}>
         <Table.ScrollContainer minWidth={800}>

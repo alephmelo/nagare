@@ -130,6 +130,26 @@ func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func (s *Server) handleGetStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.store.GetSystemStats()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	dagsMap := s.scheduler.GetDAGs()
+
+	response := map[string]interface{}{
+		"active_runs":     stats.ActiveRuns,
+		"failed_runs_24h": stats.FailedRuns24h,
+		"total_runs":      stats.TotalRuns,
+		"loaded_dags":     len(dagsMap),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
 func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 	// Simple path parameter extraction (e.g. /api/runs/run_1/tasks)
 	parts := strings.Split(r.URL.Path, "/")
@@ -178,6 +198,7 @@ func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/api/stats", corsMiddleware(s.handleGetStats))
 	mux.HandleFunc("/api/dags", corsMiddleware(s.handleGetDAGs))
 	mux.HandleFunc("/api/dags/errors", corsMiddleware(s.handleGetDAGErrors))
 	mux.HandleFunc("/api/dags/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {

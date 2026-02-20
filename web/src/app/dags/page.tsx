@@ -10,7 +10,7 @@ import {
   Text,
   Group,
   Button,
-  Tabs,
+  Grid,
   Skeleton,
   Pagination,
   Alert
@@ -296,31 +296,11 @@ export default function DagDetails() {
       ) : loading ? (
         <Skeleton height={400} />
       ) : (
-        <Tabs defaultValue="graph" variant="outline">
-          <Tabs.List>
-            <Tabs.Tab value="graph">Graph View</Tabs.Tab>
-            <Tabs.Tab value="table">Table View (Runs)</Tabs.Tab>
-          </Tabs.List>
-
-          <Tabs.Panel value="graph" pt="xl">
-            <Card style={{ height: '60vh', minHeight: '500px' }} p="0">
-                <ReactFlow
-                  nodes={nodes}
-                  edges={edges}
-                  onNodesChange={onNodesChange}
-                  onEdgesChange={onEdgesChange}
-                  fitView
-                  attributionPosition="bottom-right"
-                >
-                  <Background color="#ccc" gap={16} />
-                  <Controls />
-                </ReactFlow>
-            </Card>
-          </Tabs.Panel>
-
-          <Tabs.Panel value="table" pt="xl">
+        <Grid gutter="xl">
+          <Grid.Col span={{ base: 12, lg: 7 }}>
+            <Title order={4} mb="md" c="dimmed">Execution History</Title>
              <Card padding="0" style={{ overflow: "hidden" }}>
-              <Table.ScrollContainer minWidth={800}>
+              <Table.ScrollContainer minWidth={600}>
                 <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
                   <Table.Thead>
                     <Table.Tr>
@@ -365,7 +345,7 @@ export default function DagDetails() {
                     ))}
                     {(!runs || runs.length === 0) && (
                         <Table.Tr>
-                          <Table.Td colSpan={6} align="center" py="xl">
+                          <Table.Td colSpan={5} align="center" py="xl">
                             <Text c="dimmed">No past runs found for this DAG.</Text>
                           </Table.Td>
                         </Table.Tr>
@@ -384,8 +364,24 @@ export default function DagDetails() {
                 </Group>
               )}
             </Card>
-          </Tabs.Panel>
-        </Tabs>
+          </Grid.Col>
+          <Grid.Col span={{ base: 12, lg: 5 }}>
+            <Title order={4} mb="md" c="dimmed">Pipeline Graph</Title>
+            <Card style={{ height: '600px' }} p="0">
+                <ReactFlow
+                  nodes={nodes}
+                  edges={edges}
+                  onNodesChange={onNodesChange}
+                  onEdgesChange={onEdgesChange}
+                  fitView
+                  attributionPosition="bottom-right"
+                >
+                  <Background color="var(--mantine-color-dark-4)" gap={16} />
+                  <Controls />
+                </ReactFlow>
+            </Card>
+          </Grid.Col>
+        </Grid>
       )}
     </>
   );
