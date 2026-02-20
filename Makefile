@@ -10,7 +10,7 @@ dev: tools
 
 # Install dev tools if missing
 tools:
-	@command -v air >/dev/null 2>&1 || (echo "Installing air..." && go install github.com/air-verse/air@latest)
+	@command -v air >/dev/null 2>&1 || (echo "Installing air..." && go install github.com/air-verse/air@v1.52.2)
 	@command -v mprocs >/dev/null 2>&1 || (echo "Installing mprocs..." && brew install mprocs)
 
 # Build for production
