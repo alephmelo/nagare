@@ -183,8 +183,40 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// We enrich the TaskInstance with the Command from the DAG definition for the UI
+	type EnrichedTask struct {
+		models.TaskInstance
+		Command string `json:"Command"`
+	}
+
+	run, err := s.store.GetDagRun(runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	dags := s.scheduler.GetDAGs()
+	dag, ok := dags[run.DAGID]
+	var enriched []EnrichedTask
+
+	for _, t := range tasks {
+		cmd := ""
+		if ok {
+			for _, def := range dag.Tasks {
+				if def.ID == t.TaskID {
+					cmd = def.Command
+					break
+				}
+			}
+		}
+		enriched = append(enriched, EnrichedTask{
+			TaskInstance: t,
+			Command:      cmd,
+		})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tasks)
+	json.NewEncoder(w).Encode(enriched)
 }
 
 func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
@@ -203,8 +235,40 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// We enrich the TaskInstance with the Command from the DAG definition for the UI
+	type EnrichedTask struct {
+		models.TaskInstance
+		Command string `json:"Command"`
+	}
+
+	run, err := s.store.GetDagRun(runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	dags := s.scheduler.GetDAGs()
+	dag, ok := dags[run.DAGID]
+	var enriched []EnrichedTask
+
+	for _, t := range attempts {
+		cmd := ""
+		if ok {
+			for _, def := range dag.Tasks {
+				if def.ID == t.TaskID {
+					cmd = def.Command
+					break
+				}
+			}
+		}
+		enriched = append(enriched, EnrichedTask{
+			TaskInstance: t,
+			Command:      cmd,
+		})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(attempts)
+	json.NewEncoder(w).Encode(enriched)
 }
 
 func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {

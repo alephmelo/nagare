@@ -45,6 +45,7 @@ interface RunTask {
   Attempt: number;
   CreatedAt: string;
   UpdatedAt: string;
+  Command?: string;
 }
 
 interface Run {
@@ -200,6 +201,22 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
                 <Text size="xs" c="dimmed" mb="xs">
                   {new Date(a.UpdatedAt).toLocaleString()}
                 </Text>
+                
+                {a.Command && (
+                  <Box mb="md">
+                    <Group gap="xs" mb="xs">
+                      <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
+                      <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Command</Text>
+                    </Group>
+                    <Code block>{a.Command}</Code>
+                  </Box>
+                )}
+
+                <Group gap="xs" mb="xs">
+                  <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Output Log</Text>
+                </Group>
+
                 <Code
                   block
                   style={{
@@ -220,6 +237,16 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
           </Tabs>
         ) : (
           <Box p="md" style={{ backgroundColor: "var(--log-bg)" }}>
+            {task.Command && (
+              <Box mb="md">
+                <Group gap="xs" mb="xs">
+                  <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Command</Text>
+                </Group>
+                <Code block>{task.Command}</Code>
+              </Box>
+            )}
+            
             <Group gap="xs" mb="xs">
               <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
               <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Output Log</Text>
