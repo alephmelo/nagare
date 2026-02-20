@@ -3,20 +3,15 @@
 # Default target
 all: build
 
-# Run development mode (Hot reloading for Go and Next.js)
+# Run development mode (Hot reloading for Go and Next.js via mprocs)
 dev: tools
-	@echo "Starting backend and frontend in dev mode..."
-	@make -j2 dev-backend dev-frontend
-
-dev-backend:
-	air
-
-dev-frontend:
-	cd web && npm run dev
+	@echo "Starting development environment with mprocs..."
+	mprocs
 
 # Install dev tools if missing
 tools:
 	@command -v air >/dev/null 2>&1 || (echo "Installing air..." && go install github.com/air-verse/air@latest)
+	@command -v mprocs >/dev/null 2>&1 || (echo "Installing mprocs..." && brew install mprocs)
 
 # Build for production
 build:

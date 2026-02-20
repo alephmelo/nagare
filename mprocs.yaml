@@ -1,0 +1,5 @@
+procs:
+  backend:
+    cmd: air
+  frontend:
+    cmd: cd web && npm run dev
