@@ -1,0 +1,9 @@
+id: test_auto_retry
+description: "A DAG that tests auto-retries"
+schedule: "0 0 * * *"
+tasks:
+  - id: failing_job
+    type: command
+    command: "echo 'Failing attempt...' && exit 1"
+    retries: 2
+    retry_delay_seconds: 5

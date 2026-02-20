@@ -10,11 +10,13 @@ import (
 
 // TaskDef defines a unit of work within a DAG
 type TaskDef struct {
-	ID        string   `yaml:"id"`
-	Type      string   `yaml:"type"` // e.g. "command"
-	Command   string   `yaml:"command"`
-	DependsOn []string `yaml:"depends_on"`
-	WithItems []string `yaml:"with_items,omitempty"`
+	ID                string   `yaml:"id"`
+	Type              string   `yaml:"type"` // e.g. "command"
+	Command           string   `yaml:"command"`
+	Retries           int      `yaml:"retries,omitempty"`
+	RetryDelaySeconds int      `yaml:"retry_delay_seconds,omitempty"`
+	DependsOn         []string `yaml:"depends_on"`
+	WithItems         []string `yaml:"with_items,omitempty"`
 }
 
 // DAGDef defines the workflow graph of Tasks

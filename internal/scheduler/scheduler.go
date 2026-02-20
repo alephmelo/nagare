@@ -166,15 +166,41 @@ func (s *Scheduler) evaluateRunCompletions() error {
 			continue
 		}
 
+		s.mu.RLock()
+		dag, ok := s.dags[r.DAGID]
+		s.mu.RUnlock()
+
+		if !ok {
+			log.Printf("DAG %s not found in memory. Marking run %s as failed", r.DAGID, r.ID)
+			s.store.UpdateDagRunStatus(r.ID, models.RunFailed)
+			continue
+		}
+
 		allSuccess := true
 		anyFailed := false
 
 		for _, ti := range tasks {
 			if ti.Status == models.TaskFailed {
-				anyFailed = true
-				break
-			}
-			if ti.Status != models.TaskSuccess {
+				var taskDef *models.TaskDef
+				for i := range dag.Tasks {
+					if dag.Tasks[i].ID == ti.TaskID {
+						taskDef = &dag.Tasks[i]
+						break
+					}
+				}
+
+				if taskDef != nil && ti.Attempt <= taskDef.Retries {
+					delay := time.Duration(taskDef.RetryDelaySeconds) * time.Second
+					if time.Now().After(ti.UpdatedAt.Add(delay)) || time.Now().Equal(ti.UpdatedAt.Add(delay)) {
+						log.Printf("Task %s failed but has retries remaining (%d/%d). Queuing retry.", ti.TaskID, ti.Attempt, taskDef.Retries)
+						_ = s.RetryTask(r.ID, ti.TaskID)
+					}
+					allSuccess = false
+				} else {
+					anyFailed = true
+					break
+				}
+			} else if ti.Status != models.TaskSuccess {
 				allSuccess = false
 			}
 		}

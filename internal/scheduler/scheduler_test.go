@@ -246,3 +246,115 @@ func TestSchedulerRetryTask(t *testing.T) {
 		t.Fatalf("Expected run to be reverted to running, got %v", dbRun.Status)
 	}
 }
+
+func TestSchedulerAutoRetry(t *testing.T) {
+	store, _ := models.NewStore("file::memory:?cache=shared&mode=memory")
+	defer store.Close()
+
+	sched := NewScheduler(store)
+
+	now := time.Now()
+	runID := "run_auto_retry"
+	dagID := "retry_dag"
+
+	// Add DAG to memory
+	sched.dags[dagID] = &models.DAGDef{
+		ID:       dagID,
+		Schedule: "* * * * *",
+		Tasks: []models.TaskDef{
+			{
+				ID:                "t1",
+				Retries:           2,
+				RetryDelaySeconds: 1, // 1 second delay for faster tests
+			},
+		},
+	}
+
+	// Seed a running DAG, but the task is FAILED
+	run := &models.DagRun{
+		ID:          runID,
+		DAGID:       dagID,
+		Status:      models.RunRunning,
+		ExecDate:    now,
+		TriggerType: "scheduled",
+		CreatedAt:   now,
+	}
+	store.CreateDagRun(run)
+
+	// Attempt 1: Failed just now
+	ti := &models.TaskInstance{
+		ID:        runID + "_t1_1",
+		RunID:     runID,
+		TaskID:    "t1",
+		Status:    models.TaskFailed,
+		Attempt:   1,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	store.CreateTaskInstance(ti)
+
+	// Evaluate immediately: should wait because delay is 1 seconds
+	sched.evaluateRunCompletions()
+
+	status, _ := store.GetTaskStatus(runID, "t1")
+	if status == models.TaskQueued {
+		t.Fatalf("Task should not be queued immediately, delay hasn't passed")
+	}
+
+	// Run should still be running
+	dbRun, _ := store.GetDagRun(runID)
+	if dbRun.Status != models.RunRunning {
+		t.Fatalf("Expected run to still be running during delay, got %v", dbRun.Status)
+	}
+
+	// Fast forward time by sleeping 1 second
+	time.Sleep(1 * time.Second)
+
+	// Evaluate again
+	sched.evaluateRunCompletions()
+
+	// Should have queued a new attempt
+	status, _ = store.GetTaskStatus(runID, "t1")
+	if status != models.TaskQueued {
+		t.Fatalf("Expected task to be queued for retry after delay, got %v", status)
+	}
+
+	// Simulate Attempt 2 failing
+	// At this point evaluateRunCompletions has queued the new attempt via RetryTask.
+	// We get the new task instance and mark it as failed.
+	attempts, _ := store.GetTaskAttempts(runID, "t1")
+	if len(attempts) != 2 {
+		t.Fatalf("Expected 2 attempts, got %d", len(attempts))
+	}
+	// It's currently queued. We mark it as failed and update time.
+	store.UpdateTaskInstanceStatus(attempts[1].ID, models.TaskFailed)
+
+	// Evaluate immediately should still not queue 3rd attempt
+	sched.evaluateRunCompletions()
+	attempts, _ = store.GetTaskAttempts(runID, "t1")
+	if len(attempts) != 2 {
+		t.Fatalf("Expected still 2 attempts, got %d", len(attempts))
+	}
+
+	// Sleep 1 second for Attempt 3 delay
+	time.Sleep(1 * time.Second)
+	sched.evaluateRunCompletions()
+
+	// Should have queued a 3rd attempt
+	attempts, _ = store.GetTaskAttempts(runID, "t1")
+	if len(attempts) != 3 {
+		t.Fatalf("Expected 3 attempts after 2nd delay, got %d", len(attempts))
+	}
+
+	// Simulate Attempt 3 failing
+	store.UpdateTaskInstanceStatus(attempts[2].ID, models.TaskFailed)
+	time.Sleep(1 * time.Second) // wait for it just in case, though retries = 2
+
+	sched.evaluateRunCompletions()
+
+	// Retries exhausted, should fail the run
+	dbRun, _ = store.GetDagRun(runID)
+	if dbRun.Status != models.RunFailed {
+		t.Fatalf("Expected run to fail after retries exhausted, got %v", dbRun.Status)
+	}
+}
