@@ -88,18 +88,18 @@ function RunDetailsContent() {
     <>
       <Group justify="space-between" mb="xl">
         <Group>
-          <Button variant="subtle" color="gray" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push("/")} radius="md">
+          <Button variant="subtle" color="gray" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push("/")}>
             Back
           </Button>
           <Title order={3}>Run Details</Title>
-          <Badge size="lg" variant="outline" color="indigo" radius="md">{id}</Badge>
+          <Badge size="lg" variant="outline" color="blue">{id}</Badge>
         </Group>
-        <Button variant="light" color="indigo" leftSection={<IconRefresh size={16} />} onClick={fetchTasks} loading={loading} radius="md">
+        <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={fetchTasks} loading={loading}>
            Refresh
         </Button>
       </Group>
 
-      <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ overflow: 'hidden', backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
+      <Card padding="0" style={{ overflow: 'hidden' }}>
         <Table.ScrollContainer minWidth={800}>
           <Table striped highlightOnHover verticalSpacing="md" horizontalSpacing="md">
             <Table.Thead>
@@ -116,7 +116,7 @@ function RunDetailsContent() {
                 <Table.Tr key={task.ID}>
                   <Table.Td fw={500}>{task.TaskID}</Table.Td>
                   <Table.Td>
-                    <Badge color={getStatusColor(task.Status)} variant="light">
+                    <Badge color={getStatusColor(task.Status)} variant="light" radius="sm">
                       {task.Status.toUpperCase()}
                     </Badge>
                   </Table.Td>

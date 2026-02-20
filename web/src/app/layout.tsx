@@ -16,9 +16,9 @@ export const metadata: Metadata = {
 };
 
 const theme = createTheme({
-  primaryColor: 'indigo',
+  primaryColor: 'blue',
   fontFamily: inter.style.fontFamily,
-  defaultRadius: 'lg',
+  defaultRadius: 'md',
   headings: {
     fontFamily: inter.style.fontFamily,
     fontWeight: '700',
@@ -31,9 +31,15 @@ const theme = createTheme({
   components: {
     Card: {
       defaultProps: {
-        radius: 'lg',
-        shadow: 'sm',
+        radius: 'md',
+        withBorder: true,
       },
+      styles: {
+        root: {
+          backgroundColor: 'var(--panel-bg)',
+          borderColor: 'var(--border-color)',
+        }
+      }
     },
     Button: {
       defaultProps: {

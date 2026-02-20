@@ -119,27 +119,30 @@ export default function Dashboard() {
       ) : (
         <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} mb="xl">
           {dags?.map(dag => (
-            <Card key={dag.ID} shadow="sm" radius="lg" padding="xl" withBorder style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)' }}>
+            <Card 
+              key={dag.ID} 
+              padding="lg" 
+              style={{ transition: 'border-color 0.2s ease' }}
+              onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--mantine-color-blue-filled)'}
+              onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
+            >
               <Group justify="space-between" mt="0" mb="sm">
-                <Text fw={700} size="xl">{dag.ID}</Text>
-                <Badge variant="light" color="indigo" size="lg">{dag.Schedule}</Badge>
+                <Text fw={700} size="lg">{dag.ID}</Text>
+                <Badge variant="light" color="blue">{dag.Schedule}</Badge>
               </Group>
-              <Text size="sm" c="dimmed" mb="xl" style={{ minHeight: '40px', lineHeight: 1.6 }}>
+              <Text size="sm" c="dimmed" mb="lg" style={{ minHeight: '40px', lineHeight: 1.5 }}>
                 {dag.Description}
               </Text>
-              <Card.Section inheritPadding py="md" style={{ borderTop: '1px solid var(--border-color)', backgroundColor: 'rgba(0,0,0,0.1)' }}>
+              <Card.Section inheritPadding py="sm" style={{ borderTop: '1px solid var(--border-color)', backgroundColor: 'var(--panel-hover)' }}>
                 <Button 
-                  variant="light" 
-                  color="indigo" 
+                  variant="subtle" 
+                  color="blue" 
                   fullWidth 
-                  radius="md" 
-                  leftSection={<IconArrowRight size={16} />}
+                  size="sm"
+                  leftSection={<IconArrowRight size={14} />}
                   onClick={() => {
                      router.push(`/dags?id=${dag.ID}`);
                   }}
-                  style={{ transition: 'transform 0.2s ease' }}
-                  onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
-                  onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
                 >
                   View Details
                 </Button>
@@ -173,7 +176,7 @@ export default function Dashboard() {
 
       {/* Metrics Cards */}
       <SimpleGrid cols={{ base: 1, sm: 3 }} mb="xl">
-        <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
+        <Card padding="lg">
            <Group>
              <RingProgress
                 size={80}
@@ -189,7 +192,7 @@ export default function Dashboard() {
            </Group>
         </Card>
         
-        <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
+        <Card padding="lg">
            <Group>
              <RingProgress
                 size={80}
@@ -207,7 +210,7 @@ export default function Dashboard() {
            </Group>
         </Card>
 
-        <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
+        <Card padding="lg">
            <Group>
              <RingProgress
                 size={80}
@@ -226,7 +229,7 @@ export default function Dashboard() {
         </Card>
       </SimpleGrid>
 
-      <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
+      <Card padding="0" style={{ overflow: "hidden" }}>
         <Table.ScrollContainer minWidth={800}>
           <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
             <Table.Thead>
@@ -243,13 +246,13 @@ export default function Dashboard() {
               {runs?.map((run) => (
                 <Table.Tr key={run.ID} onClick={() => router.push(`/runs/?id=${run.ID}`)} style={{ cursor: "pointer" }}>
                   <Table.Td>
-                    <Text size="sm" fw={600} c="indigo">{run.ID}</Text>
+                    <Text size="sm" fw={500}>{run.ID}</Text>
                   </Table.Td>
                   <Table.Td>
                     <Badge variant="outline" color="gray">{run.DAGID}</Badge>
                   </Table.Td>
                   <Table.Td>
-                    <Badge color={getStatusColor(run.Status)} variant="light" size="sm">
+                    <Badge color={getStatusColor(run.Status)} variant="light" size="sm" radius="sm">
                       {run.Status.toUpperCase()}
                     </Badge>
                   </Table.Td>

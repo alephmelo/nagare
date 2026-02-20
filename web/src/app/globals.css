@@ -1,22 +1,31 @@
 :root[data-mantine-color-scheme="dark"] {
-  --mantine-color-body: #0b0f19;
-  --panel-bg: rgba(15, 23, 42, 0.6);
-  --border-color: rgba(255, 255, 255, 0.05);
+  --mantine-color-body: #0a0a0a;
+  --panel-bg: #141414;
+  --panel-hover: #1f1f1f;
+  --border-color: rgba(255, 255, 255, 0.1);
 }
 
 :root[data-mantine-color-scheme="light"] {
   --mantine-color-body: #f8fafc;
-  --panel-bg: rgba(255, 255, 255, 0.8);
-  --border-color: rgba(0, 0, 0, 0.05);
+  --panel-bg: #ffffff;
+  --panel-hover: #f1f5f9;
+  --border-color: rgba(0, 0, 0, 0.08);
 }
 
 body {
-  transition: background-color 0.3s ease;
+  transition: background-color 0.15s ease;
+  background-color: var(--mantine-color-body);
 }
 
-[data-mantine-color-scheme="dark"] body {
-  background: radial-gradient(circle at 15% 50%, rgba(55, 48, 163, 0.1), transparent 25%),
-              radial-gradient(circle at 85% 30%, rgba(13, 148, 136, 0.08), transparent 25%),
-              var(--mantine-color-body);
-  background-attachment: fixed;
+/* Base styles for scrollbars to look cleaner */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
 }

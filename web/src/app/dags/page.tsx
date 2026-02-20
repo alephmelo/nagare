@@ -266,19 +266,17 @@ export default function DagDetails() {
     <>
       <Group justify="space-between" mb="xs">
         <Group>
-          <Button variant="subtle" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/')} color="gray" radius="md">
+          <Button variant="subtle" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/')} color="gray">
             Back
           </Button>
           <Title order={2}>{id}</Title>
-          {dag && <Badge variant="light" color="indigo" size="xl" radius="md">{dag.Schedule}</Badge>}
+          {dag && <Badge variant="light" color="blue" size="lg">{dag.Schedule}</Badge>}
         </Group>
         {dag && (
           <Button 
             leftSection={<IconPlayerPlay size={16} />} 
-            color="indigo" 
             onClick={handleTrigger}
             loading={triggering}
-            radius="md"
           >
             Trigger Pipeline
           </Button>
@@ -305,7 +303,7 @@ export default function DagDetails() {
           </Tabs.List>
 
           <Tabs.Panel value="graph" pt="xl">
-            <Card shadow="sm" radius="lg" withBorder style={{ height: '60vh', minHeight: '500px', backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }} p="0">
+            <Card style={{ height: '60vh', minHeight: '500px' }} p="0">
                 <ReactFlow
                   nodes={nodes}
                   edges={edges}
@@ -321,7 +319,7 @@ export default function DagDetails() {
           </Tabs.Panel>
 
           <Tabs.Panel value="table" pt="xl">
-             <Card shadow="sm" radius="lg" withBorder padding="xl" style={{ overflow: "hidden", backgroundColor: 'var(--panel-bg)', borderColor: 'var(--border-color)', backdropFilter: 'blur(10px)' }}>
+             <Card padding="0" style={{ overflow: "hidden" }}>
               <Table.ScrollContainer minWidth={800}>
                 <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
                   <Table.Thead>
@@ -337,10 +335,10 @@ export default function DagDetails() {
                     {runs?.map((run) => (
                       <Table.Tr key={run.ID} onClick={() => router.push(`/runs/?id=${run.ID}`)} style={{ cursor: "pointer" }}>
                         <Table.Td>
-                          <Text size="sm" fw={600} c="indigo">{run.ID}</Text>
+                          <Text size="sm" fw={500}>{run.ID}</Text>
                         </Table.Td>
                         <Table.Td>
-                          <Badge color={getStatusColor(run.Status)} variant="light" size="sm">
+                          <Badge color={getStatusColor(run.Status)} variant="light" size="sm" radius="sm">
                             {run.Status.toUpperCase()}
                           </Badge>
                         </Table.Td>
@@ -381,7 +379,6 @@ export default function DagDetails() {
                     total={Math.ceil(totalRuns / limit)}
                     value={page}
                     onChange={setPage}
-                    color="indigo"
                     withEdges
                   />
                 </Group>
