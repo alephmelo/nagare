@@ -1,5 +1,6 @@
 procs:
   backend:
-    cmd: air
+    cmd: ["air"]
   frontend:
-    cmd: cd web && npm run dev
+    cmd: ["npm", "run", "dev"]
+    cwd: "web"
