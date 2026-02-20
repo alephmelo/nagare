@@ -79,6 +79,11 @@ This command automatically:
 3. Boots up the API on `http://localhost:8080` (`air`)
 4. Proxies all frontend `/api/*` requests to the Go backend seamlessly.
 
+> **Note on Ports**: During development, you can access the UI on both ports. 
+> - **Port 3000** serves the live Next.js development server with hot-reloading. **Always use this port for UI development.**
+> - **Port 8080** runs the Go backend, which serves the static built files from your *last* `make build`. UI changes will not reflect here until you rebuild.
+
+
 ### Exiting the Dev Environment
 Inside the `mprocs` TUI:
 - Press `<C-a> + q` (Control+A, then Q) to safely kill both the frontend and backend processes and exit the multiplexer.
