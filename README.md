@@ -119,6 +119,56 @@ tasks:
       echo "Commit: $COMMIT_HASH"
 ```
 
+### 7. Distributed Workers
+Nagare can scale horizontally by running the same binary as a **worker-only node** that connects to a master over HTTP. No external broker or coordination service is needed.
+
+#### Running a master node
+The default `./nagare` command already acts as a master. It accepts remote worker connections on the same port (`8080`) as the web UI. No extra flags are needed for a basic setup.
+
+To lock down the cluster with a shared secret:
+```bash
+./nagare --token mysecret
+```
+
+#### Connecting a remote worker
+On any machine that can reach the master:
+```bash
+./nagare --worker --join http://master-host:8080
+```
+
+With a token and custom pool:
+```bash
+./nagare --worker --join http://master-host:8080 --token mysecret --pools gpu,cpu
+```
+
+#### All CLI flags
+| Flag | Default | Description |
+|---|---|---|
+| `--worker` | false | Run in worker-only mode |
+| `--join` | — | Master address (required in worker mode) |
+| `--pools` | `default` | Comma-separated pool names this worker serves |
+| `--token` | — | Shared secret (`Authorization: Bearer`) |
+| `--port` | `:8080` | Listen address for the master API |
+| `--db` | `nagare.db` | SQLite database path |
+| `--dags` | `dags` | Directory containing DAG definitions |
+
+#### How it works
+- Workers **register** with the master on startup, then **poll** for work every 2 seconds (pull model — no inbound firewall rules needed on workers).
+- Workers send **heartbeats** every 10 seconds; the master marks them offline after 60 s of silence.
+- Workers stream **log lines** back to the master in batches so the web UI's live log view works identically for remote and local tasks.
+- Workers **check for cancellation** every 5 seconds, so killing a run from the UI propagates to remote tasks promptly.
+- The master also runs its own **local worker pool** in parallel, so a single-node setup requires no flag changes — the feature is fully backward-compatible.
+
+#### Routing tasks to specific workers
+Use `pool:` in your DAG task definition alongside the `--pools` flag on worker nodes:
+```yaml
+tasks:
+  - id: train_model
+    type: command
+    command: "python train.py"
+    pool: gpu          # only dispatched to workers started with --pools gpu
+```
+
 ---
 ## Development
 

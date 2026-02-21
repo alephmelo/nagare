@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alephmelo/nagare/internal/cluster"
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/alephmelo/nagare/internal/scheduler"
@@ -28,6 +29,7 @@ type Server struct {
 	scheduler      *scheduler.Scheduler
 	pool           *worker.Pool
 	broker         *logbroker.Broker
+	coordinator    *cluster.Coordinator // optional; nil in standalone mode
 	allowedOrigins []string
 }
 
@@ -40,6 +42,12 @@ func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Poo
 		broker:         broker,
 		allowedOrigins: allowedOrigins,
 	}
+}
+
+// WithCoordinator attaches a cluster Coordinator so that /api/workers/* routes
+// are served alongside the normal API. Call this before Start().
+func (s *Server) WithCoordinator(c *cluster.Coordinator) {
+	s.coordinator = c
 }
 
 // corsMiddleware applies CORS headers based on the server's allowed-origins list.
@@ -628,6 +636,12 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 
 	if frontendFS != nil {
 		mux.Handle("/", http.FileServer(http.FS(frontendFS)))
+	}
+
+	// Mount cluster worker endpoints when running as a master node.
+	if s.coordinator != nil {
+		mux.Handle("/api/workers", s.coordinator.Handler())
+		mux.Handle("/api/workers/", s.coordinator.Handler())
 	}
 
 	log.Printf("Starting Nagare API on %s", addr)

@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -10,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
@@ -75,7 +73,6 @@ func (p *Pool) Dispatch() error {
 	}
 
 	for _, ti := range queued {
-		// Look up the task's pool
 		run, err := p.store.GetDagRun(ti.RunID)
 		if err != nil {
 			p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
@@ -124,12 +121,11 @@ func (p *Pool) Dispatch() error {
 			continue
 		}
 
-		// Send to channel
 		select {
 		case queue <- ti:
 			log.Printf("Dispatched task %s to pool %s", ti.ID, poolName)
 		default:
-			// If queue is full, rollback to queued
+			// Queue full — roll back to queued so the next Dispatch picks it up.
 			p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskQueued)
 			log.Printf("Queue full for pool %s, rolled back task %s", poolName, ti.ID)
 		}
@@ -167,109 +163,43 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 		return
 	}
 
-	var taskDef *models.TaskDef
+	// Handle trigger_dag type tasks before building a full assignment.
 	baseTaskID := ti.TaskID
 	if idx := strings.Index(baseTaskID, "["); idx != -1 {
 		baseTaskID = baseTaskID[:idx]
 	}
 	for i := range dag.Tasks {
-		if dag.Tasks[i].ID == baseTaskID {
-			taskDef = &dag.Tasks[i]
-			break
+		if dag.Tasks[i].ID == baseTaskID && dag.Tasks[i].Type == "trigger_dag" {
+			taskDef := &dag.Tasks[i]
+			triggeredRun, err := p.triggerDAG(taskDef.DagID, "triggered", nil)
+			if err != nil {
+				output := fmt.Sprintf("Failed to trigger DAG %s: %v", taskDef.DagID, err)
+				log.Printf("Worker %d: Task %s FAILED: %s", workerID, ti.ID, output)
+				p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, output)
+			} else {
+				output := fmt.Sprintf("Successfully triggered DAG run: %s", triggeredRun.ID)
+				log.Printf("Worker %d: Task %s SUCCESS\nOutput: %s", workerID, ti.ID, output)
+				p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, output)
+			}
+			return
 		}
 	}
 
-	if taskDef == nil {
-		p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
-		return
-	}
-
-	if taskDef.Type == "trigger_dag" {
-		triggeredRun, err := p.triggerDAG(taskDef.DagID, "triggered", nil)
-		if err != nil {
-			output := fmt.Sprintf("Failed to trigger DAG %s: %v", taskDef.DagID, err)
-			log.Printf("Worker %d: Task %s FAILED: %s", workerID, ti.ID, output)
-			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, output)
-		} else {
-			output := fmt.Sprintf("Successfully triggered DAG run: %s", triggeredRun.ID)
-			log.Printf("Worker %d: Task %s SUCCESS\nOutput: %s", workerID, ti.ID, output)
-			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, output)
-		}
-		return
-	}
-
-	cmdStr := taskDef.Command
-	if ti.ItemValue != nil {
-		cmdStr = strings.ReplaceAll(cmdStr, "{{item}}", *ti.ItemValue)
-	}
-
-	if cmdStr == "" {
-		p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
-		return
-	}
-
-	var cmdCtx context.Context
-	var cancel context.CancelFunc
-
-	if taskDef.TimeoutSeconds > 0 {
-		cmdCtx, cancel = context.WithTimeout(ctx, time.Duration(taskDef.TimeoutSeconds)*time.Second)
-	} else {
-		cmdCtx, cancel = context.WithCancel(ctx)
-	}
-	defer cancel()
-
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", cmdStr)
-
-	// Place the child in its own process group so that killing the group also
-	// terminates any subprocesses spawned by the shell command.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	cmd.Env = os.Environ()
-	execDateStr := run.ExecDate.Format(time.RFC3339)
-	cmd.Env = append(cmd.Env, fmt.Sprintf("NAGARE_EXECUTION_DATE=%s", execDateStr))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("NAGARE_SCHEDULED_TIME=%s", execDateStr))
-
-	if run.Conf != nil {
-		for k, v := range run.Conf {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
-		}
-	}
-
-	if len(taskDef.Env) > 0 {
-		for k, v := range taskDef.Env {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
-		}
-	}
-
-	// Use an os.Pipe so both stdout and stderr go to a single *os.File.
-	// Because cmd.Stdout is an *os.File, exec does NOT start an internal copy
-	// goroutine; cmd.Wait() returns as soon as the process exits, regardless
-	// of whether the reader is still draining data.
-	pr, pw, pipeErr := os.Pipe()
-	if pipeErr != nil {
-		p.broker.Close(ti.ID)
-		p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, pipeErr.Error())
-		return
-	}
-	cmd.Stdout = pw
-	cmd.Stderr = pw
-
-	if err := cmd.Start(); err != nil {
-		pw.Close()
-		pr.Close()
-		p.broker.Close(ti.ID)
+	// Resolve command, env, timeout via shared helper.
+	assignment, err := PrepareTaskAssignment(run, ti, dag)
+	if err != nil {
 		p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, err.Error())
 		return
 	}
 
-	// Close the write end in the parent process — the child has its own
-	// inherited copy.  This ensures pr reaches EOF once the child (and all
-	// its subprocesses) close their copy of pw.
-	pw.Close()
+	if assignment.Command == "" {
+		p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+		return
+	}
 
-	// Register the running process only after Start() so cmd.Process is fully initialized.
+	// Register a slot in the running map; onStart fills in cmd+pr after Start().
 	p.rmu.Lock()
-	p.running[ti.ID] = &runningTask{cmd: cmd, pr: pr}
+	p.running[ti.ID] = &runningTask{}
 	p.rmu.Unlock()
 
 	defer func() {
@@ -278,60 +208,50 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 		p.rmu.Unlock()
 	}()
 
-	// Stream output line-by-line, publishing to broker and accumulating for DB.
-	// scanDone signals that the scanner goroutine has finished.
-	var buf strings.Builder
-	scanDone := make(chan struct{})
-	go func() {
-		defer close(scanDone)
-		scanner := bufio.NewScanner(pr)
-		scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // support lines up to 1 MB
-		for scanner.Scan() {
-			line := scanner.Text()
-			buf.WriteString(line + "\n")
+	result, runErr := RunCommand(ctx, assignment.Command, assignment.Env, assignment.TimeoutSecs,
+		func(line string) {
 			p.broker.Publish(ti.ID, line)
-		}
-	}()
+		},
+		func(cmd *exec.Cmd, pr *os.File) {
+			p.rmu.Lock()
+			p.running[ti.ID] = &runningTask{cmd: cmd, pr: pr}
+			p.rmu.Unlock()
+		},
+	)
 
-	runErr := cmd.Wait()
-	log.Printf("executeTask %s: cmd.Wait() done, err=%v", ti.ID, runErr)
-	pr.Close() // signal EOF to the scanner goroutine
-	<-scanDone // wait for all lines to be processed before reading buf
-
-	output := buf.String()
+	log.Printf("executeTask %s: RunCommand done, err=%v", ti.ID, runErr)
 
 	p.broker.Close(ti.ID)
 
 	if runErr != nil {
-		if cmdCtx.Err() == context.DeadlineExceeded {
-			errMsg := fmt.Sprintf("Task timed out after %d seconds\nOutput: %s", taskDef.TimeoutSeconds, output)
+		if result.TimedOut {
+			errMsg := fmt.Sprintf("Task timed out after %d seconds\nOutput: %s", assignment.TimeoutSecs, result.Output)
 			log.Printf("Worker %d: Task %s TIMEOUT: %s", workerID, ti.ID, errMsg)
 			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, errMsg)
 			p.broker.Cleanup(ti.ID)
 			return
 		}
 
-		log.Printf("Worker %d: Task %s FAILED: %v\nOutput: %s", workerID, ti.ID, runErr, output)
+		log.Printf("Worker %d: Task %s FAILED: %v\nOutput: %s", workerID, ti.ID, runErr, result.Output)
 
-		// Check if it was cancelled/killed externally before marking as failed
+		// Check if it was cancelled/killed externally before marking as failed.
 		latest, getErr := p.store.GetTaskInstance(ti.ID)
 		if getErr == nil && latest.Status == models.TaskCancelled {
 			log.Printf("Worker %d: Task %s was already marked as CANCELLED, skipping failure update", workerID, ti.ID)
-			// Still save partial output so it isn't lost on kill
-			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskCancelled, output)
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskCancelled, result.Output)
 			p.broker.Cleanup(ti.ID)
 			return
 		}
 
-		if ti.Attempt <= taskDef.Retries {
-			log.Printf("Worker %d: Task %s FAILED but has retries remaining (%d/%d). Output: %s", workerID, ti.ID, ti.Attempt, taskDef.Retries, output)
-			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskUpForRetry, output)
+		if ti.Attempt <= assignment.Retries {
+			log.Printf("Worker %d: Task %s FAILED but has retries remaining (%d/%d). Output: %s", workerID, ti.ID, ti.Attempt, assignment.Retries, result.Output)
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskUpForRetry, result.Output)
 		} else {
-			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, output)
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, result.Output)
 		}
 	} else {
-		log.Printf("Worker %d: Task %s SUCCESS\nOutput: %s", workerID, ti.ID, output)
-		p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, output)
+		log.Printf("Worker %d: Task %s SUCCESS\nOutput: %s", workerID, ti.ID, result.Output)
+		p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, result.Output)
 	}
 
 	p.broker.Cleanup(ti.ID)
@@ -344,8 +264,8 @@ func (p *Pool) KillTask(taskInstanceID string) error {
 	p.rmu.RUnlock()
 
 	if !ok {
-		// If not in memory, it might be already finished or in queue.
-		// We still mark it as cancelled in DB to be sure.
+		// If not in memory, it might already be finished or queued.
+		// Still mark it cancelled in the DB to be safe.
 		return p.store.UpdateTaskInstanceStatus(taskInstanceID, models.TaskCancelled)
 	}
 
@@ -355,7 +275,6 @@ func (p *Pool) KillTask(taskInstanceID string) error {
 		// which also terminates any subprocesses spawned by the shell command.
 		pgid := rt.cmd.Process.Pid
 		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-			// Fall back to killing just the process if group kill fails.
 			rt.cmd.Process.Kill()
 		}
 	}

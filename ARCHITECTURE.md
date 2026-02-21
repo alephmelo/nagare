@@ -38,6 +38,46 @@ The muscle. Instead of distributed workers communicating over HTTP/RPC, Nagare u
 - Workers pop a task off the channel, update the DB state to `running`, execute the shell command locally via `os/exec`, and report `success` or `failed` back to the store.
 - Workers keep a thread-safe registry of active `os/exec.Cmd` processes, mapped to task IDs. This enables the API/Scheduler to signal a process termination (`RunCancelled` / `TaskCancelled`) gracefully.
 
-## Developing 
+### 5. The Cluster Layer (`internal/cluster/`)
+Nagare can operate as a multi-node cluster using the same binary for both roles. The cluster layer introduces two new components with zero external dependencies — communication happens over plain HTTP JSON.
+
+#### `internal/cluster/protocol.go` — shared wire types
+Defines the structs exchanged between master and worker:
+- `WorkerRegistration` / `WorkerInfo` — identity and pool membership
+- `PollRequest` / `TaskAssignmentDTO` — pull-model task dispatch
+- `TaskResult` — execution outcome (status, output, timed_out flag)
+- `LogBatch` — line batches forwarded to the master's log broker
+- `CancelCheck` — response to a worker's cancellation poll
+
+#### `internal/cluster/master.go` — `Coordinator`
+Runs on the master node alongside the existing local worker pool. Responsibilities:
+- **Registration / heartbeat**: upserts `WorkerInfo` into an in-memory map; marks workers offline after a configurable timeout.
+- **Poll endpoint** (`POST /api/workers/poll`): atomically claims a `queued` task from the store that matches the requesting worker's pool list and returns a `TaskAssignmentDTO`. Returns `204` when there is no matching work.
+- **Result endpoint** (`POST /api/workers/result`): updates `task_instances` status + output; closes the log broker entry so SSE subscribers receive EOF.
+- **Log endpoint** (`POST /api/workers/log`): publishes batched lines into the existing `logbroker.Broker` — the web UI's SSE log stream works identically for remote and local tasks.
+- **Cancel check** (`GET /api/workers/tasks/{id}/cancel`): workers poll this to detect external kills from the UI.
+- **Auth middleware**: wraps all routes with `Authorization: Bearer <token>` enforcement when a token is configured. Empty token = no auth.
+
+`Coordinator.Handler()` returns an `http.Handler` that is mounted onto the main mux by `api.Server.WithCoordinator()` — the existing API is untouched when no coordinator is attached.
+
+#### `internal/cluster/worker.go` — `RemoteWorker`
+Runs on worker-only nodes (launched with `--worker --join <addr>`). Responsibilities:
+- **`Register()`**: POSTs `WorkerRegistration` on startup.
+- **`Run(ctx)`**: starts a heartbeat loop and a poll loop; blocks until the context is cancelled.
+- **`PollOnce()`**: POSTs a `PollRequest`; if a `TaskAssignmentDTO` is returned, calls `executeAssignment()` in a goroutine.
+- **`executeAssignment()`**: runs the task via `worker.RunCommand()` (the same shell executor used by local workers); streams log batches to the master every 200 ms; reports the final `TaskResult`.
+- **`cancelCheckLoop()`**: polls `/api/workers/tasks/{id}/cancel` every 5 s; cancels the local execution context on detection.
+
+#### `internal/worker/exec.go` — shared execution helpers
+Extracted from `worker.go` to be reusable by both local and remote paths:
+- **`RunCommand(ctx, cmd, env, timeoutSecs, onLine, onStart)`**: pure shell execution via `sh -c`; places the process in its own group (`Setpgid`) for clean kills; calls `onLine` for each output line and `onStart` after `cmd.Start()`.
+- **`PrepareTaskAssignment(run, ti, dag)`**: resolves a `TaskInstance` + `DagRun` into a `TaskAssignment` by looking up the task definition, applying `{{item}}` substitution, and assembling the full environment slice.
+
+#### CLI entry points (`main.go`)
+The binary now accepts flags parsed via stdlib `flag`:
+- **No flags** (default): `runMaster()` — identical to the previous standalone mode, plus the coordinator is always initialized (zero overhead when no remote workers connect).
+- **`--worker --join <addr>`**: `runWorker()` — registers, runs the poll + heartbeat loop, exits cleanly on SIGINT/SIGTERM.
+
+## Developing
 We adhere strictly to TDD (`go test ./...` should pass cleanly at all times).
 When testing database logic, we utilize SQLite's shared in-memory mode (`file::memory:?cache=shared`) to ensure fast, isolated test runs that don't pollute the disk.
