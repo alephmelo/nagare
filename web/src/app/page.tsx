@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Title, Card, Table, Badge, Text, Group, Button, Skeleton, Select, Pagination, ActionIcon, Tooltip, Menu, UnstyledButton, Alert, List } from "@mantine/core";
-import { IconRefresh, IconX, IconActivity, IconAlertCircle, IconRobot, IconUser, IconPlayerPlay, IconTimelineEvent, IconFilter, IconCheck, IconPlayerStop } from "@tabler/icons-react";
+import { IconRefresh, IconX, IconActivity, IconAlertCircle, IconRobot, IconUser, IconPlayerPlay, IconTimelineEvent, IconFilter, IconCheck, IconPlayerStop, IconSitemap } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { notifications } from '@mantine/notifications';
 import { apiFetch } from "../lib/apiFetch";
@@ -152,6 +152,10 @@ export default function Dashboard() {
             <div>
                <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Operations</Text>
                <Group gap="xs" mt={4}><IconTimelineEvent size={18} color="var(--mantine-color-teal-filled)" /><Text fw={700} size="xl">{stats.total_runs}</Text></Group>
+            </div>
+            <div>
+               <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Loaded DAGs</Text>
+               <Group gap="xs" mt={4}><IconSitemap size={18} color="var(--mantine-color-violet-filled)" /><Text fw={700} size="xl">{stats.loaded_dags}</Text></Group>
             </div>
           </Group>
         </Card>

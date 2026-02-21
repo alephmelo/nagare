@@ -2,7 +2,7 @@
 
 import { AppShell, Burger, Group, Title, ActionIcon, useMantineColorScheme, useComputedColorScheme, Text, Container, Box, NavLink, Tooltip } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { IconActivity, IconSun, IconMoon, IconDashboard, IconSitemap, IconHistory, IconLogout } from "@tabler/icons-react";
+import { IconActivity, IconSun, IconMoon, IconDashboard, IconSitemap, IconHistory, IconLogout, IconServer } from "@tabler/icons-react";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAuthContext } from "./AuthProvider";
@@ -90,6 +90,22 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
             onClick={(e) => {
               e.preventDefault();
               router.push("/runs");
+            }}
+            variant="filled"
+          />
+        </Box>
+        <Box mb="md">
+          <Text size="xs" fw={500} c="dimmed" mb="sm" tt="uppercase">
+            Cluster
+          </Text>
+          <NavLink
+            href="/workers"
+            label="Workers"
+            leftSection={<IconServer size="1rem" stroke={1.5} />}
+            active={pathname === "/workers"}
+            onClick={(e) => {
+              e.preventDefault();
+              router.push("/workers");
             }}
             variant="filled"
           />
