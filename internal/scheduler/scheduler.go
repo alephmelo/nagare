@@ -1,10 +1,12 @@
 package scheduler
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -192,6 +194,51 @@ func (s *Scheduler) evaluateRunCompletions() error {
 			continue
 		}
 
+		// Pre-evaluate map meta-tasks
+		for k, ti := range tasks {
+			var taskDef *models.TaskDef
+			baseTaskID := ti.TaskID
+			if idx := strings.Index(baseTaskID, "["); idx != -1 {
+				baseTaskID = baseTaskID[:idx]
+			}
+			for i := range dag.Tasks {
+				if dag.Tasks[i].ID == baseTaskID {
+					taskDef = &dag.Tasks[i]
+					break
+				}
+			}
+
+			if taskDef != nil && taskDef.Type == "map" && ti.TaskID == baseTaskID {
+				if ti.Status == models.TaskRunning {
+					hasChildren := false
+					allChildrenSuccess := true
+					anyChildFailed := false
+
+					for _, childTi := range tasks {
+						// precise matcher: "task["
+						if strings.HasPrefix(childTi.TaskID, baseTaskID+"[") {
+							hasChildren = true
+							if childTi.Status == models.TaskFailed {
+								anyChildFailed = true
+							} else if childTi.Status != models.TaskSuccess {
+								allChildrenSuccess = false
+							}
+						}
+					}
+
+					if hasChildren {
+						if anyChildFailed {
+							s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+							tasks[k].Status = models.TaskFailed
+						} else if allChildrenSuccess {
+							s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskSuccess)
+							tasks[k].Status = models.TaskSuccess
+						}
+					}
+				}
+			}
+		}
+
 		allSuccess := true
 		anyFailed := false
 
@@ -199,8 +246,12 @@ func (s *Scheduler) evaluateRunCompletions() error {
 			if ti.Status == models.TaskUpForRetry {
 				allSuccess = false
 				var taskDef *models.TaskDef
+				baseTaskID := ti.TaskID
+				if idx := strings.Index(baseTaskID, "["); idx != -1 {
+					baseTaskID = baseTaskID[:idx]
+				}
 				for i := range dag.Tasks {
-					if dag.Tasks[i].ID == ti.TaskID {
+					if dag.Tasks[i].ID == baseTaskID {
 						taskDef = &dag.Tasks[i]
 						break
 					}
@@ -282,8 +333,51 @@ func (s *Scheduler) PromotePendingTasks() error {
 		}
 
 		if allSuccess {
-			log.Printf("Promoting task %s to queued", ti.ID)
-			s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskQueued)
+			if taskDef.Type == "map" && taskDef.MapOver != "" {
+				mapTaskInst, err := s.store.GetTaskAttempts(ti.RunID, taskDef.MapOver)
+				if err != nil || len(mapTaskInst) == 0 {
+					log.Printf("MapOver task %s not found for run %s", taskDef.MapOver, ti.RunID)
+					s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+					continue
+				}
+
+				lastAttempt := mapTaskInst[len(mapTaskInst)-1]
+				var items []string
+				if err := json.Unmarshal([]byte(lastAttempt.Output), &items); err != nil {
+					log.Printf("Failed to unmarshal output for map task %s: %v", ti.ID, err)
+					s.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, fmt.Sprintf("failed to parse map_over json array: %v\nOutput was: %s", err, lastAttempt.Output))
+					continue
+				}
+
+				s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskRunning)
+
+				now := time.Now()
+				for i, item := range items {
+					mappedTaskID := fmt.Sprintf("%s[%d]", ti.TaskID, i)
+					mappedInstID := fmt.Sprintf("%s_%s", ti.RunID, mappedTaskID)
+					itemVal := item
+					childTi := &models.TaskInstance{
+						ID:        mappedInstID,
+						RunID:     ti.RunID,
+						TaskID:    mappedTaskID,
+						Status:    models.TaskQueued,
+						ItemValue: &itemVal,
+						Attempt:   1,
+						CreatedAt: now,
+						UpdatedAt: now,
+					}
+					if err := s.store.CreateTaskInstance(childTi); err != nil {
+						log.Printf("Failed to create mapped instance %s: %v", mappedInstID, err)
+					}
+				}
+
+				if len(items) == 0 {
+					s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskSuccess)
+				}
+			} else {
+				log.Printf("Promoting task %s to queued", ti.ID)
+				s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskQueued)
+			}
 		}
 	}
 	return nil

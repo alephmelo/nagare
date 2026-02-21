@@ -56,6 +56,7 @@ type TaskInstance struct {
 	TaskID    string
 	Status    TaskStatus
 	Output    string
+	ItemValue *string
 	Attempt   int
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -108,6 +109,7 @@ func (s *Store) InitSchema() error {
 		task_id TEXT NOT NULL,
 		status TEXT NOT NULL,
 		output TEXT,
+		item_value TEXT,
 		attempt INT NOT NULL DEFAULT 1,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
@@ -124,6 +126,7 @@ func (s *Store) InitSchema() error {
 	// Active Migrations — ignore errors if columns already exist
 	s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN trigger_type TEXT DEFAULT 'scheduled'`)
 	s.db.Exec(`ALTER TABLE task_instances ADD COLUMN attempt INT NOT NULL DEFAULT 1`)
+	s.db.Exec(`ALTER TABLE task_instances ADD COLUMN item_value TEXT`)
 
 	return nil
 }
@@ -295,7 +298,7 @@ func (s *Store) GetTaskInstancesByRun(runID string) ([]TaskInstance, error) {
 // GetLatestTaskAttempts returns the most recent attempt for each task in a run.
 func (s *Store) GetLatestTaskAttempts(runID string) ([]TaskInstance, error) {
 	query := `
-		SELECT id, run_id, task_id, status, COALESCE(output,''), attempt, created_at, updated_at
+		SELECT id, run_id, task_id, status, COALESCE(output,''), item_value, attempt, created_at, updated_at
 		FROM task_instances
 		WHERE run_id = ?
 		  AND attempt = (
@@ -316,7 +319,7 @@ func (s *Store) GetLatestTaskAttempts(runID string) ([]TaskInstance, error) {
 // GetTaskAttempts returns all attempts for a single task within a run, ordered oldest first.
 func (s *Store) GetTaskAttempts(runID, taskID string) ([]TaskInstance, error) {
 	query := `
-		SELECT id, run_id, task_id, status, COALESCE(output,''), attempt, created_at, updated_at
+		SELECT id, run_id, task_id, status, COALESCE(output,''), item_value, attempt, created_at, updated_at
 		FROM task_instances
 		WHERE run_id = ? AND task_id = ?
 		ORDER BY attempt ASC`
@@ -359,7 +362,7 @@ func (s *Store) scanTaskInstances(rows *sql.Rows) ([]TaskInstance, error) {
 	var tasks []TaskInstance
 	for rows.Next() {
 		var ti TaskInstance
-		if err := rows.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &ti.Output, &ti.Attempt, &ti.CreatedAt, &ti.UpdatedAt); err != nil {
+		if err := rows.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &ti.Output, &ti.ItemValue, &ti.Attempt, &ti.CreatedAt, &ti.UpdatedAt); err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, ti)
@@ -372,14 +375,14 @@ func (s *Store) CreateTaskInstance(ti *TaskInstance) error {
 	if ti.Attempt == 0 {
 		ti.Attempt = 1
 	}
-	query := `INSERT INTO task_instances (id, run_id, task_id, status, output, attempt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, ti.ID, ti.RunID, ti.TaskID, ti.Status, ti.Output, ti.Attempt, ti.CreatedAt, ti.UpdatedAt)
+	query := `INSERT INTO task_instances (id, run_id, task_id, status, output, item_value, attempt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, ti.ID, ti.RunID, ti.TaskID, ti.Status, ti.Output, ti.ItemValue, ti.Attempt, ti.CreatedAt, ti.UpdatedAt)
 	return err
 }
 
 // GetTasksByStatus retrieves all TaskInstances with a specific status
 func (s *Store) GetTasksByStatus(status TaskStatus) ([]TaskInstance, error) {
-	query := `SELECT id, run_id, task_id, status, output, created_at, updated_at FROM task_instances WHERE status = ?`
+	query := `SELECT id, run_id, task_id, status, output, item_value, created_at, updated_at FROM task_instances WHERE status = ?`
 	rows, err := s.db.Query(query, status)
 	if err != nil {
 		return nil, err
@@ -390,7 +393,7 @@ func (s *Store) GetTasksByStatus(status TaskStatus) ([]TaskInstance, error) {
 	for rows.Next() {
 		var ti TaskInstance
 		var output sql.NullString
-		if err := rows.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &output, &ti.CreatedAt, &ti.UpdatedAt); err != nil {
+		if err := rows.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &output, &ti.ItemValue, &ti.CreatedAt, &ti.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if output.Valid {
@@ -408,11 +411,11 @@ func (s *Store) GetQueuedTasks() ([]TaskInstance, error) {
 
 // GetTaskInstance retrieves a specific TaskInstance by its unique ID
 func (s *Store) GetTaskInstance(id string) (*TaskInstance, error) {
-	query := `SELECT id, run_id, task_id, status, output, attempt, created_at, updated_at FROM task_instances WHERE id = ?`
+	query := `SELECT id, run_id, task_id, status, output, item_value, attempt, created_at, updated_at FROM task_instances WHERE id = ?`
 	row := s.db.QueryRow(query, id)
 
 	var ti TaskInstance
-	if err := row.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &ti.Output, &ti.Attempt, &ti.CreatedAt, &ti.UpdatedAt); err != nil {
+	if err := row.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &ti.Output, &ti.ItemValue, &ti.Attempt, &ti.CreatedAt, &ti.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &ti, nil

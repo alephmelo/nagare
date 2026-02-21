@@ -1,0 +1,18 @@
+id: map_reduce_demo
+description: "A demonstration of dynamic map tasks reading from stdout JSON arrays"
+schedule: "workflow_dispatch"
+tasks:
+  - id: get_files
+    type: command
+    # Outputs a JSON array of strings: '["hello.csv", "world.csv", "data.csv"]'
+    command: >-
+      echo '["hello.csv", "world.csv", "data.csv"]'
+  - id: process_file
+    type: map
+    map_over: get_files
+    command: "echo 'Processing file: {{item}}'; sleep 2; echo 'Done processing {{item}}'"
+  - id: aggregate
+    type: command
+    command: "echo 'All files processed successfully!'"
+    depends_on:
+      - process_file

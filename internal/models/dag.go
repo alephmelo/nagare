@@ -11,9 +11,10 @@ import (
 // TaskDef defines a unit of work within a DAG
 type TaskDef struct {
 	ID                string            `yaml:"id"`
-	Type              string            `yaml:"type"`             // e.g. "command" or "trigger_dag"
-	Pool              string            `yaml:"pool,omitempty"`   // Specific worker queue to run on
-	DagID             string            `yaml:"dag_id,omitempty"` // For "trigger_dag" tasks
+	Type              string            `yaml:"type"`               // e.g. "command" or "trigger_dag" or "map"
+	MapOver           string            `yaml:"map_over,omitempty"` // For "map" tasks
+	Pool              string            `yaml:"pool,omitempty"`     // Specific worker queue to run on
+	DagID             string            `yaml:"dag_id,omitempty"`   // For "trigger_dag" tasks
 	Command           string            `yaml:"command,omitempty"`
 	Env               map[string]string `yaml:"env,omitempty"`
 	Retries           int               `yaml:"retries,omitempty"`
@@ -65,7 +66,6 @@ func ParseDAG(data []byte) (*DAGDef, error) {
 		}
 	}
 
-	// Rewrite dependencies
 	for i := range expandedTasks {
 		var newDeps []string
 		for _, dep := range expandedTasks[i].DependsOn {
@@ -75,6 +75,20 @@ func ParseDAG(data []byte) (*DAGDef, error) {
 				newDeps = append(newDeps, dep)
 			}
 		}
+
+		if expandedTasks[i].Type == "map" && expandedTasks[i].MapOver != "" {
+			// Auto-inject MapOver as dependency if not implicitly there
+			foundDep := false
+			for _, d := range newDeps {
+				if d == expandedTasks[i].MapOver {
+					foundDep = true
+				}
+			}
+			if !foundDep {
+				newDeps = append(newDeps, expandedTasks[i].MapOver)
+			}
+		}
+
 		expandedTasks[i].DependsOn = newDeps
 	}
 
@@ -108,6 +122,9 @@ func (d *DAGDef) Validate() error {
 	for _, t := range d.Tasks {
 		if t.ID == "" {
 			return fmt.Errorf("DAG %s contains a task with an empty ID", d.ID)
+		}
+		if t.Type == "map" && t.MapOver == "" {
+			return fmt.Errorf("task %s is type 'map' but missing 'map_over' property", t.ID)
 		}
 		if _, exists := taskIDs[t.ID]; exists {
 			return fmt.Errorf("DAG %s contains duplicate task ID: %s", d.ID, t.ID)

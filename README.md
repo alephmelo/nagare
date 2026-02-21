@@ -13,6 +13,7 @@ It is designed as a lightweight alternative to heavy data pipeline tools like Ap
 - **Task Timeouts**: Prevent runaway scripts by enforcing local task execution limits via `timeout_seconds: <int>` property in the YAML definition.
 - **Catchup / Backfill**: Control whether missed schedule intervals should be skipped or executed using the `catchup` boolean in your DAG definition.
 - **Process Management**: Gracefully terminate stuck or runaway DAG runs and individual task instances directly from the UI or via API endpoints.
+- **Dynamic Map Tasks**: Fan-out workflows dynamically using standard output JSON arrays (`type: map`), natively supporting the Unix philosophy.
 - **Worker Pools (Queues)**: Throttle and route specific tasks (e.g. ML inference) to dedicated worker pools via `pool: <queue_name>` and standard global allocations (`nagare.yaml`).
 - **Single Binary Web UI**: The entire Next.js + Mantine dashboard is compiled into static files and embedded directly into the Go binary (`//go:embed all:web/out`). Drop the executable onto a server, and you get a production-ready engine + dashboard on port `8080` instantly.
 
@@ -76,6 +77,25 @@ If a step takes too long or you need to cancel a DAG run:
 - Click the stop icon next to any `RUNNING` workflow to kill the entire run.
 - Click the Run ID to view individual step logs.
 - Click the stop icon next to any `RUNNING` step to kill that specific task.
+
+### 5. Dynamic Map Tasks
+Nagare allows you to dynamically fan-out a pipeline using the standard output of a previous task. If a task outputs a JSON array of strings, you can iterate over it using a `type: map` task.
+
+```yaml
+id: map_reduce
+description: "Dynamic map-reduce"
+schedule: "workflow_dispatch"
+tasks:
+  - id: get_files
+    type: command
+    command: "echo '[\"a.csv\", \"b.csv\"]'"
+
+  - id: process_file
+    type: map
+    map_over: get_files
+    command: "python process.py {{item}}"
+```
+When `get_files` completes, Nagare will dynamically spin up `process_file[0]` and `process_file[1]`, interpolating `{{item}}` in the command. The downstream tasks will naturally wait for all mapped task instances to finish.
 
 ---
 ## Development

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,8 +76,12 @@ func (p *Pool) Dispatch() error {
 		}
 
 		var taskDef *models.TaskDef
+		baseTaskID := ti.TaskID
+		if idx := strings.Index(baseTaskID, "["); idx != -1 {
+			baseTaskID = baseTaskID[:idx]
+		}
 		for i := range dag.Tasks {
-			if dag.Tasks[i].ID == ti.TaskID {
+			if dag.Tasks[i].ID == baseTaskID {
 				taskDef = &dag.Tasks[i]
 				break
 			}
@@ -150,8 +155,12 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 	}
 
 	var taskDef *models.TaskDef
+	baseTaskID := ti.TaskID
+	if idx := strings.Index(baseTaskID, "["); idx != -1 {
+		baseTaskID = baseTaskID[:idx]
+	}
 	for i := range dag.Tasks {
-		if dag.Tasks[i].ID == ti.TaskID {
+		if dag.Tasks[i].ID == baseTaskID {
 			taskDef = &dag.Tasks[i]
 			break
 		}
@@ -177,6 +186,10 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 	}
 
 	cmdStr := taskDef.Command
+	if ti.ItemValue != nil {
+		cmdStr = strings.ReplaceAll(cmdStr, "{{item}}", *ti.ItemValue)
+	}
+
 	if cmdStr == "" {
 		p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
 		return
