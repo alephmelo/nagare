@@ -6,6 +6,7 @@ import "./globals.css";
 import '@mantine/core/styles.css';
 import '@mantine/notifications/styles.css';
 import MainLayout from "../components/MainLayout";
+import { AuthProvider } from "../components/AuthProvider";
 import { Notifications } from '@mantine/notifications';
 
 const inter = Inter({ subsets: ["latin"] });
@@ -69,7 +70,9 @@ export default function RootLayout({
       <body>
         <MantineProvider theme={theme} defaultColorScheme="dark">
           <Notifications position="top-right" zIndex={1000} />
-          <MainLayout>{children}</MainLayout>
+          <AuthProvider>
+            <MainLayout>{children}</MainLayout>
+          </AuthProvider>
         </MantineProvider>
       </body>
     </html>

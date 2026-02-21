@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { apiFetch } from "../../lib/apiFetch";
 import {
   Title,
   Card,
@@ -104,8 +105,8 @@ function DagListContent() {
     try {
       setLoading(true);
       const [dagsRes, errorsRes] = await Promise.all([
-        fetch("/api/dags"),
-        fetch("/api/dags/errors"),
+        apiFetch("/api/dags"),
+        apiFetch("/api/dags/errors"),
       ]);
       if (dagsRes.ok) setDags(await dagsRes.json());
       if (errorsRes.ok) setDagErrors((await errorsRes.json()) || {});
@@ -125,7 +126,7 @@ function DagListContent() {
   const handleTrigger = async (dagID: string) => {
     setTriggering(prev => ({ ...prev, [dagID]: true }));
     try {
-      const res = await fetch(`/api/dags/${dagID}/runs`, { method: "POST" });
+      const res = await apiFetch(`/api/dags/${dagID}/runs`, { method: "POST" });
       if (res.ok) {
         notifications.show({ title: 'Pipeline Triggered', message: `Successfully enqueued a fresh manual run for ${dagID}.`, color: 'green' });
       }
@@ -250,7 +251,7 @@ function DagDetailsContent() {
     const initializeView = async () => {
       setLoading(true);
       try {
-        const dagsRes = await fetch("/api/dags");
+        const dagsRes = await apiFetch("/api/dags");
         const allDags: Dag[] = await dagsRes.json();
         
         const targetDag = allDags.find(d => d.ID === id);
@@ -330,7 +331,7 @@ function DagDetailsContent() {
     if (!id) return;
     try {
       const url = `/api/runs?page=${page}&limit=${limit}&dag_id=${id}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`;
-      const runsRes = await fetch(url);
+      const runsRes = await apiFetch(url);
       if (runsRes.ok) {
         const runsData = await runsRes.json();
         setRuns(runsData.data || []);
@@ -357,7 +358,7 @@ function DagDetailsContent() {
     if (!id) return;
     setTriggering(true);
     try {
-      const res = await fetch(`/api/dags/${id}/runs`, { method: "POST" });
+      const res = await apiFetch(`/api/dags/${id}/runs`, { method: "POST" });
       if (res.ok) {
         setPage(1); // Reset to first page so they see it
         notifications.show({
@@ -387,7 +388,7 @@ function DagDetailsContent() {
   const handleKillRun = async (e: React.MouseEvent, runID: string) => {
     e.stopPropagation();
     try {
-      const res = await fetch(`/api/runs/${runID}/kill`, {
+      const res = await apiFetch(`/api/runs/${runID}/kill`, {
         method: 'POST',
       });
       if (res.ok) {

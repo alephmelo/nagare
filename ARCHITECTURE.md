@@ -78,6 +78,30 @@ The binary now accepts flags parsed via stdlib `flag`:
 - **No flags** (default): `runMaster()` — identical to the previous standalone mode, plus the coordinator is always initialized (zero overhead when no remote workers connect).
 - **`--worker --join <addr>`**: `runWorker()` — registers, runs the poll + heartbeat loop, exits cleanly on SIGINT/SIGTERM.
 
-## Developing
+## Authentication
+
+Nagare supports a single shared API key that protects all `/api/*` routes and the web dashboard.
+
+### Configuration (highest priority first)
+1. `--api-key <key>` CLI flag
+2. `NAGARE_API_KEY` environment variable
+3. `api_key` field in `nagare.yaml`
+
+When no key is configured the server starts with a warning and all routes remain open — matching the existing behaviour for the cluster `--token` flag.
+
+### Backend — `internal/api/server.go`
+`apiKeyMiddleware` is applied to every `/api/*` route **except** `/api/webhooks/` (which retains its existing per-DAG HMAC-SHA256 mechanism). It accepts the key via two paths:
+
+- **`Authorization: Bearer <key>` header** — used by all normal fetch requests.
+- **`?token=<key>` query parameter** — fallback for the browser `EventSource` API, which cannot send custom headers on SSE connections.
+
+`subtle.ConstantTimeCompare` is used throughout to prevent timing-based side-channel attacks.
+
+### Frontend — `web/src/`
+- **`lib/apiFetch.ts`**: drop-in `fetch` wrapper that reads the key from `localStorage` and injects the `Authorization` header. Fires a global callback on any `401` response.
+- **`components/AuthProvider.tsx`**: React context provider that probes `GET /api/stats` on mount. If the server returns `401` it renders a Mantine `PasswordInput` lock screen instead of the app. On successful entry the key is persisted to `localStorage` and the probe is re-run. Any subsequent `401` (e.g. key rotated on the server) clears the stored key and returns the user to the lock screen.
+- **`components/MainLayout.tsx`**: shows a **Disconnect** nav item (with `IconLogout`) in the sidebar whenever a key is stored, allowing the user to clear it manually.
+
+
 We adhere strictly to TDD (`go test ./...` should pass cleanly at all times).
 When testing database logic, we utilize SQLite's shared in-memory mode (`file::memory:?cache=shared`) to ensure fast, isolated test runs that don't pollute the disk.

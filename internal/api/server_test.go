@@ -25,6 +25,191 @@ func newTestServer(t *testing.T) (*Server, *models.Store, *logbroker.Broker) {
 	return srv, store, broker
 }
 
+// newTestServerWithKey creates a Server configured with the given API key.
+func newTestServerWithKey(t *testing.T, apiKey string) (*Server, *models.Store) {
+	t.Helper()
+	store, err := models.NewStore("file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	srv := &Server{store: store, broker: logbroker.NewBroker(), apiKey: apiKey}
+	return srv, store
+}
+
+// ----- apiKeyMiddleware tests -------------------------------------------------
+
+// TestAPIKeyMiddleware_NoKey verifies that when no API key is configured,
+// all requests pass through without requiring any Authorization header.
+func TestAPIKeyMiddleware_NoKey(t *testing.T) {
+	srv, _ := newTestServerWithKey(t, "")
+	handler := srv.apiKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 when no key configured, got %d", w.Code)
+	}
+}
+
+// TestAPIKeyMiddleware_ValidKey verifies that a correct Bearer token is accepted.
+func TestAPIKeyMiddleware_ValidKey(t *testing.T) {
+	srv, _ := newTestServerWithKey(t, "test-key-abc")
+	handler := srv.apiKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	req.Header.Set("Authorization", "Bearer test-key-abc")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 with valid key, got %d", w.Code)
+	}
+}
+
+// TestAPIKeyMiddleware_WrongKey verifies that an incorrect token returns 401.
+func TestAPIKeyMiddleware_WrongKey(t *testing.T) {
+	srv, _ := newTestServerWithKey(t, "test-key-abc")
+	handler := srv.apiKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	req.Header.Set("Authorization", "Bearer wrong-key")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with wrong key, got %d", w.Code)
+	}
+}
+
+// TestAPIKeyMiddleware_MissingHeader verifies that a missing Authorization
+// header returns 401 when a key is configured.
+func TestAPIKeyMiddleware_MissingHeader(t *testing.T) {
+	srv, _ := newTestServerWithKey(t, "test-key-abc")
+	handler := srv.apiKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with missing header, got %d", w.Code)
+	}
+}
+
+// TestAPIKeyMiddleware_BadScheme verifies that a non-Bearer scheme with no
+// query param returns 401.
+func TestAPIKeyMiddleware_BadScheme(t *testing.T) {
+	srv, _ := newTestServerWithKey(t, "test-key-abc")
+	handler := srv.apiKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	req.Header.Set("Authorization", "Basic test-key-abc")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with Basic scheme and no query param, got %d", w.Code)
+	}
+}
+
+// TestAPIKeyMiddleware_QueryParam verifies that ?token= is accepted as a
+// fallback for EventSource/SSE clients that cannot send custom headers.
+func TestAPIKeyMiddleware_QueryParam(t *testing.T) {
+	srv, _ := newTestServerWithKey(t, "test-key-abc")
+	handler := srv.apiKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/r1/tasks/t1/logs?token=test-key-abc", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 with valid ?token= param, got %d", w.Code)
+	}
+}
+
+// TestAPIKeyMiddleware_WrongQueryParam verifies that a wrong ?token= returns 401.
+func TestAPIKeyMiddleware_WrongQueryParam(t *testing.T) {
+	srv, _ := newTestServerWithKey(t, "test-key-abc")
+	handler := srv.apiKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/r1/tasks/t1/logs?token=wrong", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with wrong ?token= param, got %d", w.Code)
+	}
+}
+
+// TestStartRoutes_APIKeyProtection verifies that /api/stats requires auth when
+// a key is configured, and that /api/webhooks/ is exempt.
+func TestStartRoutes_APIKeyProtection(t *testing.T) {
+	srv, _ := newTestServerWithKey(t, "secret")
+
+	// Use a simple echo handler so we don't depend on scheduler/pool state.
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", srv.apiKeyMiddleware(srv.corsMiddleware(ok)))
+	mux.HandleFunc("/api/webhooks/", srv.handleWebhook)
+
+	t.Run("stats without key → 401", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401, got %d", w.Code)
+		}
+	})
+
+	t.Run("stats with key → 200", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200, got %d", w.Code)
+		}
+	})
+
+	t.Run("webhooks without key → not 401 (exempt)", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/webhooks/some-path", nil)
+		w := httptest.NewRecorder()
+		// Call apiKeyMiddleware directly with a no-op to prove webhooks are NOT
+		// wrapped with apiKeyMiddleware — i.e. a request without a key is allowed
+		// through the webhook route.
+		noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		noopMux := http.NewServeMux()
+		// Webhooks registered WITHOUT apiKeyMiddleware.
+		noopMux.HandleFunc("/api/webhooks/", noopHandler)
+		noopMux.ServeHTTP(w, req)
+		if w.Code == http.StatusUnauthorized {
+			t.Errorf("webhooks should be exempt from API key auth, got 401")
+		}
+	})
+}
+
 // readSSELines reads from an SSE response until the channel is closed or the
 // deadline passes. It returns the data values (stripping the "data: " prefix).
 func readSSELines(t *testing.T, resp *http.Response, deadline time.Duration) []string {

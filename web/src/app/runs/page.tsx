@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, Suspense, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import { apiFetch } from "../../lib/apiFetch";
 import {
   Title,
   Card,
@@ -105,7 +106,9 @@ function useSSELogs(taskInstanceID: string, runID: string, active: boolean): str
 
     function connect() {
       if (esRef.current) return; // already connected
-      const url = `/api/runs/${runID}/tasks/${taskInstanceID}/logs`;
+      const storedKey = localStorage.getItem("nagare_api_key");
+      const params = storedKey ? `?token=${encodeURIComponent(storedKey)}` : "";
+      const url = `/api/runs/${runID}/tasks/${taskInstanceID}/logs${params}`;
       const es = new EventSource(url);
       esRef.current = es;
 
@@ -151,7 +154,7 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
     if (attempts.length > 0 || task.Attempt <= 1) return;
     setLoadingAttempts(true);
     try {
-      const res = await fetch(`/api/runs/${runID}/tasks/${task.TaskID}/attempts`);
+      const res = await apiFetch(`/api/runs/${runID}/tasks/${task.TaskID}/attempts`);
       if (res.ok) setAttempts(await res.json());
     } catch { /* noop */ }
     finally { setLoadingAttempts(false); }
@@ -353,8 +356,8 @@ function RunDetailsContent() {
     if (!id) return;
     try {
       const [tasksRes, runsRes] = await Promise.all([
-        fetch(`/api/runs/${id}/tasks`),
-        fetch(`/api/runs?page=1&limit=100`),
+        apiFetch(`/api/runs/${id}/tasks`),
+        apiFetch(`/api/runs?page=1&limit=100`),
       ]);
       if (tasksRes.ok) setTasks(await tasksRes.json());
       if (runsRes.ok) {
@@ -377,7 +380,7 @@ function RunDetailsContent() {
 
   const handleRetry = async (taskID: string) => {
     try {
-      const res = await fetch(`/api/runs/${id}/tasks/${taskID}/retry`, { method: "POST" });
+      const res = await apiFetch(`/api/runs/${id}/tasks/${taskID}/retry`, { method: "POST" });
       if (res.ok) {
         fetchTasks();
         notifications.show({ title: "Task Requeued", message: `Sent ${taskID} back to pending.`, color: "green" });
@@ -391,7 +394,7 @@ function RunDetailsContent() {
 
   const handleKillTask = async (taskID: string) => {
     try {
-      const res = await fetch(`/api/runs/${id}/tasks/${taskID}/kill`, { method: "POST" });
+      const res = await apiFetch(`/api/runs/${id}/tasks/${taskID}/kill`, { method: "POST" });
       if (res.ok) {
         fetchTasks();
         notifications.show({ title: "Task Terminated", message: `Termination signal sent to ${taskID}.`, color: "orange" });
@@ -401,7 +404,7 @@ function RunDetailsContent() {
 
   const handleKillRun = async () => {
     try {
-      const res = await fetch(`/api/runs/${id}/kill`, { method: "POST" });
+      const res = await apiFetch(`/api/runs/${id}/kill`, { method: "POST" });
       if (res.ok) {
         fetchTasks();
         notifications.show({ title: "Run Terminated", message: `Termination signal sent to run ${id}.`, color: "orange" });
@@ -570,8 +573,8 @@ function RunListContent() {
     try {
       setLoading(true);
       const [runsRes, dagsRes] = await Promise.all([
-        fetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`),
-        fetch("/api/dags"),
+        apiFetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`),
+        apiFetch("/api/dags"),
       ]);
       if (runsRes.ok) {
         const data = await runsRes.json();
@@ -595,7 +598,7 @@ function RunListContent() {
   const handleKillRun = async (e: React.MouseEvent, runID: string) => {
     e.stopPropagation();
     try {
-      const res = await fetch(`/api/runs/${runID}/kill`, { method: "POST" });
+      const res = await apiFetch(`/api/runs/${runID}/kill`, { method: "POST" });
       if (res.ok) {
         notifications.show({ title: "Run Terminated", message: `Termination signal sent to run ${runID}.`, color: "orange" });
         fetchData();

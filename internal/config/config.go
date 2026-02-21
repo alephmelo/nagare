@@ -17,6 +17,9 @@ type CORSConfig struct {
 type Config struct {
 	WorkerPools map[string]int `yaml:"worker_pools"`
 	CORS        CORSConfig     `yaml:"cors"`
+	// APIKey is the shared secret that protects all /api/* routes (except
+	// /api/webhooks/).  Empty means no authentication is enforced.
+	APIKey string `yaml:"api_key"`
 }
 
 func LoadConfig(path string) (*Config, error) {

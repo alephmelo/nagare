@@ -12,3 +12,9 @@ cors:
   #   - "https://dashboard.example.com"
   allowed_origins:
     - "http://localhost:3000"
+
+# API key that protects all /api/* routes and the dashboard.
+# When unset, the server starts with a warning and all routes are open.
+# Priority order: --api-key flag > NAGARE_API_KEY env var > this field.
+#
+# api_key: "your-secret-key-here"

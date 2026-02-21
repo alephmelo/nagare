@@ -170,6 +170,32 @@ tasks:
 ```
 
 ---
+## Authentication
+
+By default Nagare starts with all API routes open and logs a warning. To protect the dashboard and API with a shared API key, configure it via any of the following (highest priority first):
+
+**1. CLI flag**
+```
+./nagare --api-key "your-secret-key"
+```
+
+**2. Environment variable**
+```
+NAGARE_API_KEY="your-secret-key" ./nagare
+```
+
+**3. `nagare.yaml`**
+```yaml
+api_key: "your-secret-key"
+```
+
+Once a key is set:
+- All `/api/*` routes require `Authorization: Bearer <key>`.
+- The web dashboard prompts for the key on first visit and stores it in `localStorage`. A **Disconnect** button in the sidebar clears it.
+- `/api/webhooks/` is **exempt** — it uses per-DAG HMAC-SHA256 signature verification instead (see [Zero-Config Webhooks](#6-zero-config-webhooks)).
+- Cluster worker routes (`/api/workers/*`) use the separate `--token` flag (unchanged).
+
+---
 ## Development
 
 If you want to contribute to the Nagare codebase and run the Next.js React frontend and Go API backend simultaneously with hot-reloading:

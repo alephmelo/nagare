@@ -34,6 +34,7 @@ func main() {
 	port := flag.String("port", ":8080", "Listen address for the master API server")
 	dbPath := flag.String("db", "nagare.db", "SQLite database path")
 	dagsDir := flag.String("dags", "dags", "Directory containing DAG definitions")
+	apiKey := flag.String("api-key", "", "API key to protect all /api/* routes (overrides nagare.yaml and NAGARE_API_KEY env var)")
 	flag.Parse()
 
 	if *workerMode {
@@ -41,12 +42,12 @@ func main() {
 		return
 	}
 
-	runMaster(*port, *dbPath, *dagsDir, *token)
+	runMaster(*port, *dbPath, *dagsDir, *token, *apiKey)
 }
 
 // runMaster starts the full Nagare master node: scheduler + local worker pool +
 // optional cluster coordinator for remote workers + HTTP API.
-func runMaster(addr, dbPath, dagsDir, token string) {
+func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 	log.Println("Booting up Nagare: Lean Airflow in Go")
 
 	// Ensure dags directory exists.
@@ -60,6 +61,15 @@ func runMaster(addr, dbPath, dagsDir, token string) {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 	log.Printf("Loaded configuration with %d worker pools", len(cfg.WorkerPools))
+
+	// Resolve API key: flag > NAGARE_API_KEY env var > nagare.yaml api_key.
+	resolvedAPIKey := cfg.APIKey
+	if envKey := os.Getenv("NAGARE_API_KEY"); envKey != "" {
+		resolvedAPIKey = envKey
+	}
+	if apiKeyFlag != "" {
+		resolvedAPIKey = apiKeyFlag
+	}
 
 	// 1. Initialize SQLite database.
 	store, err := models.NewStore(fmt.Sprintf("file:%s?cache=shared", dbPath))
@@ -89,7 +99,7 @@ func runMaster(addr, dbPath, dagsDir, token string) {
 	coord.SetBroker(broker)
 
 	// 5. Initialize API server and attach coordinator.
-	apiServer := api.NewServer(store, sched, pool, broker, cfg.CORS.AllowedOrigins)
+	apiServer := api.NewServer(store, sched, pool, broker, cfg.CORS.AllowedOrigins, resolvedAPIKey)
 	apiServer.WithCoordinator(coord)
 
 	// Context for graceful shutdown.

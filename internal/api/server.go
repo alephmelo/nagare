@@ -31,16 +31,20 @@ type Server struct {
 	broker         *logbroker.Broker
 	coordinator    *cluster.Coordinator // optional; nil in standalone mode
 	allowedOrigins []string
+	// apiKey is the shared secret that protects all /api/* routes except
+	// /api/webhooks/.  Empty string disables API key enforcement.
+	apiKey string
 }
 
 // NewServer creates a new API Server instance
-func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Pool, broker *logbroker.Broker, allowedOrigins []string) *Server {
+func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Pool, broker *logbroker.Broker, allowedOrigins []string, apiKey string) *Server {
 	return &Server{
 		store:          store,
 		scheduler:      sched,
 		pool:           pool,
 		broker:         broker,
 		allowedOrigins: allowedOrigins,
+		apiKey:         apiKey,
 	}
 }
 
@@ -93,6 +97,39 @@ func (s *Server) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		next.ServeHTTP(w, r)
+	}
+}
+
+// apiKeyMiddleware enforces Bearer token authentication on API routes.
+// When apiKey is empty the middleware is a no-op (open access).
+// Accepts the key via:
+//   - Authorization: Bearer <key> header (preferred)
+//   - ?token=<key> query parameter (fallback for EventSource/SSE clients that
+//     cannot set custom headers)
+//
+// Uses constant-time comparison to prevent timing-based attacks.
+func (s *Server) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.apiKey == "" {
+			next(w, r)
+			return
+		}
+
+		// Prefer Authorization header.
+		token := ""
+		auth := r.Header.Get("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			token = strings.TrimPrefix(auth, "Bearer ")
+		} else {
+			// Fallback: ?token= query param (used by EventSource for SSE streams).
+			token = r.URL.Query().Get("token")
+		}
+
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.apiKey)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
 	}
 }
 
@@ -589,24 +626,34 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	if len(s.allowedOrigins) == 0 {
 		log.Println("WARNING: cors.allowed_origins is not configured — CORS is open to all origins (*). Set allowed_origins in nagare.yaml for production use.")
 	}
+	if s.apiKey == "" {
+		log.Println("WARNING: api_key is not configured — all API routes are unauthenticated. Set api_key in nagare.yaml or use --api-key for production use.")
+	}
+
+	// auth is a convenience alias that composes apiKeyMiddleware + corsMiddleware.
+	// Applied to every /api/* route except /api/webhooks/ (which uses HMAC).
+	auth := func(h http.HandlerFunc) http.HandlerFunc {
+		return s.apiKeyMiddleware(s.corsMiddleware(h))
+	}
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/stats", s.corsMiddleware(s.handleGetStats))
-	mux.HandleFunc("/api/dags", s.corsMiddleware(s.handleGetDAGs))
-	mux.HandleFunc("/api/dags/errors", s.corsMiddleware(s.handleGetDAGErrors))
-	mux.HandleFunc("/api/dags/", s.corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/stats", auth(s.handleGetStats))
+	mux.HandleFunc("/api/dags", auth(s.handleGetDAGs))
+	mux.HandleFunc("/api/dags/errors", auth(s.handleGetDAGErrors))
+	mux.HandleFunc("/api/dags/", auth(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/runs") && r.Method == http.MethodPost {
 			s.handleTriggerDAG(w, r)
 			return
 		}
 		http.NotFound(w, r)
 	}))
+	// Webhooks are exempt from API key auth — they use per-DAG HMAC-SHA256.
 	mux.HandleFunc("/api/webhooks/", s.handleWebhook)
 
-	mux.HandleFunc("/api/runs", s.corsMiddleware(s.handleGetRuns))
+	mux.HandleFunc("/api/runs", auth(s.handleGetRuns))
 	// Generic handler for anything starting with /api/runs/ to catch /api/runs/{id}/tasks and retries
-	mux.HandleFunc("/api/runs/", s.corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/runs/", auth(func(w http.ResponseWriter, r *http.Request) {
 		if (strings.HasSuffix(r.URL.Path, "/logs") || strings.HasSuffix(r.URL.Path, "/logs/")) && r.Method == http.MethodGet {
 			s.handleTaskLogs(w, r)
 			return

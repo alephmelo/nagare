@@ -5,6 +5,7 @@ import { Title, Card, Table, Badge, Text, Group, Button, Skeleton, Select, Pagin
 import { IconRefresh, IconX, IconActivity, IconAlertCircle, IconRobot, IconUser, IconPlayerPlay, IconTimelineEvent, IconFilter, IconCheck, IconPlayerStop } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { notifications } from '@mantine/notifications';
+import { apiFetch } from "../lib/apiFetch";
 
 interface Run {
   ID: string;
@@ -50,10 +51,10 @@ export default function Dashboard() {
     try {
       setLoading(true);
       const [runsRes, dagsRes, errorsRes, statsRes] = await Promise.all([
-        fetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`),
-        fetch("/api/dags"),
-        fetch("/api/dags/errors"),
-        fetch("/api/stats")
+        apiFetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`),
+        apiFetch("/api/dags"),
+        apiFetch("/api/dags/errors"),
+        apiFetch("/api/stats")
       ]);
       
       if (runsRes.ok) {
@@ -81,7 +82,7 @@ export default function Dashboard() {
   const handleTrigger = async (dagID: string) => {
     setTriggering(prev => ({ ...prev, [dagID]: true }));
     try {
-      const res = await fetch(`/api/dags/${dagID}/runs`, { method: "POST" });
+      const res = await apiFetch(`/api/dags/${dagID}/runs`, { method: "POST" });
       if (res.ok) {
         notifications.show({ title: 'Pipeline Triggered', message: `Successfully enqueued a fresh manual run for ${dagID}.`, color: 'green' });
         fetchData();
@@ -96,7 +97,7 @@ export default function Dashboard() {
   const handleKillRun = async (e: React.MouseEvent, runID: string) => {
     e.stopPropagation();
     try {
-      const res = await fetch(`/api/runs/${runID}/kill`, { method: 'POST' });
+      const res = await apiFetch(`/api/runs/${runID}/kill`, { method: 'POST' });
       if (res.ok) {
         notifications.show({ title: 'Run Terminated', message: `Termination signal sent to run ${runID}.`, color: 'orange' });
         fetchData();
