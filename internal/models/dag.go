@@ -26,10 +26,12 @@ type TaskDef struct {
 
 // TriggerDef defines an ad-hoc event trigger for the DAG
 type TriggerDef struct {
-	Type           string            `yaml:"type"`                      // e.g. "webhook"
-	Path           string            `yaml:"path,omitempty"`            // e.g. "/api/webhooks/github"
-	Method         string            `yaml:"method,omitempty"`          // e.g. "POST"
-	ExtractPayload map[string]string `yaml:"extract_payload,omitempty"` // jq queries
+	Type            string            `yaml:"type"`                       // e.g. "webhook"
+	Path            string            `yaml:"path,omitempty"`             // e.g. "/api/webhooks/github"
+	Method          string            `yaml:"method,omitempty"`           // e.g. "POST"
+	Secret          string            `yaml:"secret,omitempty"`           // HMAC-SHA256 secret; when set, X-Hub-Signature-256 is verified
+	SignatureHeader string            `yaml:"signature_header,omitempty"` // header carrying the signature (default: X-Hub-Signature-256)
+	ExtractPayload  map[string]string `yaml:"extract_payload,omitempty"`  // jq queries mapped to env-var names
 }
 
 // DAGDef defines the workflow graph of Tasks

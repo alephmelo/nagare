@@ -1,8 +1,13 @@
 package api
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -403,11 +408,47 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the raw body once so we can both verify the HMAC signature and
+	// decode the JSON payload without consuming the reader twice.
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+
+	// HMAC-SHA256 signature verification.
+	// Only enforced when the DAG's trigger defines a secret.
+	if matchedDAG.Trigger.Secret != "" {
+		sigHeader := matchedDAG.Trigger.SignatureHeader
+		if sigHeader == "" {
+			sigHeader = "X-Hub-Signature-256"
+		}
+
+		gotSig := r.Header.Get(sigHeader)
+		if gotSig == "" {
+			http.Error(w, "Missing signature header", http.StatusForbidden)
+			return
+		}
+
+		// GitHub and compatible systems send "sha256=<hex digest>".
+		// Accept both the bare hex and the "sha256=" prefixed form.
+		hexSig := strings.TrimPrefix(gotSig, "sha256=")
+
+		mac := hmac.New(sha256.New, []byte(matchedDAG.Trigger.Secret))
+		mac.Write(rawBody)
+		expectedSig := hex.EncodeToString(mac.Sum(nil))
+
+		// Use constant-time comparison to prevent timing attacks.
+		if subtle.ConstantTimeCompare([]byte(hexSig), []byte(expectedSig)) != 1 {
+			http.Error(w, "Invalid signature", http.StatusForbidden)
+			return
+		}
+	}
+
 	// Parse JSON payload
 	var payload interface{}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		// Log but continue if empty body (some webhooks might just be pings)
-		if err.Error() != "EOF" {
+	if len(rawBody) > 0 {
+		if err := json.Unmarshal(rawBody, &payload); err != nil {
 			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 			return
 		}

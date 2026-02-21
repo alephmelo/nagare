@@ -5,6 +5,12 @@ trigger:
   type: webhook
   path: "/api/webhooks/github"
   method: "POST"
+  # secret: "changeme"          # Uncomment and set to enable HMAC-SHA256 verification.
+  #                              # The sender must include a matching X-Hub-Signature-256
+  #                              # header (e.g. "sha256=<hex>").  Compatible with GitHub,
+  #                              # GitLab, and any system that supports HMAC webhooks.
+  #
+  # signature_header: "X-Hub-Signature-256"  # Optional override; defaults to X-Hub-Signature-256.
   extract_payload:
     COMMIT_AUTHOR: ".pusher.name"
     COMMIT_HASH: ".head_commit.id"
