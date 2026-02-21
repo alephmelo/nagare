@@ -68,6 +68,8 @@ function StatusIcon({ status }: { status: string }) {
       return <ThemeIcon color="blue" variant="light" size="md" radius="xl"><Loader size={12} color="blue" /></ThemeIcon>;
     case "queued":
       return <ThemeIcon color="yellow" variant="light" size="md" radius="xl"><IconClock size={14} /></ThemeIcon>;
+    case "up_for_retry":
+      return <ThemeIcon color="orange" variant="light" size="md" radius="xl"><IconClock size={14} /></ThemeIcon>;
     case "cancelled":
       return <ThemeIcon color="gray" variant="light" size="md" radius="xl"><IconPlayerStop size={14} /></ThemeIcon>;
     default:
@@ -76,7 +78,7 @@ function StatusIcon({ status }: { status: string }) {
 }
 
 function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: string; onRetry: (taskID: string) => void; onKill: (taskID: string) => void }) {
-  const [expanded, setExpanded] = useState(task.Status === "failed");
+  const [expanded, setExpanded] = useState(task.Status === "failed" || task.Status === "up_for_retry");
   const [attempts, setAttempts] = useState<RunTask[]>([]);
   const [loadingAttempts, setLoadingAttempts] = useState(false);
   const hasOutput = task.Output && task.Output.trim().length > 0;
@@ -106,13 +108,14 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
       case "failed": return "red";
       case "running": return "blue";
       case "queued": return "yellow";
+      case "up_for_retry": return "orange";
       case "cancelled": return "gray";
       default: return "gray";
     }
   };
 
   return (
-    <Card padding="0" mb="xs" style={{ border: task.Status === "failed" ? "1px solid var(--mantine-color-red-3)" : "1px solid var(--mantine-color-default-border)" }}>
+    <Card padding="0" mb="xs" style={{ border: task.Status === "failed" ? "1px solid var(--mantine-color-red-3)" : task.Status === "up_for_retry" ? "1px solid var(--mantine-color-orange-3)" : "1px solid var(--mantine-color-default-border)" }}>
       <Group
         px="md"
         py="sm"
@@ -362,6 +365,7 @@ function RunDetailsContent() {
   const successCount = tasks.filter((t) => t.Status === "success").length;
   const failedCount = tasks.filter((t) => t.Status === "failed").length;
   const runningCount = tasks.filter((t) => t.Status === "running").length;
+  const retryCount = tasks.filter((t) => t.Status === "up_for_retry").length;
 
   if (!id) {
     return (
@@ -439,6 +443,7 @@ function RunDetailsContent() {
                 {successCount > 0 && <Badge size="xs" color="green" variant="light">{successCount} ok</Badge>}
                 {failedCount > 0 && <Badge size="xs" color="red" variant="light">{failedCount} failed</Badge>}
                 {runningCount > 0 && <Badge size="xs" color="blue" variant="light">{runningCount} running</Badge>}
+                {retryCount > 0 && <Badge size="xs" color="orange" variant="light">{retryCount} retry</Badge>}
                 {tasks.length === 0 && <Text size="xs" c="dimmed">—</Text>}
               </Group>
             </div>

@@ -164,7 +164,12 @@ func (p *Pool) executeTask(ti models.TaskInstance, workerID int) {
 			return
 		}
 
-		p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, string(output))
+		if ti.Attempt <= taskDef.Retries {
+			log.Printf("Worker %d: Task %s FAILED but has retries remaining (%d/%d). Output: %s", workerID, ti.ID, ti.Attempt, taskDef.Retries, string(output))
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskUpForRetry, string(output))
+		} else {
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, string(output))
+		}
 	} else {
 		log.Printf("Worker %d: Task %s SUCCESS\nOutput: %s", workerID, ti.ID, string(output))
 		p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, string(output))

@@ -29,12 +29,13 @@ type SystemStats struct {
 }
 
 const (
-	TaskPending   TaskStatus = "pending"
-	TaskQueued    TaskStatus = "queued"
-	TaskRunning   TaskStatus = "running"
-	TaskSuccess   TaskStatus = "success"
-	TaskFailed    TaskStatus = "failed"
-	TaskCancelled TaskStatus = "cancelled"
+	TaskPending    TaskStatus = "pending"
+	TaskQueued     TaskStatus = "queued"
+	TaskRunning    TaskStatus = "running"
+	TaskSuccess    TaskStatus = "success"
+	TaskFailed     TaskStatus = "failed"
+	TaskUpForRetry TaskStatus = "up_for_retry"
+	TaskCancelled  TaskStatus = "cancelled"
 )
 
 // DagRun represents a single execution of a DAG

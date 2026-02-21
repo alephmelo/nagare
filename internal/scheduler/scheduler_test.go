@@ -281,12 +281,12 @@ func TestSchedulerAutoRetry(t *testing.T) {
 	}
 	store.CreateDagRun(run)
 
-	// Attempt 1: Failed just now
+	// Attempt 1: Failed just now (but marked as up_for_retry by worker)
 	ti := &models.TaskInstance{
 		ID:        runID + "_t1_1",
 		RunID:     runID,
 		TaskID:    "t1",
-		Status:    models.TaskFailed,
+		Status:    models.TaskUpForRetry,
 		Attempt:   1,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -319,15 +319,12 @@ func TestSchedulerAutoRetry(t *testing.T) {
 		t.Fatalf("Expected task to be queued for retry after delay, got %v", status)
 	}
 
-	// Simulate Attempt 2 failing
-	// At this point evaluateRunCompletions has queued the new attempt via RetryTask.
-	// We get the new task instance and mark it as failed.
+	// Simulate Attempt 2 failing (worker marks it as up_for_retry)
 	attempts, _ := store.GetTaskAttempts(runID, "t1")
 	if len(attempts) != 2 {
 		t.Fatalf("Expected 2 attempts, got %d", len(attempts))
 	}
-	// It's currently queued. We mark it as failed and update time.
-	store.UpdateTaskInstanceStatus(attempts[1].ID, models.TaskFailed)
+	store.UpdateTaskInstanceStatus(attempts[1].ID, models.TaskUpForRetry)
 
 	// Evaluate immediately should still not queue 3rd attempt
 	sched.evaluateRunCompletions()
@@ -346,7 +343,7 @@ func TestSchedulerAutoRetry(t *testing.T) {
 		t.Fatalf("Expected 3 attempts after 2nd delay, got %d", len(attempts))
 	}
 
-	// Simulate Attempt 3 failing
+	// Simulate Attempt 3 failing (exhausted retries, worker marks as failed)
 	store.UpdateTaskInstanceStatus(attempts[2].ID, models.TaskFailed)
 	time.Sleep(1 * time.Second) // wait for it just in case, though retries = 2
 

@@ -196,7 +196,8 @@ func (s *Scheduler) evaluateRunCompletions() error {
 		anyFailed := false
 
 		for _, ti := range tasks {
-			if ti.Status == models.TaskFailed {
+			if ti.Status == models.TaskUpForRetry {
+				allSuccess = false
 				var taskDef *models.TaskDef
 				for i := range dag.Tasks {
 					if dag.Tasks[i].ID == ti.TaskID {
@@ -205,17 +206,16 @@ func (s *Scheduler) evaluateRunCompletions() error {
 					}
 				}
 
-				if taskDef != nil && ti.Attempt <= taskDef.Retries {
+				if taskDef != nil {
 					delay := time.Duration(taskDef.RetryDelaySeconds) * time.Second
 					if time.Now().After(ti.UpdatedAt.Add(delay)) || time.Now().Equal(ti.UpdatedAt.Add(delay)) {
-						log.Printf("Task %s failed but has retries remaining (%d/%d). Queuing retry.", ti.TaskID, ti.Attempt, taskDef.Retries)
+						log.Printf("Task %s is up for retry. Delay passed. Queuing retry (%d/%d).", ti.TaskID, ti.Attempt, taskDef.Retries)
 						_ = s.RetryTask(r.ID, ti.TaskID)
 					}
-					allSuccess = false
-				} else {
-					anyFailed = true
-					break
 				}
+			} else if ti.Status == models.TaskFailed {
+				anyFailed = true
+				break
 			} else if ti.Status != models.TaskSuccess {
 				allSuccess = false
 			}
