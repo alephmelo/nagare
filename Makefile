@@ -1,4 +1,4 @@
-.PHONY: dev dev-backend dev-frontend build run clean tools
+.PHONY: dev dev-backend dev-frontend build run test clean tools
 
 # Default target
 all: build
@@ -23,6 +23,10 @@ build:
 # Run production binary
 run: build
 	./nagare
+
+# Run Go tests
+test:
+	go test ./...
 
 # Clean build artifacts
 clean:

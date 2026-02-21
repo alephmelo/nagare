@@ -14,14 +14,13 @@ import {
   Skeleton,
   Pagination,
   Alert,
-  Select,
   Menu,
   UnstyledButton,
   ActionIcon,
   Tooltip,
-  Code
+  List,
 } from "@mantine/core";
-import { IconArrowLeft, IconAlertCircle, IconPlayerPlay, IconRobot, IconUser, IconFilter, IconCheck, IconPlayerStop, IconActivity } from "@tabler/icons-react";
+import { IconArrowLeft, IconAlertCircle, IconPlayerPlay, IconRobot, IconUser, IconFilter, IconCheck, IconPlayerStop, IconActivity, IconRefresh } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { ReactFlow, Controls, Background, useNodesState, useEdgesState, Position, MarkerType, Node, Edge } from "@xyflow/react";
 import '@xyflow/react/dist/style.css';
@@ -91,6 +90,138 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => 
   return { nodes, edges };
 };
 
+// ---------------------------------------------------------------------------
+// DAG List View (no ?id param)
+// ---------------------------------------------------------------------------
+function DagListContent() {
+  const [dags, setDags] = useState<Dag[]>([]);
+  const [dagErrors, setDagErrors] = useState<Record<string, string>>({});
+  const [triggering, setTriggering] = useState<Record<string, boolean>>({});
+  const [loading, setLoading] = useState(true);
+  const router = useRouter();
+
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      const [dagsRes, errorsRes] = await Promise.all([
+        fetch("/api/dags"),
+        fetch("/api/dags/errors"),
+      ]);
+      if (dagsRes.ok) setDags(await dagsRes.json());
+      if (errorsRes.ok) setDagErrors((await errorsRes.json()) || {});
+    } catch (err) {
+      console.error("Failed to fetch DAGs", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleTrigger = async (dagID: string) => {
+    setTriggering(prev => ({ ...prev, [dagID]: true }));
+    try {
+      const res = await fetch(`/api/dags/${dagID}/runs`, { method: "POST" });
+      if (res.ok) {
+        notifications.show({ title: 'Pipeline Triggered', message: `Successfully enqueued a fresh manual run for ${dagID}.`, color: 'green' });
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setTriggering(prev => ({ ...prev, [dagID]: false }));
+    }
+  };
+
+  return (
+    <>
+      <Group justify="space-between" mb="xl">
+        <Title order={2}>DAGs</Title>
+        <Button leftSection={<IconRefresh size={16} />} variant="light" onClick={fetchData}>
+          Refresh
+        </Button>
+      </Group>
+
+      {Object.keys(dagErrors).length > 0 && (
+        <Alert variant="light" color="red" title="DAG Validation Errors" icon={<IconAlertCircle />} mb="xl">
+          <Text size="sm" mb="xs">Problematic DAG configurations:</Text>
+          <List size="sm" spacing="xs">
+            {Object.entries(dagErrors).map(([file, err]) => (
+              <List.Item key={file}><strong>{file}</strong>: <Text span c="dimmed" fs="italic">{err}</Text></List.Item>
+            ))}
+          </List>
+        </Alert>
+      )}
+
+      {loading && dags.length === 0 ? (
+        <Skeleton height={300} radius="md" />
+      ) : (
+        <Card padding="0" style={{ overflow: "hidden" }}>
+          <Table.ScrollContainer minWidth={600}>
+            <Table verticalSpacing="sm" horizontalSpacing="md" striped highlightOnHover>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}><Text size="sm" fw={700}>Pipeline</Text></Table.Th>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}><Text size="sm" fw={700}>Schedule</Text></Table.Th>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)' }}><Text size="sm" fw={700}>Tasks</Text></Table.Th>
+                  <Table.Th style={{ borderBottom: '2px solid var(--border-color)', width: '80px', textAlign: 'right' }}><Text size="sm" fw={700}>Actions</Text></Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {dags?.map(dag => (
+                  <Table.Tr key={dag.ID} onClick={() => router.push(`/dags?id=${dag.ID}`)} style={{ cursor: 'pointer' }}>
+                    <Table.Td>
+                      <Text fw={600} size="sm">{dag.ID}</Text>
+                      <Text size="xs" c="dimmed" mt={2} style={{ maxWidth: '500px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {dag.Description}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Badge variant="light" color="blue" size="sm" radius="sm">{dag.Schedule}</Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm" c="dimmed">{dag.Tasks?.length ?? 0} task{dag.Tasks?.length !== 1 ? 's' : ''}</Text>
+                    </Table.Td>
+                    <Table.Td align="right">
+                      <Tooltip label="Trigger Pipeline" position="left">
+                        <ActionIcon
+                          variant="light"
+                          color="blue"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleTrigger(dag.ID);
+                          }}
+                          loading={triggering[dag.ID]}
+                          disabled={triggering[dag.ID]}
+                        >
+                          <IconPlayerPlay size={16} />
+                        </ActionIcon>
+                      </Tooltip>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+                {(!dags || dags.length === 0) && (
+                  <Table.Tr>
+                    <Table.Td colSpan={4}>
+                      <Text c="dimmed" ta="center" py="md">No pipelines loaded.</Text>
+                    </Table.Td>
+                  </Table.Tr>
+                )}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
+        </Card>
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DAG Detail View (?id=... param present)
+// ---------------------------------------------------------------------------
 function DagDetailsContent() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id");
@@ -294,7 +425,7 @@ function DagDetailsContent() {
     <>
       <Group justify="space-between" mb="xs">
         <Group>
-          <Button variant="subtle" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/')} color="gray">
+          <Button variant="subtle" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/dags')} color="gray">
             Back
           </Button>
           <Title order={2}>{id}</Title>
@@ -496,10 +627,20 @@ function DagDetailsContent() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Root export: switch between list and detail based on ?id param
+// ---------------------------------------------------------------------------
+function DagsPageContent() {
+  const searchParams = useSearchParams();
+  const id = searchParams.get("id");
+  return id ? <DagDetailsContent /> : <DagListContent />;
+}
+
 export default function DagDetails() {
   return (
     <Suspense fallback={<Skeleton height={400} />}>
-      <DagDetailsContent />
+      <DagsPageContent />
     </Suspense>
   );
 }
+

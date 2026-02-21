@@ -2,7 +2,7 @@
 
 import { AppShell, Burger, Group, Title, ActionIcon, useMantineColorScheme, useComputedColorScheme, Text, Container, Box, NavLink } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { IconActivity, IconSun, IconMoon, IconDashboard } from "@tabler/icons-react";
+import { IconActivity, IconSun, IconMoon, IconDashboard, IconSitemap, IconHistory } from "@tabler/icons-react";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -59,6 +59,33 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
             onClick={(e) => {
               e.preventDefault();
               router.push("/");
+            }}
+            variant="filled"
+          />
+        </Box>
+        <Box mb="md">
+          <Text size="xs" fw={500} c="dimmed" mb="sm" tt="uppercase">
+            Workflows
+          </Text>
+          <NavLink
+            href="/dags"
+            label="DAGs"
+            leftSection={<IconSitemap size="1rem" stroke={1.5} />}
+            active={pathname === "/dags"}
+            onClick={(e) => {
+              e.preventDefault();
+              router.push("/dags");
+            }}
+            variant="filled"
+          />
+          <NavLink
+            href="/runs"
+            label="Runs"
+            leftSection={<IconHistory size="1rem" stroke={1.5} />}
+            active={pathname === "/runs"}
+            onClick={(e) => {
+              e.preventDefault();
+              router.push("/runs");
             }}
             variant="filled"
           />

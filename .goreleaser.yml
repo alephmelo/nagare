@@ -1,0 +1,108 @@
+version: 2
+
+# Build the frontend before compiling Go binaries.
+# The Go embed directive (//go:embed all:web/out) requires web/out to exist at compile time.
+before:
+  hooks:
+    - cmd: npm ci
+      dir: web
+    - cmd: npm run build
+      dir: web
+
+builds:
+  - id: nagare
+    main: .
+    binary: nagare
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    # Use zig as the C cross-compiler so CGO works for all targets on the
+    # Linux amd64 GitHub Actions runner without needing separate runner jobs.
+    overrides:
+      - goos: linux
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig cc -target x86_64-linux-musl
+          - CXX=zig c++ -target x86_64-linux-musl
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig cc -target aarch64-linux-musl
+          - CXX=zig c++ -target aarch64-linux-musl
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig cc -target x86_64-macos
+          - CXX=zig c++ -target x86_64-macos
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig cc -target aarch64-macos
+          - CXX=zig c++ -target aarch64-macos
+      - goos: windows
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig cc -target x86_64-windows
+          - CXX=zig c++ -target x86_64-windows
+
+archives:
+  - id: nagare
+    builds: [nagare]
+    name_template: "nagare_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # Include the sample nagare.yaml so users have a starting config
+    files:
+      - nagare.yaml
+
+checksum:
+  name_template: "nagare_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: "New Features"
+      regexp: "^feat"
+      order: 0
+    - title: "Bug Fixes"
+      regexp: "^fix"
+      order: 1
+    - title: "Other Changes"
+      order: 999
+
+release:
+  github:
+    owner: alephmelo
+    name: nagare
+  draft: false
+  prerelease: auto
+  name_template: "Nagare {{ .Tag }}"
