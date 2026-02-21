@@ -6,8 +6,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// CORSConfig holds cross-origin resource sharing settings.
+type CORSConfig struct {
+	// AllowedOrigins is an explicit list of origins that may make cross-origin
+	// requests.  If empty, the server falls back to the wildcard "*" and logs a
+	// warning at startup.
+	AllowedOrigins []string `yaml:"allowed_origins"`
+}
+
 type Config struct {
 	WorkerPools map[string]int `yaml:"worker_pools"`
+	CORS        CORSConfig     `yaml:"cors"`
 }
 
 func LoadConfig(path string) (*Config, error) {

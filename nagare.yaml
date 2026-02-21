@@ -3,3 +3,12 @@
 worker_pools:
   default: 4
   gpu_workers: 1
+
+cors:
+  # Explicit list of allowed origins.  Requests from any other origin will not
+  # receive CORS headers and will be blocked by the browser.
+  # Example values:
+  #   - "http://localhost:3000"
+  #   - "https://dashboard.example.com"
+  allowed_origins:
+    - "http://localhost:3000"

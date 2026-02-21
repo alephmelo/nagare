@@ -19,28 +19,60 @@ import (
 
 // Server encapsulates the dependencies for the HTTP API
 type Server struct {
-	store     *models.Store
-	scheduler *scheduler.Scheduler
-	pool      *worker.Pool
-	broker    *logbroker.Broker
+	store          *models.Store
+	scheduler      *scheduler.Scheduler
+	pool           *worker.Pool
+	broker         *logbroker.Broker
+	allowedOrigins []string
 }
 
 // NewServer creates a new API Server instance
-func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Pool, broker *logbroker.Broker) *Server {
+func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Pool, broker *logbroker.Broker, allowedOrigins []string) *Server {
 	return &Server{
-		store:     store,
-		scheduler: sched,
-		pool:      pool,
-		broker:    broker,
+		store:          store,
+		scheduler:      sched,
+		pool:           pool,
+		broker:         broker,
+		allowedOrigins: allowedOrigins,
 	}
 }
 
-// corsMiddleware allows cross-origin requests from the Next.js frontend
-func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+// corsMiddleware applies CORS headers based on the server's allowed-origins list.
+//
+// If allowedOrigins is non-empty, the incoming Origin header is matched against
+// the list.  A matching origin is echoed back in Access-Control-Allow-Origin so
+// that browsers accept the response.  Non-matching origins receive no CORS
+// headers and are therefore blocked by the browser.
+//
+// If allowedOrigins is empty the middleware falls back to the wildcard "*" so
+// that the server is usable out of the box without configuration (a warning is
+// emitted at construction time via NewServer — see Start()).
+func (s *Server) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		origin := r.Header.Get("Origin")
+
+		allowedOrigin := ""
+		if len(s.allowedOrigins) == 0 {
+			// Wildcard fallback — no allowlist configured.
+			allowedOrigin = "*"
+		} else {
+			for _, o := range s.allowedOrigins {
+				if o == origin {
+					allowedOrigin = o
+					break
+				}
+			}
+		}
+
+		if allowedOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			// Tell the browser it may cache the preflight result for 10 minutes.
+			w.Header().Set("Access-Control-Max-Age", "600")
+			// Vary so proxies do not serve a cached response to the wrong origin.
+			w.Header().Add("Vary", "Origin")
+		}
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -462,7 +494,6 @@ func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	flusher, canFlush := w.(http.Flusher)
 
@@ -506,23 +537,27 @@ func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
 
 // Start launches the HTTP server
 func (s *Server) Start(addr string, frontendFS fs.FS) error {
+	if len(s.allowedOrigins) == 0 {
+		log.Println("WARNING: cors.allowed_origins is not configured — CORS is open to all origins (*). Set allowed_origins in nagare.yaml for production use.")
+	}
+
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/stats", corsMiddleware(s.handleGetStats))
-	mux.HandleFunc("/api/dags", corsMiddleware(s.handleGetDAGs))
-	mux.HandleFunc("/api/dags/errors", corsMiddleware(s.handleGetDAGErrors))
-	mux.HandleFunc("/api/dags/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/stats", s.corsMiddleware(s.handleGetStats))
+	mux.HandleFunc("/api/dags", s.corsMiddleware(s.handleGetDAGs))
+	mux.HandleFunc("/api/dags/errors", s.corsMiddleware(s.handleGetDAGErrors))
+	mux.HandleFunc("/api/dags/", s.corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/runs") && r.Method == http.MethodPost {
 			s.handleTriggerDAG(w, r)
 			return
 		}
 		http.NotFound(w, r)
 	}))
-	mux.HandleFunc("/api/webhooks/", s.handleWebhook) // Unauthenticated endpoint intentionally (can add auth later)
+	mux.HandleFunc("/api/webhooks/", s.handleWebhook)
 
-	mux.HandleFunc("/api/runs", corsMiddleware(s.handleGetRuns))
+	mux.HandleFunc("/api/runs", s.corsMiddleware(s.handleGetRuns))
 	// Generic handler for anything starting with /api/runs/ to catch /api/runs/{id}/tasks and retries
-	mux.HandleFunc("/api/runs/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/runs/", s.corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if (strings.HasSuffix(r.URL.Path, "/logs") || strings.HasSuffix(r.URL.Path, "/logs/")) && r.Method == http.MethodGet {
 			s.handleTaskLogs(w, r)
 			return
