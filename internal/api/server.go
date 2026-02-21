@@ -12,6 +12,7 @@ import (
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/alephmelo/nagare/internal/scheduler"
 	"github.com/alephmelo/nagare/internal/worker"
+	"github.com/itchyny/gojq"
 )
 
 // Server encapsulates the dependencies for the HTTP API
@@ -83,7 +84,7 @@ func (s *Server) handleTriggerDAG(w http.ResponseWriter, r *http.Request) {
 	}
 	dagID := parts[3]
 
-	run, err := s.scheduler.TriggerDAG(dagID, "manual")
+	run, err := s.scheduler.TriggerDAG(dagID, "manual", nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -344,6 +345,91 @@ func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Task killed successfully"})
 }
 
+func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	// e.g. /api/webhooks/github -> Match against DAG Trigger configurations
+	path := r.URL.Path
+
+	var matchedDAG *models.DAGDef
+
+	dags := s.scheduler.GetDAGs()
+	for _, dag := range dags {
+		if dag.Trigger != nil && dag.Trigger.Type == "webhook" {
+			// e.g. match /api/webhooks/github
+			if dag.Trigger.Path == path && dag.Trigger.Method == r.Method {
+				matchedDAG = dag
+				break
+			}
+		}
+	}
+
+	if matchedDAG == nil {
+		http.Error(w, "No matching webhook trigger found", http.StatusNotFound)
+		return
+	}
+
+	// Parse JSON payload
+	var payload interface{}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		// Log but continue if empty body (some webhooks might just be pings)
+		if err.Error() != "EOF" {
+			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Extract Payload using gojq
+	conf := make(map[string]string)
+	if payload != nil && matchedDAG.Trigger.ExtractPayload != nil {
+		for envKey, jqQuery := range matchedDAG.Trigger.ExtractPayload {
+			query, err := gojq.Parse(jqQuery)
+			if err != nil {
+				log.Printf("Invalid jq query '%s' in DAG %s: %v", jqQuery, matchedDAG.ID, err)
+				continue
+			}
+
+			iter := query.Run(payload)
+			v, ok := iter.Next()
+			if !ok {
+				continue
+			}
+			if err, isErr := v.(error); isErr {
+				log.Printf("Error extracting payload for %s with query %s: %v", matchedDAG.ID, jqQuery, err)
+				continue
+			}
+
+			// Format value as string for environment variable
+			switch val := v.(type) {
+			case string:
+				conf[envKey] = val
+			case float64:
+				// format floats without trailing zeroes if possible
+				conf[envKey] = strconv.FormatFloat(val, 'f', -1, 64)
+			case bool:
+				conf[envKey] = strconv.FormatBool(val)
+			case nil:
+				conf[envKey] = ""
+			default:
+				// For objects/arrays, marshal back to JSON string
+				b, _ := json.Marshal(val)
+				conf[envKey] = string(b)
+			}
+		}
+	}
+
+	// Trigger the DAG
+	run, err := s.scheduler.TriggerDAG(matchedDAG.ID, "webhook", conf)
+	if err != nil {
+		http.Error(w, "Failed to trigger DAG", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Webhook received, DAG triggered",
+		"run_id":  run.ID,
+	})
+}
+
 // Start launches the HTTP server
 func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux := http.NewServeMux()
@@ -358,6 +444,8 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 		}
 		http.NotFound(w, r)
 	}))
+	mux.HandleFunc("/api/webhooks/", s.handleWebhook) // Unauthenticated endpoint intentionally (can add auth later)
+
 	mux.HandleFunc("/api/runs", corsMiddleware(s.handleGetRuns))
 	// Generic handler for anything starting with /api/runs/ to catch /api/runs/{id}/tasks and retries
 	mux.HandleFunc("/api/runs/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {

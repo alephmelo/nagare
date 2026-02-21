@@ -144,7 +144,7 @@ func (s *Scheduler) Tick() error {
 				// Catchup: create a run for every missed interval
 				currRunTime := nextRunTime
 				for now.After(currRunTime) || now.Equal(currRunTime) {
-					_, err := s.createRun(dag, "scheduled", currRunTime)
+					_, err := s.createRun(dag, "scheduled", currRunTime, nil)
 					if err != nil {
 						log.Printf("Cron failed to trigger %s at %v: %v", dag.ID, currRunTime, err)
 					}
@@ -153,7 +153,7 @@ func (s *Scheduler) Tick() error {
 				}
 			} else {
 				// No catchup: trigger single run, advance lastExec to now
-				_, err := s.createRun(dag, "scheduled", now)
+				_, err := s.createRun(dag, "scheduled", now, nil)
 				if err != nil {
 					log.Printf("Cron failed to trigger %s: %v", dag.ID, err)
 				}
@@ -384,7 +384,7 @@ func (s *Scheduler) PromotePendingTasks() error {
 }
 
 // TriggerDAG forcefully instantiates a new run of a DAG manually bypassing cron
-func (s *Scheduler) TriggerDAG(dagID string, triggerType string) (*models.DagRun, error) {
+func (s *Scheduler) TriggerDAG(dagID string, triggerType string, conf map[string]string) (*models.DagRun, error) {
 	s.mu.RLock()
 	dag, exists := s.dags[dagID]
 	s.mu.RUnlock()
@@ -393,10 +393,10 @@ func (s *Scheduler) TriggerDAG(dagID string, triggerType string) (*models.DagRun
 		return nil, fmt.Errorf("DAG %s not found in memory map", dagID)
 	}
 
-	return s.createRun(dag, triggerType, time.Now())
+	return s.createRun(dag, triggerType, time.Now(), conf)
 }
 
-func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate time.Time) (*models.DagRun, error) {
+func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate time.Time, conf map[string]string) (*models.DagRun, error) {
 	now := time.Now()
 	run := &models.DagRun{
 		ID:          fmt.Sprintf("%s_%d", dag.ID, now.UnixNano()),
@@ -404,6 +404,7 @@ func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate t
 		Status:      models.RunRunning,
 		ExecDate:    execDate,
 		TriggerType: triggerType,
+		Conf:        conf,
 		CreatedAt:   now,
 	}
 

@@ -97,6 +97,28 @@ tasks:
 ```
 When `get_files` completes, Nagare will dynamically spin up `process_file[0]` and `process_file[1]`, interpolating `{{item}}` in the command. The downstream tasks will naturally wait for all mapped task instances to finish.
 
+### 6. Zero-Config Webhooks
+Because Nagare embeds its own web server, DAGs can define ad-hoc webhook endpoints directly in the YAML using the `trigger` block. When a network request hits the endpoint, Nagare parses the JSON payload using `jq` syntax and injects the extracted fields directly into the shell environment of your tasks.
+
+```yaml
+id: webhook_demo
+description: "A DAG triggered by a webhook"
+schedule: "workflow_dispatch"
+trigger:
+  type: webhook
+  path: "/api/webhooks/github"
+  method: "POST"
+  extract_payload:
+    COMMIT_AUTHOR: ".pusher.name"
+    COMMIT_HASH: ".head_commit.id"
+tasks:
+  - id: print_payload
+    type: command
+    command: |
+      echo "Author: $COMMIT_AUTHOR"
+      echo "Commit: $COMMIT_HASH"
+```
+
 ---
 ## Development
 

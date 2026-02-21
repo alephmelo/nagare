@@ -17,7 +17,7 @@ import (
 type Pool struct {
 	store       *models.Store
 	getDAG      func(string) (*models.DAGDef, bool)
-	triggerDAG  func(string, string) (*models.DagRun, error)
+	triggerDAG  func(string, string, map[string]string) (*models.DagRun, error)
 	taskQueues  map[string]chan models.TaskInstance
 	workerSizes map[string]int
 	wg          sync.WaitGroup
@@ -26,7 +26,7 @@ type Pool struct {
 }
 
 // NewPool initializes a new worker pool manager
-func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string, string) (*models.DagRun, error), sizes map[string]int) *Pool {
+func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string, string, map[string]string) (*models.DagRun, error), sizes map[string]int) *Pool {
 	queues := make(map[string]chan models.TaskInstance)
 	for name := range sizes {
 		queues[name] = make(chan models.TaskInstance, 100)
@@ -172,7 +172,7 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 	}
 
 	if taskDef.Type == "trigger_dag" {
-		triggeredRun, err := p.triggerDAG(taskDef.DagID, "triggered")
+		triggeredRun, err := p.triggerDAG(taskDef.DagID, "triggered", nil)
 		if err != nil {
 			output := fmt.Sprintf("Failed to trigger DAG %s: %v", taskDef.DagID, err)
 			log.Printf("Worker %d: Task %s FAILED: %s", workerID, ti.ID, output)
@@ -212,6 +212,12 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 	execDateStr := run.ExecDate.Format(time.RFC3339)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("NAGARE_EXECUTION_DATE=%s", execDateStr))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("NAGARE_SCHEDULED_TIME=%s", execDateStr))
+
+	if run.Conf != nil {
+		for k, v := range run.Conf {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
 
 	if len(taskDef.Env) > 0 {
 		for k, v := range taskDef.Env {

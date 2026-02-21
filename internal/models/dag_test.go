@@ -277,3 +277,49 @@ tasks:
 		t.Errorf("Expected process to depend on download_a and download_b, got %v", process.DependsOn)
 	}
 }
+
+func TestParseDAG_Trigger(t *testing.T) {
+	yamlContent := []byte(`
+id: webhook_dag
+schedule: "workflow_dispatch"
+description: "A webhook triggered DAG"
+trigger:
+  type: webhook
+  path: /api/webhooks/test
+  extract_payload:
+    MY_VAR: .data.id
+tasks:
+  - id: t1
+    type: command
+    command: "echo $MY_VAR"
+`)
+
+	dag, err := ParseDAG(yamlContent)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if dag.Trigger == nil {
+		t.Fatal("expected trigger to be parsed")
+	}
+
+	if dag.Trigger.Type != "webhook" {
+		t.Errorf("expected trigger type 'webhook', got '%s'", dag.Trigger.Type)
+	}
+
+	if dag.Trigger.Path != "/api/webhooks/test" {
+		t.Errorf("expected trigger path '/api/webhooks/test', got '%s'", dag.Trigger.Path)
+	}
+
+	if val, ok := dag.Trigger.ExtractPayload["MY_VAR"]; !ok || val != ".data.id" {
+		t.Errorf("expected extract_payload to contain MY_VAR=.data.id")
+	}
+
+	// Validation tests Defaults
+	if err := dag.Validate(); err != nil {
+		t.Fatalf("expected valid DAG: %v", err)
+	}
+	if dag.Trigger.Method != "POST" { // validate applies defaults
+		t.Errorf("expected default Method 'POST', got '%s'", dag.Trigger.Method)
+	}
+}

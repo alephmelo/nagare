@@ -1,0 +1,19 @@
+id: webhook_demo
+description: "A DAG triggered by a GitHub-like webhook payload"
+schedule: "workflow_dispatch"
+trigger:
+  type: webhook
+  path: "/api/webhooks/github"
+  method: "POST"
+  extract_payload:
+    COMMIT_AUTHOR: ".pusher.name"
+    COMMIT_HASH: ".head_commit.id"
+    REPO_NAME: ".repository.full_name"
+tasks:
+  - id: print_payload
+    type: command
+    command: |
+      echo "Received Webhook!"
+      echo "Repo: $REPO_NAME"
+      echo "Author: $COMMIT_AUTHOR"
+      echo "Commit: $COMMIT_HASH"

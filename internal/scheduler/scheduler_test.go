@@ -155,17 +155,17 @@ func TestSchedulerTriggerDAG(t *testing.T) {
 	sched := NewScheduler(store)
 
 	// Inject a dummy DAG manually
-	sched.dags["manual_dag"] = &models.DAGDef{
-		ID:       "manual_dag",
+	sched.dags["dag1"] = &models.DAGDef{
+		ID:       "dag1",
 		Schedule: "* * * * *",
 		Tasks: []models.TaskDef{
 			{ID: "t1"},
 		},
 	}
 
-	run, err := sched.TriggerDAG("manual_dag", "manual")
+	run, err := sched.TriggerDAG("dag1", "manual", nil)
 	if err != nil {
-		t.Fatalf("TriggerDAG failed: %v", err)
+		t.Fatalf("Failed to trigger DAG: %v", err)
 	}
 	if run == nil {
 		t.Fatalf("Expected run to be returned")

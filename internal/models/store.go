@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -45,6 +46,7 @@ type DagRun struct {
 	Status      RunStatus
 	ExecDate    time.Time
 	TriggerType string
+	Conf        map[string]string // Dynamically extracted payloads as env variables
 	CreatedAt   time.Time
 	CompletedAt *time.Time
 }
@@ -98,6 +100,7 @@ func (s *Store) InitSchema() error {
 		status TEXT NOT NULL,
 		exec_date DATETIME NOT NULL,
 		trigger_type TEXT DEFAULT 'scheduled',
+		conf TEXT DEFAULT '{}',
 		created_at DATETIME NOT NULL,
 		completed_at DATETIME
 	);`
@@ -125,6 +128,7 @@ func (s *Store) InitSchema() error {
 
 	// Active Migrations — ignore errors if columns already exist
 	s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN trigger_type TEXT DEFAULT 'scheduled'`)
+	s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN conf TEXT DEFAULT '{}'`)
 	s.db.Exec(`ALTER TABLE task_instances ADD COLUMN attempt INT NOT NULL DEFAULT 1`)
 	s.db.Exec(`ALTER TABLE task_instances ADD COLUMN item_value TEXT`)
 
@@ -133,8 +137,15 @@ func (s *Store) InitSchema() error {
 
 // CreateDagRun inserts a new DagRun into the database
 func (s *Store) CreateDagRun(run *DagRun) error {
-	query := `INSERT INTO dag_runs (id, dag_id, status, exec_date, trigger_type, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, run.ID, run.DAGID, run.Status, run.ExecDate, run.TriggerType, run.CreatedAt, run.CompletedAt)
+	confJSON := "{}"
+	if run.Conf != nil {
+		if b, err := json.Marshal(run.Conf); err == nil {
+			confJSON = string(b)
+		}
+	}
+
+	query := `INSERT INTO dag_runs (id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, run.ID, run.DAGID, run.Status, run.ExecDate, run.TriggerType, confJSON, run.CreatedAt, run.CompletedAt)
 	return err
 }
 
@@ -183,7 +194,7 @@ func (s *Store) GetDagRuns(limit int, offset int, dagID string, status string, t
 		params = append(params, triggerType)
 	}
 
-	query = fmt.Sprintf(`SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, where)
+	query = fmt.Sprintf(`SELECT id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at FROM dag_runs %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, where)
 	params = append(params, limit, offset)
 
 	rows, err = s.db.Query(query, params...)
@@ -271,7 +282,7 @@ func (s *Store) GetSystemStats() (*SystemStats, error) {
 
 // GetActiveDagRuns retrieves all DAG runs currently markes as 'running'
 func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
-	query := `SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs WHERE status = ?`
+	query := `SELECT id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at FROM dag_runs WHERE status = ?`
 	rows, err := s.db.Query(query, RunRunning)
 	if err != nil {
 		return nil, err
@@ -281,8 +292,15 @@ func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
 	var runs []DagRun
 	for rows.Next() {
 		var r DagRun
-		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt, &r.CompletedAt); err != nil {
+		var confStr sql.NullString
+		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &confStr, &r.CreatedAt, &r.CompletedAt); err != nil {
 			return nil, err
+		}
+		if confStr.Valid && confStr.String != "" {
+			var conf map[string]string
+			if err := json.Unmarshal([]byte(confStr.String), &conf); err == nil {
+				r.Conf = conf
+			}
 		}
 		runs = append(runs, r)
 	}
@@ -423,12 +441,19 @@ func (s *Store) GetTaskInstance(id string) (*TaskInstance, error) {
 
 // GetDagRun retrieves a DagRun by ID
 func (s *Store) GetDagRun(runID string) (*DagRun, error) {
-	query := `SELECT id, dag_id, status, exec_date, trigger_type, created_at, completed_at FROM dag_runs WHERE id = ?`
+	query := `SELECT id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at FROM dag_runs WHERE id = ?`
 	row := s.db.QueryRow(query, runID)
 
 	var r DagRun
-	if err := row.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt, &r.CompletedAt); err != nil {
+	var confStr sql.NullString
+	if err := row.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &confStr, &r.CreatedAt, &r.CompletedAt); err != nil {
 		return nil, err
+	}
+	if confStr.Valid && confStr.String != "" {
+		var conf map[string]string
+		if err := json.Unmarshal([]byte(confStr.String), &conf); err == nil {
+			r.Conf = conf
+		}
 	}
 	return &r, nil
 }

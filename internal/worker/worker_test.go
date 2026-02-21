@@ -25,7 +25,7 @@ func TestWorkerPoolExecution(t *testing.T) {
 		return d, ok
 	}
 
-	triggerDAG := func(id string, triggerType string) (*models.DagRun, error) {
+	triggerDAG := func(id string, triggerType string, conf map[string]string) (*models.DagRun, error) {
 		return &models.DagRun{ID: "dummy_run", DAGID: id}, nil
 	}
 
@@ -83,7 +83,7 @@ func TestWorkerPoolTriggerDagExecution(t *testing.T) {
 	}
 
 	triggered := false
-	triggerDAG := func(id string, triggerType string) (*models.DagRun, error) {
+	triggerDAG := func(id string, triggerType string, conf map[string]string) (*models.DagRun, error) {
 		if id == "downstream_dag" {
 			triggered = true
 		}
@@ -149,7 +149,7 @@ func TestWorkerPoolExecutionEnv(t *testing.T) {
 		return d, ok
 	}
 
-	triggerDAG := func(id string, triggerType string) (*models.DagRun, error) {
+	triggerDAG := func(id string, triggerType string, conf map[string]string) (*models.DagRun, error) {
 		return &models.DagRun{ID: "dummy_run", DAGID: id}, nil
 	}
 
@@ -206,7 +206,7 @@ func TestWorkerPoolExecutionTimeout(t *testing.T) {
 		return d, ok
 	}
 
-	triggerDAG := func(id string, triggerType string) (*models.DagRun, error) {
+	triggerDAG := func(id string, triggerType string, conf map[string]string) (*models.DagRun, error) {
 		return &models.DagRun{ID: "dummy_run", DAGID: id}, nil
 	}
 
@@ -261,7 +261,7 @@ func TestWorkerPoolMultipleQueues(t *testing.T) {
 		return d, ok
 	}
 
-	triggerDAG := func(id string, triggerType string) (*models.DagRun, error) {
+	triggerDAG := func(id string, triggerType string, conf map[string]string) (*models.DagRun, error) {
 		return &models.DagRun{ID: "dummy_run", DAGID: id}, nil
 	}
 

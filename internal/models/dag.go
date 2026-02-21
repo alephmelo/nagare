@@ -24,13 +24,22 @@ type TaskDef struct {
 	WithItems         []string          `yaml:"with_items,omitempty"`
 }
 
+// TriggerDef defines an ad-hoc event trigger for the DAG
+type TriggerDef struct {
+	Type           string            `yaml:"type"`                      // e.g. "webhook"
+	Path           string            `yaml:"path,omitempty"`            // e.g. "/api/webhooks/github"
+	Method         string            `yaml:"method,omitempty"`          // e.g. "POST"
+	ExtractPayload map[string]string `yaml:"extract_payload,omitempty"` // jq queries
+}
+
 // DAGDef defines the workflow graph of Tasks
 type DAGDef struct {
-	ID          string    `yaml:"id"`
-	Description string    `yaml:"description"`
-	Schedule    string    `yaml:"schedule"`          // Cron expression
-	Catchup     *bool     `yaml:"catchup,omitempty"` // Controls backfill behavior
-	Tasks       []TaskDef `yaml:"tasks"`
+	ID          string      `yaml:"id"`
+	Description string      `yaml:"description"`
+	Schedule    string      `yaml:"schedule"`          // Cron expression
+	Catchup     *bool       `yaml:"catchup,omitempty"` // Controls backfill behavior
+	Trigger     *TriggerDef `yaml:"trigger,omitempty"` // Event-driven trigger
+	Tasks       []TaskDef   `yaml:"tasks"`
 }
 
 func ParseDAG(data []byte) (*DAGDef, error) {
@@ -112,6 +121,21 @@ func (d *DAGDef) Validate() error {
 		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 		if _, err := parser.Parse(d.Schedule); err != nil {
 			return fmt.Errorf("invalid cron schedule '%s' for DAG %s: %v", d.Schedule, d.ID, err)
+		}
+	}
+
+	// 2. Validate Trigger if present
+	if d.Trigger != nil {
+		if d.Trigger.Type == "" {
+			return fmt.Errorf("trigger type cannot be empty for DAG %s", d.ID)
+		}
+		if d.Trigger.Type == "webhook" {
+			if d.Trigger.Path == "" {
+				return fmt.Errorf("webhook trigger must specify a path for DAG %s", d.ID)
+			}
+			if d.Trigger.Method == "" {
+				d.Trigger.Method = "POST" // Default to POST
+			}
 		}
 	}
 
