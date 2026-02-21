@@ -17,6 +17,7 @@ type TaskDef struct {
 	Env               map[string]string `yaml:"env,omitempty"`
 	Retries           int               `yaml:"retries,omitempty"`
 	RetryDelaySeconds int               `yaml:"retry_delay_seconds,omitempty"`
+	TimeoutSeconds    int               `yaml:"timeout_seconds,omitempty"`
 	DependsOn         []string          `yaml:"depends_on"`
 	WithItems         []string          `yaml:"with_items,omitempty"`
 }

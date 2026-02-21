@@ -184,3 +184,60 @@ func TestWorkerPoolExecutionEnv(t *testing.T) {
 		t.Errorf("expected task status to be success, got %s", status)
 	}
 }
+
+func TestWorkerPoolExecutionTimeout(t *testing.T) {
+	store, _ := models.NewStore("file::memory:?cache=shared")
+	defer store.Close()
+
+	dags := make(map[string]*models.DAGDef)
+	dags["test_dag"] = &models.DAGDef{
+		ID: "test_dag",
+		Tasks: []models.TaskDef{
+			{
+				ID:             "t1",
+				Command:        "sleep 2",
+				TimeoutSeconds: 1,
+			},
+		},
+	}
+
+	getDAG := func(id string) (*models.DAGDef, bool) {
+		d, ok := dags[id]
+		return d, ok
+	}
+
+	triggerDAG := func(id string, triggerType string) (*models.DagRun, error) {
+		return &models.DagRun{ID: "dummy_run", DAGID: id}, nil
+	}
+
+	pool := NewPool(store, getDAG, triggerDAG, 1)
+
+	_ = store.CreateDagRun(&models.DagRun{
+		ID:     "run_1",
+		DAGID:  "test_dag",
+		Status: models.RunRunning,
+	})
+
+	_ = store.CreateTaskInstance(&models.TaskInstance{
+		ID:     "task_1",
+		RunID:  "run_1",
+		TaskID: "t1",
+		Status: models.TaskQueued,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pool.Start(ctx)
+
+	if err := pool.Dispatch(); err != nil {
+		t.Fatalf("Dispatch failed: %v", err)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	status, _ := store.GetTaskStatus("run_1", "t1")
+	if status != models.TaskFailed {
+		t.Errorf("expected task status to be failed, got %s", status)
+	}
+}

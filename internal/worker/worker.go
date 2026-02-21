@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/alephmelo/nagare/internal/models"
 )
@@ -79,12 +80,12 @@ func (p *Pool) worker(ctx context.Context, id int) {
 			log.Printf("Worker %d shutting down", id)
 			return
 		case ti := <-p.taskQueue:
-			p.executeTask(ti, id)
+			p.executeTask(ctx, ti, id)
 		}
 	}
 }
 
-func (p *Pool) executeTask(ti models.TaskInstance, workerID int) {
+func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID int) {
 	log.Printf("Worker %d starting task %s", workerID, ti.ID)
 
 	run, err := p.store.GetDagRun(ti.RunID)
@@ -132,8 +133,18 @@ func (p *Pool) executeTask(ti models.TaskInstance, workerID int) {
 		return
 	}
 
+	var cmdCtx context.Context
+	var cancel context.CancelFunc
+
+	if taskDef.TimeoutSeconds > 0 {
+		cmdCtx, cancel = context.WithTimeout(ctx, time.Duration(taskDef.TimeoutSeconds)*time.Second)
+	} else {
+		cmdCtx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+
 	// Execute the command natively
-	cmd := exec.Command("sh", "-c", cmdStr)
+	cmd := exec.CommandContext(cmdCtx, "sh", "-c", cmdStr)
 
 	if len(taskDef.Env) > 0 {
 		cmd.Env = os.Environ()
@@ -155,6 +166,14 @@ func (p *Pool) executeTask(ti models.TaskInstance, workerID int) {
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
+		// Check if the context timed out
+		if cmdCtx.Err() == context.DeadlineExceeded {
+			errMsg := fmt.Sprintf("Task timed out after %d seconds\nOutput: %s", taskDef.TimeoutSeconds, string(output))
+			log.Printf("Worker %d: Task %s TIMEOUT: %s", workerID, ti.ID, errMsg)
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, errMsg)
+			return
+		}
+
 		log.Printf("Worker %d: Task %s FAILED: %v\nOutput: %s", workerID, ti.ID, err, string(output))
 
 		// Check if it was cancelled/killed externally before marking as failed

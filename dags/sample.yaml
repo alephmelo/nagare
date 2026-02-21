@@ -9,6 +9,7 @@ tasks:
   - id: process_data
     type: command
     command: "echo 'Processing data...' && sleep 3 && echo 'Data processed!'"
+    timeout_seconds: 300
     depends_on:
       - download_data
 
