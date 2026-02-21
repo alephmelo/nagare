@@ -276,9 +276,8 @@ func (s *Store) GetSystemStats() (*SystemStats, error) {
 	}
 
 	// 3. Failed Runs in last 24h
-	yesterday := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
-	err = s.db.QueryRow(`SELECT COUNT(*) FROM dag_runs WHERE status = ? AND created_at >= ?`, RunFailed, yesterday).Scan(&stats.FailedRuns24h)
 	// SQLite created_at strings are comparable directly in iso8601
+	yesterday := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
 	err = s.db.QueryRow(`SELECT COUNT(*) FROM dag_runs WHERE status = ? AND created_at >= ?`, RunFailed, yesterday).Scan(&stats.FailedRuns24h)
 	if err != nil {
 		return nil, err

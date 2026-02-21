@@ -348,3 +348,44 @@ func TestGetDagRunsPaginationAndFiltering(t *testing.T) {
 		t.Errorf("expected 3 runs for dag_B, got %d", len(runsB))
 	}
 }
+
+func TestGetSystemStats(t *testing.T) {
+	store, err := NewStore("file::memory:?cache=shared&mode=memory")
+	if err != nil {
+		t.Fatalf("failed to initialize store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	recent := now.Add(-1 * time.Hour) // within last 24 h
+	old := now.Add(-48 * time.Hour)   // older than 24 h
+
+	runs := []DagRun{
+		{ID: "s1", DAGID: "d", Status: RunSuccess, ExecDate: now, TriggerType: "scheduled", CreatedAt: recent},
+		{ID: "s2", DAGID: "d", Status: RunSuccess, ExecDate: now, TriggerType: "scheduled", CreatedAt: old},
+		{ID: "r1", DAGID: "d", Status: RunRunning, ExecDate: now, TriggerType: "scheduled", CreatedAt: recent},
+		{ID: "f1", DAGID: "d", Status: RunFailed, ExecDate: now, TriggerType: "scheduled", CreatedAt: recent},
+		{ID: "f2", DAGID: "d", Status: RunFailed, ExecDate: now, TriggerType: "scheduled", CreatedAt: old},
+	}
+	for _, run := range runs {
+		if err := store.CreateDagRun(&run); err != nil {
+			t.Fatalf("failed to create run %s: %v", run.ID, err)
+		}
+	}
+
+	stats, err := store.GetSystemStats()
+	if err != nil {
+		t.Fatalf("GetSystemStats() returned error: %v", err)
+	}
+
+	if stats.TotalRuns != 5 {
+		t.Errorf("TotalRuns: got %d, want 5", stats.TotalRuns)
+	}
+	if stats.ActiveRuns != 1 {
+		t.Errorf("ActiveRuns: got %d, want 1", stats.ActiveRuns)
+	}
+	// only f1 is failed AND within 24 h; f2 is old
+	if stats.FailedRuns24h != 1 {
+		t.Errorf("FailedRuns24h: got %d, want 1", stats.FailedRuns24h)
+	}
+}
