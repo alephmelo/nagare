@@ -195,8 +195,12 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 	// Execute the command natively
 	cmd := exec.CommandContext(cmdCtx, "sh", "-c", cmdStr)
 
+	cmd.Env = os.Environ()
+	execDateStr := run.ExecDate.Format(time.RFC3339)
+	cmd.Env = append(cmd.Env, fmt.Sprintf("NAGARE_EXECUTION_DATE=%s", execDateStr))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("NAGARE_SCHEDULED_TIME=%s", execDateStr))
+
 	if len(taskDef.Env) > 0 {
-		cmd.Env = os.Environ()
 		for k, v := range taskDef.Env {
 			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 		}

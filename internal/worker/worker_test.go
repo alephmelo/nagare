@@ -136,7 +136,7 @@ func TestWorkerPoolExecutionEnv(t *testing.T) {
 		Tasks: []models.TaskDef{
 			{
 				ID:      "t1",
-				Command: "bash -c 'if [ \"$TEST_ENV_VAR\" != \"secret_value\" ]; then exit 1; fi'",
+				Command: "bash -c 'if [ \"$TEST_ENV_VAR\" != \"secret_value\" ]; then exit 1; fi; if [ -z \"$NAGARE_EXECUTION_DATE\" ]; then exit 1; fi; if [ -z \"$NAGARE_SCHEDULED_TIME\" ]; then exit 1; fi'",
 				Env: map[string]string{
 					"TEST_ENV_VAR": "secret_value",
 				},
