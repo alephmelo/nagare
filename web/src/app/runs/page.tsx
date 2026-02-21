@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, Suspense, useCallback } from "react";
+import { useEffect, useState, useRef, Suspense, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   Title,
@@ -77,11 +77,66 @@ function StatusIcon({ status }: { status: string }) {
   }
 }
 
+// useSSELogs subscribes to the SSE log stream for a task while it is running.
+// Returns the accumulated live log string (empty string when not streaming).
+function useSSELogs(taskInstanceID: string, runID: string, active: boolean): string {
+  const [lines, setLines] = useState<string[]>([]);
+  const esRef = useRef<EventSource | null>(null);
+  const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!active) {
+      if (retryRef.current) clearTimeout(retryRef.current);
+      if (esRef.current) {
+        esRef.current.close();
+        esRef.current = null;
+      }
+      setLines([]);
+      return;
+    }
+
+    function connect() {
+      if (esRef.current) return; // already connected
+      const url = `/api/runs/${runID}/tasks/${taskInstanceID}/logs`;
+      const es = new EventSource(url);
+      esRef.current = es;
+
+      es.onmessage = (evt) => {
+        setLines((prev) => [...prev, evt.data]);
+      };
+
+      es.onerror = () => {
+        es.close();
+        esRef.current = null;
+        // Retry after 1 s — the task may still be running.
+        retryRef.current = setTimeout(connect, 1000);
+      };
+    }
+
+    connect();
+
+    return () => {
+      if (retryRef.current) clearTimeout(retryRef.current);
+      if (esRef.current) {
+        esRef.current.close();
+        esRef.current = null;
+      }
+    };
+  }, [taskInstanceID, runID, active]);
+
+  return lines.join("\n");
+}
+
 function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: string; onRetry: (taskID: string) => void; onKill: (taskID: string) => void }) {
-  const [expanded, setExpanded] = useState(task.Status === "failed" || task.Status === "up_for_retry");
+  const isLive = task.Status === "running" || task.Status === "queued";
+  // Auto-expand running tasks so the live log stream starts immediately.
+  // Failed/retry tasks also start expanded to surface errors.
+  const [expanded, setExpanded] = useState(isLive || task.Status === "failed" || task.Status === "up_for_retry");
   const [attempts, setAttempts] = useState<RunTask[]>([]);
   const [loadingAttempts, setLoadingAttempts] = useState(false);
-  const hasOutput = task.Output && task.Output.trim().length > 0;
+  const liveOutput = useSSELogs(task.ID, runID, isLive && expanded);
+  const displayOutput = isLive ? liveOutput : task.Output;
+  const hasOutput = displayOutput && displayOutput.trim().length > 0;
   const hasMultipleAttempts = task.Attempt > 1;
 
   const fetchAttempts = async () => {
@@ -95,7 +150,7 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
   };
 
   const handleExpand = () => {
-    if (hasOutput || hasMultipleAttempts) {
+    if (isLive || hasOutput || hasMultipleAttempts) {
       const next = !expanded;
       setExpanded(next);
       if (next) fetchAttempts();
@@ -120,7 +175,7 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
         px="md"
         py="sm"
         justify="space-between"
-        style={{ cursor: (hasOutput || hasMultipleAttempts) ? "pointer" : "default" }}
+        style={{ cursor: (isLive || hasOutput || hasMultipleAttempts) ? "pointer" : "default" }}
         onClick={handleExpand}
       >
         <Group gap="sm">
@@ -171,7 +226,7 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
               </ActionIcon>
             </Tooltip>
           )}
-          {(hasOutput || hasMultipleAttempts) && (
+          {(isLive || hasOutput || hasMultipleAttempts) && (
             <ActionIcon variant="transparent" size="sm" color="dimmed">
               {expanded ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
             </ActionIcon>
@@ -252,7 +307,9 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
             
             <Group gap="xs" mb="xs">
               <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-              <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Output Log</Text>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
+                Output Log{isLive && <> &mdash; <Text span size="xs" c="blue" fw={400}>streaming live</Text></>}
+              </Text>
             </Group>
             <Code
               block
@@ -267,7 +324,7 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
                 color: task.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-default)",
               }}
             >
-              {task.Output || "No output generated yet."}
+              {displayOutput || (isLive ? "Waiting for output..." : "No output generated yet.")}
             </Code>
           </Box>
         )}

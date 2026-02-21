@@ -207,8 +207,15 @@ func (s *Store) GetDagRuns(limit int, offset int, dagID string, status string, t
 	var runs []DagRun
 	for rows.Next() {
 		var r DagRun
-		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &r.CreatedAt, &r.CompletedAt); err != nil {
+		var confStr sql.NullString
+		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &confStr, &r.CreatedAt, &r.CompletedAt); err != nil {
 			return nil, err
+		}
+		if confStr.Valid && confStr.String != "" {
+			var conf map[string]string
+			if err := json.Unmarshal([]byte(confStr.String), &conf); err == nil {
+				r.Conf = conf
+			}
 		}
 		runs = append(runs, r)
 	}
@@ -477,6 +484,14 @@ func (s *Store) UpdateTaskInstanceStatus(taskID string, status TaskStatus) error
 func (s *Store) UpdateTaskInstanceStatusAndOutput(taskID string, status TaskStatus, output string) error {
 	query := `UPDATE task_instances SET status = ?, output = ?, updated_at = ? WHERE id = ?`
 	_, err := s.db.Exec(query, status, output, time.Now(), taskID)
+	return err
+}
+
+// AppendTaskOutput appends a chunk of text to the task's output column.
+// Used during streaming execution to persist partial output incrementally.
+func (s *Store) AppendTaskOutput(taskID, chunk string) error {
+	query := `UPDATE task_instances SET output = COALESCE(output, '') || ?, updated_at = ? WHERE id = ?`
+	_, err := s.db.Exec(query, chunk, time.Now(), taskID)
 	return err
 }
 

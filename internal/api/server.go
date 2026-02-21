@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/alephmelo/nagare/internal/scheduler"
 	"github.com/alephmelo/nagare/internal/worker"
@@ -20,14 +22,16 @@ type Server struct {
 	store     *models.Store
 	scheduler *scheduler.Scheduler
 	pool      *worker.Pool
+	broker    *logbroker.Broker
 }
 
 // NewServer creates a new API Server instance
-func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Pool) *Server {
+func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Pool, broker *logbroker.Broker) *Server {
 	return &Server{
 		store:     store,
 		scheduler: sched,
 		pool:      pool,
+		broker:    broker,
 	}
 }
 
@@ -430,6 +434,76 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleTaskLogs streams log lines for a task instance using Server-Sent Events.
+//
+// Route: GET /api/runs/{runID}/tasks/{taskInstanceID}/logs
+//
+// Behaviour:
+//   - If the task is not found → 404.
+//   - If the task is already finished → replay stored output as SSE data lines,
+//     then close the stream immediately.
+//   - If the task is still running → subscribe to the broker, stream live lines,
+//     and close the stream when the broker signals completion.
+func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
+	// /api/runs/{runID}/tasks/{taskInstanceID}/logs  →  parts[5] = taskInstanceID
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 7 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	taskInstanceID := parts[5]
+
+	inst, err := s.store.GetTaskInstance(taskInstanceID)
+	if err != nil {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, canFlush := w.(http.Flusher)
+
+	sendLine := func(line string) {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	// For a finished task, replay the stored output and close.
+	if inst.Status != models.TaskRunning && inst.Status != models.TaskQueued {
+		for _, line := range strings.Split(strings.TrimRight(inst.Output, "\n"), "\n") {
+			if line != "" {
+				sendLine(line)
+			}
+		}
+		return
+	}
+
+	// Task is running (or queued): subscribe to the broker and stream live lines.
+	// Subscribe also replays any lines already buffered (history).
+	ch, unsub := s.broker.Subscribe(taskInstanceID)
+	defer unsub()
+
+	ctx := r.Context()
+	for {
+		select {
+		case line, ok := <-ch:
+			if !ok {
+				// Broker closed the channel — task finished.
+				return
+			}
+			sendLine(line)
+		case <-ctx.Done():
+			// Client disconnected.
+			return
+		}
+	}
+}
+
 // Start launches the HTTP server
 func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux := http.NewServeMux()
@@ -449,6 +523,10 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux.HandleFunc("/api/runs", corsMiddleware(s.handleGetRuns))
 	// Generic handler for anything starting with /api/runs/ to catch /api/runs/{id}/tasks and retries
 	mux.HandleFunc("/api/runs/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if (strings.HasSuffix(r.URL.Path, "/logs") || strings.HasSuffix(r.URL.Path, "/logs/")) && r.Method == http.MethodGet {
+			s.handleTaskLogs(w, r)
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/retry") && r.Method == http.MethodPost {
 			s.handleRetryTask(w, r)
 			return

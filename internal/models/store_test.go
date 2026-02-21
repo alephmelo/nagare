@@ -236,6 +236,49 @@ func TestGetLatestTaskAttemptsReturnsMostRecent(t *testing.T) {
 	}
 }
 
+// TestAppendTaskOutput verifies that AppendTaskOutput accumulates lines
+// into the output column without overwriting previous content.
+func TestAppendTaskOutput(t *testing.T) {
+	store, err := NewStore("file::memory:?cache=shared&mode=memory")
+	if err != nil {
+		t.Fatalf("failed to initialize store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.CreateDagRun(&DagRun{
+		ID: "run_d1", DAGID: "dag_d", Status: RunRunning,
+		ExecDate: time.Now(), TriggerType: "manual", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	ti := &TaskInstance{
+		ID: "run_d1_task1", RunID: "run_d1", TaskID: "task1",
+		Status: TaskRunning, Attempt: 1,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if err := store.CreateTaskInstance(ti); err != nil {
+		t.Fatalf("create task instance: %v", err)
+	}
+
+	lines := []string{"line one\n", "line two\n", "line three\n"}
+	for _, line := range lines {
+		if err := store.AppendTaskOutput("run_d1_task1", line); err != nil {
+			t.Fatalf("AppendTaskOutput: %v", err)
+		}
+	}
+
+	result, err := store.GetTaskInstance("run_d1_task1")
+	if err != nil {
+		t.Fatalf("GetTaskInstance: %v", err)
+	}
+
+	want := "line one\nline two\nline three\n"
+	if result.Output != want {
+		t.Errorf("expected output %q, got %q", want, result.Output)
+	}
+}
+
 func TestGetDagRunsPaginationAndFiltering(t *testing.T) {
 	// Use a new shared in-memory db specifically for this test to avoid state bleeding if running in parallel
 	store, err := NewStore("file::memory:?cache=shared&mode=memory")

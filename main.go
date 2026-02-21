@@ -12,6 +12,7 @@ import (
 
 	"github.com/alephmelo/nagare/internal/api"
 	"github.com/alephmelo/nagare/internal/config"
+	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/alephmelo/nagare/internal/scheduler"
 	"github.com/alephmelo/nagare/internal/worker"
@@ -54,10 +55,11 @@ func main() {
 		d, ok := sched.GetDAGs()[id]
 		return d, ok
 	}
-	pool := worker.NewPool(store, getDAG, sched.TriggerDAG, cfg.WorkerPools)
+	broker := logbroker.NewBroker()
+	pool := worker.NewPool(store, getDAG, sched.TriggerDAG, cfg.WorkerPools, broker)
 
 	// 4. Initialize API Server
-	apiServer := api.NewServer(store, sched, pool)
+	apiServer := api.NewServer(store, sched, pool, broker)
 
 	// Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
