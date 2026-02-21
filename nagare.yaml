@@ -1,0 +1,5 @@
+# Global configuration for Nagare
+
+worker_pools:
+  default: 4
+  gpu_workers: 1

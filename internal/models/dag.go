@@ -12,6 +12,7 @@ import (
 type TaskDef struct {
 	ID                string            `yaml:"id"`
 	Type              string            `yaml:"type"`             // e.g. "command" or "trigger_dag"
+	Pool              string            `yaml:"pool,omitempty"`   // Specific worker queue to run on
 	DagID             string            `yaml:"dag_id,omitempty"` // For "trigger_dag" tasks
 	Command           string            `yaml:"command,omitempty"`
 	Env               map[string]string `yaml:"env,omitempty"`

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/alephmelo/nagare/internal/api"
+	"github.com/alephmelo/nagare/internal/config"
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/alephmelo/nagare/internal/scheduler"
 	"github.com/alephmelo/nagare/internal/worker"
@@ -26,6 +27,13 @@ func main() {
 	if err := os.MkdirAll("dags", 0755); err != nil {
 		log.Fatalf("Failed to create dags directory: %v", err)
 	}
+
+	// 0. Load Configuration
+	cfg, err := config.LoadConfig("nagare.yaml")
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+	log.Printf("Loaded configuration with %d worker pools", len(cfg.WorkerPools))
 
 	// 1. Initialize SQLite Database
 	store, err := models.NewStore("file:nagare.db?cache=shared")
@@ -46,7 +54,7 @@ func main() {
 		d, ok := sched.GetDAGs()[id]
 		return d, ok
 	}
-	pool := worker.NewPool(store, getDAG, sched.TriggerDAG, 4)
+	pool := worker.NewPool(store, getDAG, sched.TriggerDAG, cfg.WorkerPools)
 
 	// 4. Initialize API Server
 	apiServer := api.NewServer(store, sched, pool)

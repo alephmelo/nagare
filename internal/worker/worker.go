@@ -12,39 +12,48 @@ import (
 	"github.com/alephmelo/nagare/internal/models"
 )
 
-// Pool manages a group of worker goroutines
+// Pool manages groups of worker goroutines across different task queues
 type Pool struct {
-	store      *models.Store
-	getDAG     func(string) (*models.DAGDef, bool)
-	triggerDAG func(string, string) (*models.DagRun, error)
-	taskQueue  chan models.TaskInstance
-	workerSize int
-	wg         sync.WaitGroup
-	running    map[string]*exec.Cmd
-	rmu        sync.RWMutex
+	store       *models.Store
+	getDAG      func(string) (*models.DAGDef, bool)
+	triggerDAG  func(string, string) (*models.DagRun, error)
+	taskQueues  map[string]chan models.TaskInstance
+	workerSizes map[string]int
+	wg          sync.WaitGroup
+	running     map[string]*exec.Cmd
+	rmu         sync.RWMutex
 }
 
-// NewPool initializes a new worker pool
-func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string, string) (*models.DagRun, error), size int) *Pool {
+// NewPool initializes a new worker pool manager
+func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string, string) (*models.DagRun, error), sizes map[string]int) *Pool {
+	queues := make(map[string]chan models.TaskInstance)
+	for name := range sizes {
+		queues[name] = make(chan models.TaskInstance, 100)
+	}
+
 	return &Pool{
-		store:      store,
-		getDAG:     getDAG,
-		triggerDAG: triggerDAG,
-		taskQueue:  make(chan models.TaskInstance, 100),
-		workerSize: size,
-		running:    make(map[string]*exec.Cmd),
+		store:       store,
+		getDAG:      getDAG,
+		triggerDAG:  triggerDAG,
+		taskQueues:  queues,
+		workerSizes: sizes,
+		running:     make(map[string]*exec.Cmd),
 	}
 }
 
-// Start boots up the worker goroutines
+// Start boots up the worker goroutines for all configured pools
 func (p *Pool) Start(ctx context.Context) {
-	for i := 0; i < p.workerSize; i++ {
-		p.wg.Add(1)
-		go p.worker(ctx, i)
+	workerID := 0
+	for poolName, size := range p.workerSizes {
+		for i := 0; i < size; i++ {
+			p.wg.Add(1)
+			go p.worker(ctx, workerID, poolName)
+			workerID++
+		}
 	}
 }
 
-// Dispatch polls the database for queued tasks and sends them to the workers
+// Dispatch polls the database for queued tasks and sends them to the appropriate workers
 func (p *Pool) Dispatch() error {
 	queued, err := p.store.GetQueuedTasks()
 	if err != nil {
@@ -52,6 +61,45 @@ func (p *Pool) Dispatch() error {
 	}
 
 	for _, ti := range queued {
+		// Look up the task's pool
+		run, err := p.store.GetDagRun(ti.RunID)
+		if err != nil {
+			p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+			continue
+		}
+
+		dag, ok := p.getDAG(run.DAGID)
+		if !ok {
+			p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+			continue
+		}
+
+		var taskDef *models.TaskDef
+		for i := range dag.Tasks {
+			if dag.Tasks[i].ID == ti.TaskID {
+				taskDef = &dag.Tasks[i]
+				break
+			}
+		}
+
+		if taskDef == nil {
+			p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+			continue
+		}
+
+		poolName := taskDef.Pool
+		if poolName == "" {
+			poolName = "default"
+		}
+
+		queue, exists := p.taskQueues[poolName]
+		if !exists {
+			errMsg := fmt.Sprintf("Target pool '%s' does not exist", poolName)
+			log.Printf("Worker Pool: Task %s FAILED: %s", ti.ID, errMsg)
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, errMsg)
+			continue
+		}
+
 		// Mark task as running so it isn't picked up multiple times
 		if err := p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskRunning); err != nil {
 			log.Printf("Failed to mark task %s as running: %v", ti.ID, err)
@@ -60,33 +108,34 @@ func (p *Pool) Dispatch() error {
 
 		// Send to channel
 		select {
-		case p.taskQueue <- ti:
-			log.Printf("Dispatched task %s", ti.ID)
+		case queue <- ti:
+			log.Printf("Dispatched task %s to pool %s", ti.ID, poolName)
 		default:
 			// If queue is full, rollback to queued
 			p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskQueued)
-			log.Printf("Queue full, rolled back task %s", ti.ID)
+			log.Printf("Queue full for pool %s, rolled back task %s", poolName, ti.ID)
 		}
 	}
 	return nil
 }
 
-// worker listens on the queue and executes shell commands
-func (p *Pool) worker(ctx context.Context, id int) {
+// worker listens on its pool queue and executes shell commands
+func (p *Pool) worker(ctx context.Context, id int, poolName string) {
 	defer p.wg.Done()
+	queue := p.taskQueues[poolName]
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("Worker %d shutting down", id)
+			log.Printf("Worker %d (pool: %s) shutting down", id, poolName)
 			return
-		case ti := <-p.taskQueue:
-			p.executeTask(ctx, ti, id)
+		case ti := <-queue:
+			p.executeTask(ctx, ti, id, poolName)
 		}
 	}
 }
 
-func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID int) {
-	log.Printf("Worker %d starting task %s", workerID, ti.ID)
+func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID int, poolName string) {
+	log.Printf("Worker %d (pool: %s) starting task %s", workerID, poolName, ti.ID)
 
 	run, err := p.store.GetDagRun(ti.RunID)
 	if err != nil {

@@ -8,7 +8,8 @@ tasks:
 
   - id: process_data
     type: command
-    command: "echo 'Processing data...' && sleep 3 && echo 'Data processed!'"
+    pool: gpu_workers
+    command: "echo 'Processing data on GPU...' && sleep 5 && echo 'Data processed!'"
     timeout_seconds: 300
     depends_on:
       - download_data
