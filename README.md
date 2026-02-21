@@ -10,6 +10,7 @@ It is designed as a lightweight alternative to heavy data pipeline tools like Ap
 - **Cron Scheduling**: Native evaluation of cron schedules to trigger DAGs exactly when they are needed.
 - **Topological Execution**: Evaluates parent/child task dependencies natively (e.g. `process_data` waits for `download_data` to finish).
 - **Environment Variables**: Inject environment variables securely into command executions using the `env` YAML block.
+- **Catchup / Backfill**: Control whether missed schedule intervals should be skipped or executed using the `catchup` boolean in your DAG definition.
 - **Process Management**: Gracefully terminate stuck or runaway DAG runs and individual task instances directly from the UI or via API endpoints.
 - **Single Binary Web UI**: The entire Next.js + Mantine dashboard is compiled into static files and embedded directly into the Go binary (`//go:embed all:web/out`). Drop the executable onto a server, and you get a production-ready engine + dashboard on port `8080` instantly.
 
