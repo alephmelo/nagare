@@ -23,6 +23,12 @@ type TaskAssignment struct {
 	TimeoutSecs    int
 	Retries        int
 	Attempt        int
+
+	// Container executor fields — only populated when the task specifies an image.
+	Image     string
+	Workdir   string
+	Volumes   []string
+	Resources *models.ResourcesDef
 }
 
 // PrepareTaskAssignment resolves a TaskInstance + DagRun into a TaskAssignment
@@ -76,6 +82,10 @@ func PrepareTaskAssignment(run *models.DagRun, ti models.TaskInstance, dag *mode
 		TimeoutSecs:    taskDef.TimeoutSeconds,
 		Retries:        taskDef.Retries,
 		Attempt:        ti.Attempt,
+		Image:          taskDef.Image,
+		Workdir:        taskDef.Workdir,
+		Volumes:        taskDef.Volumes,
+		Resources:      taskDef.Resources,
 	}, nil
 }
 
@@ -83,6 +93,20 @@ func PrepareTaskAssignment(run *models.DagRun, ti models.TaskInstance, dag *mode
 type RunResult struct {
 	Output   string
 	TimedOut bool
+}
+
+// killLocalProcess terminates a running local process and its entire process
+// group, then closes the pipe reader to unblock the output scanner goroutine.
+func killLocalProcess(cmd *exec.Cmd, pr *os.File) {
+	if cmd != nil && cmd.Process != nil {
+		pgid := cmd.Process.Pid
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			cmd.Process.Kill()
+		}
+	}
+	if pr != nil {
+		pr.Close()
+	}
 }
 
 // RunCommand executes cmdStr in a shell subprocess, optionally bounded by

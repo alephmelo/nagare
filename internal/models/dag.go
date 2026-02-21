@@ -2,11 +2,25 @@ package models
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
+
+// ResourcesDef declares CPU, memory, and GPU limits for a container task.
+// Values mirror Docker's --cpus, --memory, and --gpus flags.
+//
+//	cpus:   "2.0"          # fractional CPU count, e.g. "0.5", "4"
+//	memory: "512m"         # size with suffix b/k/m/g (case-insensitive)
+//	gpus:   "all"          # "all" or a positive integer string
+type ResourcesDef struct {
+	CPUs   string `yaml:"cpus,omitempty"`
+	Memory string `yaml:"memory,omitempty"`
+	GPUs   string `yaml:"gpus,omitempty"`
+}
 
 // TaskDef defines a unit of work within a DAG
 type TaskDef struct {
@@ -22,6 +36,12 @@ type TaskDef struct {
 	TimeoutSeconds    int               `yaml:"timeout_seconds,omitempty"`
 	DependsOn         []string          `yaml:"depends_on"`
 	WithItems         []string          `yaml:"with_items,omitempty"`
+
+	// Container executor fields — only used when Image is non-empty.
+	Image     string        `yaml:"image,omitempty"`     // Docker image, e.g. "python:3.12-slim"
+	Workdir   string        `yaml:"workdir,omitempty"`   // Working directory inside the container
+	Volumes   []string      `yaml:"volumes,omitempty"`   // Bind mounts: "host_path:container_path[:ro]"
+	Resources *ResourcesDef `yaml:"resources,omitempty"` // CPU / memory / GPU limits
 }
 
 // TriggerDef defines an ad-hoc event trigger for the DAG
@@ -163,6 +183,35 @@ func (d *DAGDef) Validate() error {
 				return fmt.Errorf("task %s depends on itself", t.ID)
 			}
 		}
+
+		// Container field validation
+		if t.Image != "" {
+			if t.Type == "trigger_dag" {
+				return fmt.Errorf("task %s: 'image' cannot be used with type 'trigger_dag'", t.ID)
+			}
+			if t.Command == "" {
+				return fmt.Errorf("task %s: 'command' is required when 'image' is set", t.ID)
+			}
+		}
+		if t.Resources != nil {
+			if err := validateResources(t.ID, t.Resources); err != nil {
+				return err
+			}
+			if t.Image == "" {
+				return fmt.Errorf("task %s: 'resources' requires 'image' to be set", t.ID)
+			}
+		}
+		if len(t.Volumes) > 0 && t.Image == "" {
+			return fmt.Errorf("task %s: 'volumes' requires 'image' to be set", t.ID)
+		}
+		if t.Workdir != "" && t.Image == "" {
+			return fmt.Errorf("task %s: 'workdir' requires 'image' to be set", t.ID)
+		}
+		for _, vol := range t.Volumes {
+			if err := validateVolume(t.ID, vol); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Validate missing dependencies
@@ -205,5 +254,45 @@ func (d *DAGDef) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// validateResources checks that resource limit values are well-formed.
+func validateResources(taskID string, r *ResourcesDef) error {
+	if r.CPUs != "" {
+		v, err := strconv.ParseFloat(r.CPUs, 64)
+		if err != nil || v <= 0 {
+			return fmt.Errorf("task %s: resources.cpus must be a positive number (got %q)", taskID, r.CPUs)
+		}
+	}
+	if r.Memory != "" {
+		matched, _ := regexp.MatchString(`(?i)^\d+[bkmg]?$`, r.Memory)
+		if !matched {
+			return fmt.Errorf("task %s: resources.memory must be a number with optional suffix b/k/m/g (got %q)", taskID, r.Memory)
+		}
+	}
+	if r.GPUs != "" {
+		if r.GPUs != "all" {
+			v, err := strconv.Atoi(r.GPUs)
+			if err != nil || v <= 0 {
+				return fmt.Errorf("task %s: resources.gpus must be \"all\" or a positive integer (got %q)", taskID, r.GPUs)
+			}
+		}
+	}
+	return nil
+}
+
+// validateVolume checks that a volume mount string has the expected format.
+func validateVolume(taskID, vol string) error {
+	parts := strings.Split(vol, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return fmt.Errorf("task %s: invalid volume %q — expected host_path:container_path[:ro|rw]", taskID, vol)
+	}
+	if parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("task %s: invalid volume %q — host and container paths must be non-empty", taskID, vol)
+	}
+	if len(parts) == 3 && parts[2] != "ro" && parts[2] != "rw" {
+		return fmt.Errorf("task %s: invalid volume mode %q — must be 'ro' or 'rw'", taskID, parts[2])
+	}
 	return nil
 }

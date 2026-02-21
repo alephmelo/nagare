@@ -323,3 +323,241 @@ tasks:
 		t.Errorf("expected default Method 'POST', got '%s'", dag.Trigger.Method)
 	}
 }
+
+// ---- Container executor validation -----------------------------------------
+
+func TestValidate_ContainerTask_Valid(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "container_dag",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{
+				ID:      "t1",
+				Command: "python train.py",
+				Image:   "pytorch/pytorch:latest",
+				Workdir: "/workspace",
+				Volumes: []string{"./data:/data", "/models:/models:ro"},
+				Resources: &ResourcesDef{
+					CPUs:   "2.0",
+					Memory: "4g",
+					GPUs:   "1",
+				},
+			},
+		},
+	}
+	if err := dag.Validate(); err != nil {
+		t.Errorf("expected valid container task, got: %v", err)
+	}
+}
+
+func TestValidate_ContainerTask_MissingCommand(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "d",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Image: "alpine:latest"}, // no command
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for image set without command")
+	}
+}
+
+func TestValidate_ContainerTask_ImageWithTriggerDag(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "d",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Type: "trigger_dag", DagID: "other", Image: "alpine:latest"},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for image set on trigger_dag task")
+	}
+}
+
+func TestValidate_ContainerTask_ResourcesWithoutImage(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "d",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{
+				ID:        "t1",
+				Command:   "echo hi",
+				Resources: &ResourcesDef{CPUs: "1.0"},
+			},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for resources set without image")
+	}
+}
+
+func TestValidate_ContainerTask_VolumesWithoutImage(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "d",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Command: "echo hi", Volumes: []string{"./data:/data"}},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for volumes set without image")
+	}
+}
+
+func TestValidate_ContainerTask_WorkdirWithoutImage(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "d",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{ID: "t1", Command: "echo hi", Workdir: "/app"},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for workdir set without image")
+	}
+}
+
+func TestValidate_ContainerTask_InvalidCPUs(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "d",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{
+				ID:        "t1",
+				Command:   "echo hi",
+				Image:     "alpine:latest",
+				Resources: &ResourcesDef{CPUs: "bad"},
+			},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for invalid CPUs value")
+	}
+}
+
+func TestValidate_ContainerTask_InvalidMemory(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "d",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{
+				ID:        "t1",
+				Command:   "echo hi",
+				Image:     "alpine:latest",
+				Resources: &ResourcesDef{Memory: "4x"},
+			},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for invalid memory value")
+	}
+}
+
+func TestValidate_ContainerTask_InvalidGPUs(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "d",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{
+				ID:        "t1",
+				Command:   "echo hi",
+				Image:     "alpine:latest",
+				Resources: &ResourcesDef{GPUs: "0"},
+			},
+		},
+	}
+	if err := dag.Validate(); err == nil {
+		t.Error("expected error for invalid GPUs value (0)")
+	}
+}
+
+func TestValidate_ContainerTask_InvalidVolume(t *testing.T) {
+	cases := []struct {
+		vol string
+	}{
+		{"/only/one/part"},
+		{"host:container:invalid_mode"},
+		{":container"},
+		{"host:"},
+	}
+	for _, tc := range cases {
+		dag := &DAGDef{
+			ID:       "d",
+			Schedule: "* * * * *",
+			Tasks: []TaskDef{
+				{ID: "t1", Command: "echo hi", Image: "alpine:latest", Volumes: []string{tc.vol}},
+			},
+		}
+		if err := dag.Validate(); err == nil {
+			t.Errorf("expected error for invalid volume %q", tc.vol)
+		}
+	}
+}
+
+func TestValidate_ContainerTask_GPUs_All(t *testing.T) {
+	dag := &DAGDef{
+		ID:       "d",
+		Schedule: "* * * * *",
+		Tasks: []TaskDef{
+			{
+				ID:        "t1",
+				Command:   "echo hi",
+				Image:     "alpine:latest",
+				Resources: &ResourcesDef{GPUs: "all"},
+			},
+		},
+	}
+	if err := dag.Validate(); err != nil {
+		t.Errorf("expected valid GPU 'all', got: %v", err)
+	}
+}
+
+func TestParseDAG_ContainerFields(t *testing.T) {
+	yamlContent := []byte(`
+id: ml_dag
+schedule: "* * * * *"
+tasks:
+  - id: train
+    command: python train.py
+    image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+    workdir: /workspace
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models:ro
+    resources:
+      cpus: "4.0"
+      memory: 8g
+      gpus: all
+`)
+	dag, err := ParseDAG(yamlContent)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if len(dag.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(dag.Tasks))
+	}
+	task := dag.Tasks[0]
+	if task.Image != "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime" {
+		t.Errorf("Image: got %q", task.Image)
+	}
+	if task.Workdir != "/workspace" {
+		t.Errorf("Workdir: got %q", task.Workdir)
+	}
+	if len(task.Volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(task.Volumes))
+	}
+	if task.Resources == nil {
+		t.Fatal("expected Resources to be set")
+	}
+	if task.Resources.CPUs != "4.0" {
+		t.Errorf("CPUs: got %q", task.Resources.CPUs)
+	}
+	if task.Resources.Memory != "8g" {
+		t.Errorf("Memory: got %q", task.Resources.Memory)
+	}
+	if task.Resources.GPUs != "all" {
+		t.Errorf("GPUs: got %q", task.Resources.GPUs)
+	}
+}

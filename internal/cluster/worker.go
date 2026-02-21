@@ -209,17 +209,32 @@ func (rw *RemoteWorker) executeAssignment(ctx context.Context, a TaskAssignmentD
 		}
 	}()
 
-	result, runErr := worker.RunCommand(
+	// Convert the DTO to a TaskAssignment so we can use the executor abstraction.
+	taskAssignment := &worker.TaskAssignment{
+		TaskInstanceID: a.TaskInstanceID,
+		RunID:          a.RunID,
+		Command:        a.Command,
+		Env:            a.Env,
+		TimeoutSecs:    a.TimeoutSecs,
+		Retries:        a.Retries,
+		Attempt:        a.Attempt,
+		Image:          a.Image,
+		Workdir:        a.Workdir,
+		Volumes:        a.Volumes,
+		Resources:      a.Resources,
+	}
+
+	exec := worker.NewExecutor(taskAssignment)
+
+	result, runErr := exec.Run(
 		taskCtx,
-		a.Command,
-		a.Env,
-		a.TimeoutSecs,
+		taskAssignment,
 		func(line string) {
 			logMu.Lock()
 			logBuf = append(logBuf, line)
 			logMu.Unlock()
 		},
-		nil, // onStart: no kill registration needed for remote workers
+		nil, // cancel registration not needed; context cancel stops execution
 	)
 
 	close(logFlushStop)

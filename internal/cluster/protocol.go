@@ -1,6 +1,10 @@
 package cluster
 
-import "time"
+import (
+	"time"
+
+	"github.com/alephmelo/nagare/internal/models"
+)
 
 // WorkerRegistration is sent by remote workers on startup and as a heartbeat.
 type WorkerRegistration struct {
@@ -37,6 +41,12 @@ type TaskAssignmentDTO struct {
 	TimeoutSecs    int      `json:"timeout_secs"`
 	Retries        int      `json:"retries"`
 	Attempt        int      `json:"attempt"`
+
+	// Container executor fields — only populated when the task specifies an image.
+	Image     string               `json:"image,omitempty"`
+	Workdir   string               `json:"workdir,omitempty"`
+	Volumes   []string             `json:"volumes,omitempty"`
+	Resources *models.ResourcesDef `json:"resources,omitempty"`
 }
 
 // TaskResult is posted by a worker after a task finishes (success, failure, or cancel).

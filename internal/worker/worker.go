@@ -4,22 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
 )
 
-// runningTask holds a running command and its output pipe reader so KillTask
-// can close the pipe (unblocking the scanner goroutine) when the process group
-// is killed but the scanner is still waiting for data.
+// runningTask holds a cancel function that kills the running execution,
+// regardless of whether it is a local process or a Docker container.
 type runningTask struct {
-	cmd *exec.Cmd
-	pr  *os.File
+	cancel func()
 }
 
 // Pool manages groups of worker goroutines across different task queues
@@ -197,7 +192,8 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 		return
 	}
 
-	// Register a slot in the running map; onStart fills in cmd+pr after Start().
+	// Register a slot in the running map; onCancel fills in the cancel func after
+	// the executor has started the underlying process or container.
 	p.rmu.Lock()
 	p.running[ti.ID] = &runningTask{}
 	p.rmu.Unlock()
@@ -208,13 +204,15 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 		p.rmu.Unlock()
 	}()
 
-	result, runErr := RunCommand(ctx, assignment.Command, assignment.Env, assignment.TimeoutSecs,
+	exec := NewExecutor(assignment)
+
+	result, runErr := exec.Run(ctx, assignment,
 		func(line string) {
 			p.broker.Publish(ti.ID, line)
 		},
-		func(cmd *exec.Cmd, pr *os.File) {
+		func(cancelFn func()) {
 			p.rmu.Lock()
-			p.running[ti.ID] = &runningTask{cmd: cmd, pr: pr}
+			p.running[ti.ID] = &runningTask{cancel: cancelFn}
 			p.rmu.Unlock()
 		},
 	)
@@ -257,7 +255,7 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 	p.broker.Cleanup(ti.ID)
 }
 
-// KillTask terminates a running task process
+// KillTask terminates a running task process or container
 func (p *Pool) KillTask(taskInstanceID string) error {
 	p.rmu.RLock()
 	rt, ok := p.running[taskInstanceID]
@@ -269,19 +267,8 @@ func (p *Pool) KillTask(taskInstanceID string) error {
 		return p.store.UpdateTaskInstanceStatus(taskInstanceID, models.TaskCancelled)
 	}
 
-	if rt.cmd != nil && rt.cmd.Process != nil {
-		// With Setpgid=true the child process group id equals its pid.
-		// Passing a negative value to Kill targets the entire process group,
-		// which also terminates any subprocesses spawned by the shell command.
-		pgid := rt.cmd.Process.Pid
-		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-			rt.cmd.Process.Kill()
-		}
-	}
-	// Close the pipe reader so the scanner goroutine unblocks even if some
-	// file descriptor leak keeps the write end alive.
-	if rt.pr != nil {
-		rt.pr.Close()
+	if rt.cancel != nil {
+		rt.cancel()
 	}
 
 	return p.store.UpdateTaskInstanceStatus(taskInstanceID, models.TaskCancelled)

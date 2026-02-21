@@ -1,0 +1,65 @@
+id: container_demo
+description: "Demonstrates the container executor — tasks run inside Docker images with resource limits, volume mounts, and GPU passthrough"
+schedule: "workflow_dispatch"
+tasks:
+  # ── Step 1: pure local task (no image) ────────────────────────────────────
+  # When 'image' is absent Nagare falls back to the standard sh -c executor.
+  - id: prepare_data
+    type: command
+    command: |
+      mkdir -p /tmp/nagare_demo
+      echo "hello from the host" > /tmp/nagare_demo/input.txt
+      echo "Data prepared on host"
+
+  # ── Step 2: run Python inside a container ─────────────────────────────────
+  # The image is pulled automatically on first run.
+  # A host directory is bind-mounted read-write so the container can produce
+  # output that subsequent tasks (or the host) can consume.
+  - id: run_python
+    type: command
+    image: "python:3.12-slim"
+    workdir: "/data"
+    volumes:
+      - "/tmp/nagare_demo:/data:rw"
+    resources:
+      cpus: "1.0"
+      memory: "256m"
+    command: |
+      python3 - <<'EOF'
+      with open("input.txt") as f:
+          data = f.read().strip()
+      result = data.upper()
+      with open("output.txt", "w") as f:
+          f.write(result + "\n")
+      print(f"Processed: {result}")
+      EOF
+    depends_on:
+      - prepare_data
+
+  # ── Step 3: verify output back on the host ────────────────────────────────
+  - id: verify_output
+    type: command
+    command: |
+      echo "Container wrote:"
+      cat /tmp/nagare_demo/output.txt
+      rm -rf /tmp/nagare_demo
+    depends_on:
+      - run_python
+
+  # ── Step 4 (optional): GPU task example ───────────────────────────────────
+  # Uncomment this task on a host that has an NVIDIA GPU and the nvidia-container-toolkit.
+  # Only workers started with --pools gpu will pick up this task (via pool: gpu).
+  #
+  # - id: gpu_inference
+  #   type: command
+  #   pool: gpu
+  #   image: "nvidia/cuda:12.3.1-base-ubuntu22.04"
+  #   resources:
+  #     cpus: "2.0"
+  #     memory: "4g"
+  #     gpus: "all"      # pass through all available GPUs; use "1", "2", … for a specific count
+  #   command: |
+  #     nvidia-smi
+  #     echo "GPU inference complete"
+  #   depends_on:
+  #     - verify_output

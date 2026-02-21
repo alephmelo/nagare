@@ -31,12 +31,40 @@ On every "tick", the Scheduler assesses the world:
 1. **Triggering**: It parses standard cron expressions (`robfig/cron/v3`) to see if any DAGs fall due. If yes, it creates a `DagRun` and inserts all child `TaskInstances` into the DB dynamically set to `pending`.
 2. **Dependency Resolution**: It scans pending tasks. It then executes logic to assert whether all of a task's `depends_on` parents have reached a `success` status. If the topological conditions are met, the task status is promoted to `queued`.
 
-### 4. The Executor (`internal/worker/worker.go`)
+### 4. The Executor (`internal/worker/`)
 The muscle. Instead of distributed workers communicating over HTTP/RPC, Nagare uses a localized concurrent worker pool.
 - A **Dispatcher** continually polls the SQLite DB for explicitly `queued` tasks and pushes them into a buffered Go **Channel** (`chan models.TaskInstance`).
 - A **Worker Pool** (configurable, currently a set of fixed goroutines) constantly listens to this channel.
-- Workers pop a task off the channel, update the DB state to `running`, execute the shell command locally via `os/exec`, and report `success` or `failed` back to the store.
-- Workers keep a thread-safe registry of active `os/exec.Cmd` processes, mapped to task IDs. This enables the API/Scheduler to signal a process termination (`RunCancelled` / `TaskCancelled`) gracefully.
+- Workers pop a task off the channel, update the DB state to `running`, execute the task via the appropriate executor (see below), and report `success` or `failed` back to the store.
+- Workers keep a thread-safe registry of active tasks mapped by task ID, each holding a generic `cancel func()`. This enables the API/Scheduler to signal graceful termination (`RunCancelled` / `TaskCancelled`) for both local and container tasks.
+
+#### Executor interface (`internal/worker/executor.go`)
+All execution is routed through a single interface:
+
+```go
+type Executor interface {
+    Run(ctx context.Context, assignment *TaskAssignment, onLine func(string), onCancel func(cancelFn func())) (RunResult, error)
+}
+```
+
+`NewExecutor(assignment)` is the factory function. It returns:
+- **`DockerExecutor`** — when `assignment.Image != ""`
+- **`LocalExecutor`** — otherwise (default, backward-compatible path)
+
+#### `LocalExecutor` (`internal/worker/exec_local.go`)
+A thin wrapper around `RunCommand` in `exec.go`. Runs the command via `sh -c` in the host process, placing it in its own process group for clean kills.
+
+#### `DockerExecutor` (`internal/worker/exec_docker.go`)
+Runs the command inside an ephemeral Docker container using the **Docker SDK for Go** (`github.com/docker/docker v24`). Lifecycle:
+1. **Image pull** — checks local image cache; pulls and streams progress via `onLine` if absent.
+2. **Container create** — applies `WorkingDir`, bind-mount `Volumes`, and resource limits (`NanoCPUs`, `Memory`, NVIDIA `DeviceRequests` for GPU passthrough).
+3. **Cancel hook** — registers a `ContainerKill(SIGKILL)` callback via `onCancel` before starting, so a UI kill propagates immediately.
+4. **Start + log stream** — starts the container and attaches a log reader. Docker multiplexes stdout and stderr into a single stream with an 8-byte frame header per chunk; the internal `dockerLogReader` strips these headers before line scanning.
+5. **Wait + remove** — waits for the container to exit, collects the exit code, and force-removes the container via a deferred `ContainerRemove`.
+
+#### Shared execution helpers (`internal/worker/exec.go`)
+- **`RunCommand(ctx, cmd, env, timeoutSecs, onLine, onStart)`**: pure shell execution via `sh -c`; places the process in its own group (`Setpgid`) for clean kills; calls `onLine` for each output line and `onStart(cancelFn)` after `cmd.Start()` so the caller can register a kill callback.
+- **`PrepareTaskAssignment(run, ti, dag)`**: resolves a `TaskInstance` + `DagRun` into a `TaskAssignment` by looking up the task definition, applying `{{item}}` substitution, assembling the full environment slice, and copying container fields (`Image`, `Workdir`, `Volumes`, `Resources`).
 
 ### 5. The Cluster Layer (`internal/cluster/`)
 Nagare can operate as a multi-node cluster using the same binary for both roles. The cluster layer introduces two new components with zero external dependencies — communication happens over plain HTTP JSON.
@@ -65,13 +93,13 @@ Runs on worker-only nodes (launched with `--worker --join <addr>`). Responsibili
 - **`Register()`**: POSTs `WorkerRegistration` on startup.
 - **`Run(ctx)`**: starts a heartbeat loop and a poll loop; blocks until the context is cancelled.
 - **`PollOnce()`**: POSTs a `PollRequest`; if a `TaskAssignmentDTO` is returned, calls `executeAssignment()` in a goroutine.
-- **`executeAssignment()`**: runs the task via `worker.RunCommand()` (the same shell executor used by local workers); streams log batches to the master every 200 ms; reports the final `TaskResult`.
+- **`executeAssignment()`**: converts the `TaskAssignmentDTO` to a `worker.TaskAssignment`, routes it through `worker.NewExecutor()` (the same factory used by local workers), streams log batches to the master every 200 ms, and reports the final `TaskResult`. Container tasks run inside Docker on the remote worker node, not on the master.
 - **`cancelCheckLoop()`**: polls `/api/workers/tasks/{id}/cancel` every 5 s; cancels the local execution context on detection.
 
 #### `internal/worker/exec.go` — shared execution helpers
 Extracted from `worker.go` to be reusable by both local and remote paths:
-- **`RunCommand(ctx, cmd, env, timeoutSecs, onLine, onStart)`**: pure shell execution via `sh -c`; places the process in its own group (`Setpgid`) for clean kills; calls `onLine` for each output line and `onStart` after `cmd.Start()`.
-- **`PrepareTaskAssignment(run, ti, dag)`**: resolves a `TaskInstance` + `DagRun` into a `TaskAssignment` by looking up the task definition, applying `{{item}}` substitution, and assembling the full environment slice.
+- **`RunCommand(ctx, cmd, env, timeoutSecs, onLine, onStart)`**: pure shell execution via `sh -c`; places the process in its own group (`Setpgid`) for clean kills; calls `onLine` for each output line and `onStart(cancelFn)` after `cmd.Start()` to register a kill callback.
+- **`PrepareTaskAssignment(run, ti, dag)`**: resolves a `TaskInstance` + `DagRun` into a `TaskAssignment` by looking up the task definition, applying `{{item}}` substitution, assembling the full environment slice, and copying container fields (`Image`, `Workdir`, `Volumes`, `Resources`).
 
 #### CLI entry points (`main.go`)
 The binary now accepts flags parsed via stdlib `flag`:

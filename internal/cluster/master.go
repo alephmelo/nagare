@@ -249,6 +249,10 @@ func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
 			TimeoutSecs:    assignment.TimeoutSecs,
 			Retries:        assignment.Retries,
 			Attempt:        assignment.Attempt,
+			Image:          assignment.Image,
+			Workdir:        assignment.Workdir,
+			Volumes:        assignment.Volumes,
+			Resources:      assignment.Resources,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(dto)

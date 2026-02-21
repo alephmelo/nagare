@@ -15,6 +15,7 @@ It is designed as a lightweight alternative to heavy data pipeline tools like Ap
 - **Process Management**: Gracefully terminate stuck or runaway DAG runs and individual task instances directly from the UI or via API endpoints.
 - **Dynamic Map Tasks**: Fan-out workflows dynamically using standard output JSON arrays (`type: map`), natively supporting the Unix philosophy.
 - **Worker Pools (Queues)**: Throttle and route specific tasks (e.g. ML inference) to dedicated worker pools via `pool: <queue_name>` and standard global allocations (`nagare.yaml`).
+- **Container Executor**: Sandbox any task inside a Docker image with a single `image:` field. Supports per-step CPU/memory limits, GPU passthrough, and volume bind-mounts — opt-in, fully backward compatible.
 - **Single Binary Web UI**: The entire Next.js + Mantine dashboard is compiled into static files and embedded directly into the Go binary (`//go:embed all:web/out`). Drop the executable onto a server, and you get a production-ready engine + dashboard on port `8080` instantly.
 
 ---
@@ -168,6 +169,48 @@ tasks:
     command: "python train.py"
     pool: gpu          # only dispatched to workers started with --pools gpu
 ```
+
+### 8. Container Executor
+Any task can be sandboxed inside a Docker container by adding an `image:` field. Nagare pulls the image automatically if it is not present locally and streams pull progress to the task log. The container is removed after execution.
+
+```yaml
+id: container_demo
+description: "Run a Python step inside a Docker container"
+schedule: "workflow_dispatch"
+tasks:
+  - id: run_python
+    type: command
+    image: "python:3.12-slim"          # Docker image — triggers the container executor
+    workdir: "/data"                   # Working directory inside the container
+    volumes:
+      - "/tmp/input:/data:ro"          # host_path:container_path[:ro|rw]
+      - "/tmp/output:/out:rw"
+    resources:
+      cpus: "1.0"                      # Fractional CPU limit (maps to --cpus)
+      memory: "512m"                   # Memory limit: b / k / m / g suffix
+      gpus: "all"                      # GPU passthrough: "all" or a positive integer
+    command: |
+      python3 process.py
+```
+
+#### Container field reference
+
+| Field | Required | Description |
+|---|---|---|
+| `image` | yes (to opt in) | Docker image name, e.g. `python:3.12-slim`, `nvidia/cuda:12.3.1-base-ubuntu22.04` |
+| `workdir` | no | Working directory set inside the container (`WORKDIR`) |
+| `volumes` | no | List of bind mounts in `host_path:container_path[:ro\|rw]` format |
+| `resources.cpus` | no | Fractional CPU count, e.g. `"0.5"`, `"4"` |
+| `resources.memory` | no | Memory limit with suffix: `"256m"`, `"2g"`, `"1073741824"` |
+| `resources.gpus` | no | `"all"` to pass through every GPU, or a positive integer string (`"1"`, `"2"`) |
+
+**Rules:**
+- `image` requires `command` to be set.
+- `workdir`, `volumes`, and `resources` all require `image` to be set.
+- Tasks without `image` continue to run via the standard `sh -c` local executor — fully backward compatible.
+- GPU passthrough requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host.
+
+See `dags/container_example.yaml` for a working end-to-end example.
 
 ---
 ## Authentication
