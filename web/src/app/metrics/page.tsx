@@ -423,7 +423,9 @@ export default function MetricsPage() {
                   </Group>
                   <Progress
                     value={d.success_rate * 100}
-                    color={d.success_rate >= 0.95 ? "green" : d.success_rate >= 0.7 ? "yellow" : "red"}
+                    color={
+                      d.success_rate >= 0.95 ? "green" : d.success_rate >= 0.7 ? "yellow" : "red"
+                    }
                     size="sm"
                     radius="sm"
                   />
@@ -489,11 +491,7 @@ export default function MetricsPage() {
                   <Table.Td>
                     <Badge
                       color={
-                        d.success_rate >= 0.95
-                          ? "green"
-                          : d.success_rate >= 0.7
-                          ? "yellow"
-                          : "red"
+                        d.success_rate >= 0.95 ? "green" : d.success_rate >= 0.7 ? "yellow" : "red"
                       }
                       variant="light"
                       size="sm"
@@ -574,11 +572,7 @@ export default function MetricsPage() {
                     <Text size="sm">{fmtMemory(t.peak_memory_bytes)}</Text>
                   </Table.Td>
                   <Table.Td>
-                    <Badge
-                      color={t.exit_code === 0 ? "green" : "red"}
-                      variant="light"
-                      size="sm"
-                    >
+                    <Badge color={t.exit_code === 0 ? "green" : "red"} variant="light" size="sm">
                       {t.exit_code}
                     </Badge>
                   </Table.Td>
@@ -647,11 +641,7 @@ export default function MetricsPage() {
                     <Table.Td>
                       <Badge
                         color={
-                          p.status === "success"
-                            ? "green"
-                            : p.status === "failed"
-                            ? "red"
-                            : "gray"
+                          p.status === "success" ? "green" : p.status === "failed" ? "red" : "gray"
                         }
                         variant="light"
                         size="xs"

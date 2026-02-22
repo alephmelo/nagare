@@ -1,7 +1,13 @@
 nagare
 nagare.db
+
+# Node / npm
+node_modules/
+package-lock.json
 web/node_modules
 web/.next
+
+# Dev tooling
 .air.toml
 tmp/
 *.log

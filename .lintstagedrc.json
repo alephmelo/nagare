@@ -1,0 +1,8 @@
+{
+  "**/*.go": ["bash -c 'golangci-lint run ./...'"],
+  "web/**/*.{ts,tsx}": [
+    "bash -c 'cd web && npx eslint --fix \"$@\"' --",
+    "bash -c 'cd web && npx prettier --write \"$@\"' --"
+  ],
+  "web/**/*.{json,css,md}": ["bash -c 'cd web && npx prettier --write \"$@\"' --"]
+}

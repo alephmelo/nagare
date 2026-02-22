@@ -146,9 +146,11 @@ function AuthGate({ apiKey, onAuthenticated, onClear, children }: AuthGateProps)
     }
 
     probe();
-    return () => { cancelled = true; };
-  // Re-probe when apiKey changes (e.g. after successful login or logout).
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      cancelled = true;
+    };
+    // Re-probe when apiKey changes (e.g. after successful login or logout).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey]);
 
   if (checking) {
@@ -235,13 +237,7 @@ function LoginScreen({ onAuthenticated }: LoginScreenProps) {
                 autoFocus
                 data-autofocus
               />
-              <Button
-                type="submit"
-                fullWidth
-                loading={loading}
-                color="cyan"
-                mt="xs"
-              >
+              <Button type="submit" fullWidth loading={loading} color="cyan" mt="xs">
                 Connect
               </Button>
             </Stack>

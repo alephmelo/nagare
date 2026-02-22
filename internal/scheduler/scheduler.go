@@ -190,7 +190,9 @@ func (s *Scheduler) evaluateRunCompletions() error {
 
 		if !ok {
 			log.Printf("DAG %s not found in memory. Marking run %s as failed", r.DAGID, r.ID)
-			s.store.UpdateDagRunStatus(r.ID, models.RunFailed)
+			if err := s.store.UpdateDagRunStatus(r.ID, models.RunFailed); err != nil {
+				log.Printf("Failed to mark run %s as failed: %v", r.ID, err)
+			}
 			continue
 		}
 
@@ -228,10 +230,14 @@ func (s *Scheduler) evaluateRunCompletions() error {
 
 					if hasChildren {
 						if anyChildFailed {
-							s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+							if err := s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed); err != nil {
+								log.Printf("Failed to update map task %s to failed: %v", ti.ID, err)
+							}
 							tasks[k].Status = models.TaskFailed
 						} else if allChildrenSuccess {
-							s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskSuccess)
+							if err := s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskSuccess); err != nil {
+								log.Printf("Failed to update map task %s to success: %v", ti.ID, err)
+							}
 							tasks[k].Status = models.TaskSuccess
 						}
 					}
@@ -274,10 +280,14 @@ func (s *Scheduler) evaluateRunCompletions() error {
 
 		if anyFailed {
 			log.Printf("Marking run %s as failed", r.ID)
-			s.store.UpdateDagRunStatus(r.ID, models.RunFailed)
+			if err := s.store.UpdateDagRunStatus(r.ID, models.RunFailed); err != nil {
+				log.Printf("Failed to mark run %s as failed: %v", r.ID, err)
+			}
 		} else if allSuccess && len(tasks) > 0 {
 			log.Printf("Marking run %s as success", r.ID)
-			s.store.UpdateDagRunStatus(r.ID, models.RunSuccess)
+			if err := s.store.UpdateDagRunStatus(r.ID, models.RunSuccess); err != nil {
+				log.Printf("Failed to mark run %s as success: %v", r.ID, err)
+			}
 		}
 	}
 
@@ -303,7 +313,9 @@ func (s *Scheduler) PromotePendingTasks() error {
 		if !ok {
 			s.mu.RUnlock()
 			log.Printf("DAG %s not found in memory. Marking pending task %s as failed.", run.DAGID, ti.ID)
-			s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+			if err := s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed); err != nil {
+				log.Printf("Failed to mark task %s as failed: %v", ti.ID, err)
+			}
 			continue
 		}
 
@@ -337,7 +349,9 @@ func (s *Scheduler) PromotePendingTasks() error {
 				mapTaskInst, err := s.store.GetTaskAttempts(ti.RunID, taskDef.MapOver)
 				if err != nil || len(mapTaskInst) == 0 {
 					log.Printf("MapOver task %s not found for run %s", taskDef.MapOver, ti.RunID)
-					s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
+					if err := s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed); err != nil {
+						log.Printf("Failed to mark task %s as failed: %v", ti.ID, err)
+					}
 					continue
 				}
 
@@ -345,11 +359,16 @@ func (s *Scheduler) PromotePendingTasks() error {
 				var items []string
 				if err := json.Unmarshal([]byte(lastAttempt.Output), &items); err != nil {
 					log.Printf("Failed to unmarshal output for map task %s: %v", ti.ID, err)
-					s.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, fmt.Sprintf("failed to parse map_over json array: %v\nOutput was: %s", err, lastAttempt.Output))
+					if err := s.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, fmt.Sprintf("failed to parse map_over json array: %v\nOutput was: %s", err, lastAttempt.Output)); err != nil {
+						log.Printf("Failed to mark task %s as failed: %v", ti.ID, err)
+					}
 					continue
 				}
 
-				s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskRunning)
+				if err := s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskRunning); err != nil {
+					log.Printf("Failed to mark map task %s as running: %v", ti.ID, err)
+					continue
+				}
 
 				now := time.Now()
 				for i, item := range items {
@@ -372,11 +391,15 @@ func (s *Scheduler) PromotePendingTasks() error {
 				}
 
 				if len(items) == 0 {
-					s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskSuccess)
+					if err := s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskSuccess); err != nil {
+						log.Printf("Failed to mark empty map task %s as success: %v", ti.ID, err)
+					}
 				}
 			} else {
 				log.Printf("Promoting task %s to queued", ti.ID)
-				s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskQueued)
+				if err := s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskQueued); err != nil {
+					log.Printf("Failed to promote task %s to queued: %v", ti.ID, err)
+				}
 			}
 		}
 	}
@@ -409,7 +432,7 @@ func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate t
 	}
 
 	if err := s.store.CreateDagRun(run); err != nil {
-		return nil, fmt.Errorf("Failed to create DagRun for %s: %v", dag.ID, err)
+		return nil, fmt.Errorf("failed to create DagRun for %s: %v", dag.ID, err)
 	}
 
 	for _, tDef := range dag.Tasks {
@@ -472,12 +495,15 @@ func (s *Scheduler) KillDagRun(runID string, pool interface {
 	}
 
 	for _, ti := range tasks {
-		if ti.Status == models.TaskRunning || ti.Status == models.TaskQueued {
+		switch ti.Status {
+		case models.TaskRunning, models.TaskQueued:
 			if err := pool.KillTask(ti.ID); err != nil {
 				log.Printf("Failed to kill task %s: %v", ti.ID, err)
 			}
-		} else if ti.Status == models.TaskPending {
-			s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskCancelled)
+		case models.TaskPending:
+			if err := s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskCancelled); err != nil {
+				log.Printf("Failed to cancel task %s: %v", ti.ID, err)
+			}
 		}
 	}
 

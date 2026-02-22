@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bufio"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -208,30 +207,6 @@ func TestStartRoutes_APIKeyProtection(t *testing.T) {
 			t.Errorf("webhooks should be exempt from API key auth, got 401")
 		}
 	})
-}
-
-// readSSELines reads from an SSE response until the channel is closed or the
-// deadline passes. It returns the data values (stripping the "data: " prefix).
-func readSSELines(t *testing.T, resp *http.Response, deadline time.Duration) []string {
-	t.Helper()
-	var lines []string
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "data: ") {
-				lines = append(lines, strings.TrimPrefix(line, "data: "))
-			}
-		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(deadline):
-		t.Error("timed out reading SSE response")
-	}
-	return lines
 }
 
 // TestSSELogsCompletedTask verifies that a completed task's stored output is

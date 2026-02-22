@@ -78,19 +78,47 @@ interface Run {
 function StatusIcon({ status }: { status: string }) {
   switch (status) {
     case "success":
-      return <ThemeIcon color="green" variant="light" size="md" radius="xl"><IconCheck size={14} /></ThemeIcon>;
+      return (
+        <ThemeIcon color="green" variant="light" size="md" radius="xl">
+          <IconCheck size={14} />
+        </ThemeIcon>
+      );
     case "failed":
-      return <ThemeIcon color="red" variant="light" size="md" radius="xl"><IconX size={14} /></ThemeIcon>;
+      return (
+        <ThemeIcon color="red" variant="light" size="md" radius="xl">
+          <IconX size={14} />
+        </ThemeIcon>
+      );
     case "running":
-      return <ThemeIcon color="blue" variant="light" size="md" radius="xl"><Loader size={12} color="blue" /></ThemeIcon>;
+      return (
+        <ThemeIcon color="blue" variant="light" size="md" radius="xl">
+          <Loader size={12} color="blue" />
+        </ThemeIcon>
+      );
     case "queued":
-      return <ThemeIcon color="yellow" variant="light" size="md" radius="xl"><IconClock size={14} /></ThemeIcon>;
+      return (
+        <ThemeIcon color="yellow" variant="light" size="md" radius="xl">
+          <IconClock size={14} />
+        </ThemeIcon>
+      );
     case "up_for_retry":
-      return <ThemeIcon color="orange" variant="light" size="md" radius="xl"><IconClock size={14} /></ThemeIcon>;
+      return (
+        <ThemeIcon color="orange" variant="light" size="md" radius="xl">
+          <IconClock size={14} />
+        </ThemeIcon>
+      );
     case "cancelled":
-      return <ThemeIcon color="gray" variant="light" size="md" radius="xl"><IconPlayerStop size={14} /></ThemeIcon>;
+      return (
+        <ThemeIcon color="gray" variant="light" size="md" radius="xl">
+          <IconPlayerStop size={14} />
+        </ThemeIcon>
+      );
     default:
-      return <ThemeIcon color="gray" variant="light" size="md" radius="xl"><IconAlertCircle size={14} /></ThemeIcon>;
+      return (
+        <ThemeIcon color="gray" variant="light" size="md" radius="xl">
+          <IconAlertCircle size={14} />
+        </ThemeIcon>
+      );
   }
 }
 
@@ -146,11 +174,23 @@ function useSSELogs(taskInstanceID: string, runID: string, active: boolean): str
   return lines.join("\n");
 }
 
-function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: string; onRetry: (taskID: string) => void; onKill: (taskID: string) => void }) {
+function TaskRow({
+  task,
+  runID,
+  onRetry,
+  onKill,
+}: {
+  task: RunTask;
+  runID: string;
+  onRetry: (taskID: string) => void;
+  onKill: (taskID: string) => void;
+}) {
   const isLive = task.Status === "running" || task.Status === "queued";
   // Auto-expand running tasks so the live log stream starts immediately.
   // Failed/retry tasks also start expanded to surface errors.
-  const [expanded, setExpanded] = useState(isLive || task.Status === "failed" || task.Status === "up_for_retry");
+  const [expanded, setExpanded] = useState(
+    isLive || task.Status === "failed" || task.Status === "up_for_retry"
+  );
   const [attempts, setAttempts] = useState<RunTask[]>([]);
   const [loadingAttempts, setLoadingAttempts] = useState(false);
   const liveOutput = useSSELogs(task.ID, runID, isLive && expanded);
@@ -164,8 +204,11 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
     try {
       const res = await apiFetch(`/api/runs/${runID}/tasks/${task.TaskID}/attempts`);
       if (res.ok) setAttempts(await res.json());
-    } catch { /* noop */ }
-    finally { setLoadingAttempts(false); }
+    } catch {
+      /* noop */
+    } finally {
+      setLoadingAttempts(false);
+    }
   };
 
   const handleExpand = () => {
@@ -178,32 +221,54 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case "success": return "green";
-      case "failed": return "red";
-      case "running": return "blue";
-      case "queued": return "yellow";
-      case "up_for_retry": return "orange";
-      case "cancelled": return "gray";
-      default: return "gray";
+      case "success":
+        return "green";
+      case "failed":
+        return "red";
+      case "running":
+        return "blue";
+      case "queued":
+        return "yellow";
+      case "up_for_retry":
+        return "orange";
+      case "cancelled":
+        return "gray";
+      default:
+        return "gray";
     }
   };
 
   return (
-    <Card padding="0" mb="xs" style={{ border: task.Status === "failed" ? "1px solid var(--mantine-color-red-3)" : task.Status === "up_for_retry" ? "1px solid var(--mantine-color-orange-3)" : "1px solid var(--mantine-color-default-border)" }}>
+    <Card
+      padding="0"
+      mb="xs"
+      style={{
+        border:
+          task.Status === "failed"
+            ? "1px solid var(--mantine-color-red-3)"
+            : task.Status === "up_for_retry"
+              ? "1px solid var(--mantine-color-orange-3)"
+              : "1px solid var(--mantine-color-default-border)",
+      }}
+    >
       <Group
         px="md"
         py="sm"
         justify="space-between"
-        style={{ cursor: (isLive || hasOutput || hasMultipleAttempts) ? "pointer" : "default" }}
+        style={{ cursor: isLive || hasOutput || hasMultipleAttempts ? "pointer" : "default" }}
         onClick={handleExpand}
       >
         <Group gap="sm">
           <StatusIcon status={task.Status} />
           <div>
             <Group gap="xs">
-              <Text fw={600} size="sm">{task.TaskID}</Text>
+              <Text fw={600} size="sm">
+                {task.TaskID}
+              </Text>
               {hasMultipleAttempts && (
-                <Badge size="xs" variant="dot" color="orange">Attempt #{task.Attempt}</Badge>
+                <Badge size="xs" variant="dot" color="orange">
+                  Attempt #{task.Attempt}
+                </Badge>
               )}
               {task.Metrics && task.Metrics.DurationMs > 0 && (
                 <Badge size="xs" variant="outline" color="gray">
@@ -217,8 +282,8 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
                   {task.Metrics.PeakMemoryBytes >= 1024 * 1024 * 1024
                     ? `${(task.Metrics.PeakMemoryBytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
                     : task.Metrics.PeakMemoryBytes >= 1024 * 1024
-                    ? `${(task.Metrics.PeakMemoryBytes / (1024 * 1024)).toFixed(1)} MB`
-                    : `${(task.Metrics.PeakMemoryBytes / 1024).toFixed(0)} KB`}
+                      ? `${(task.Metrics.PeakMemoryBytes / (1024 * 1024)).toFixed(1)} MB`
+                      : `${(task.Metrics.PeakMemoryBytes / 1024).toFixed(0)} KB`}
                 </Badge>
               )}
             </Group>
@@ -231,21 +296,23 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
           <Badge color={getStatusColor(task.Status)} variant="light" radius="sm" size="sm">
             {task.Status.toUpperCase()}
           </Badge>
-          {(task.Status === "success" || task.Status === "failed" || task.Status === "cancelled") && (
-             <Tooltip label="Retry Task">
-               <ActionIcon
-                 variant="light"
-                 color="blue"
-                 size="sm"
-                 onClick={(e) => {
-                   e.stopPropagation();
-                   onRetry(task.TaskID);
-                 }}
-               >
-                 <IconPlayerPlay size={12} />
-               </ActionIcon>
-             </Tooltip>
-           )}
+          {(task.Status === "success" ||
+            task.Status === "failed" ||
+            task.Status === "cancelled") && (
+            <Tooltip label="Retry Task">
+              <ActionIcon
+                variant="light"
+                color="blue"
+                size="sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRetry(task.TaskID);
+                }}
+              >
+                <IconPlayerPlay size={12} />
+              </ActionIcon>
+            </Tooltip>
+          )}
           {task.Status === "running" && (
             <Tooltip label="Kill Task">
               <ActionIcon
@@ -272,7 +339,9 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
       <Collapse in={expanded}>
         <Divider />
         {loadingAttempts ? (
-          <Box p="md"><Loader size="xs" /></Box>
+          <Box p="md">
+            <Loader size="xs" />
+          </Box>
         ) : hasMultipleAttempts && attempts.length > 0 ? (
           <Tabs
             defaultValue={String(attempts[attempts.length - 1].Attempt)}
@@ -285,7 +354,9 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
                   value={String(a.Attempt)}
                   leftSection={<StatusIcon status={a.Status} />}
                 >
-                  <Text size="xs" fw={600}>Attempt #{a.Attempt}</Text>
+                  <Text size="xs" fw={600}>
+                    Attempt #{a.Attempt}
+                  </Text>
                 </Tabs.Tab>
               ))}
             </Tabs.List>
@@ -294,12 +365,14 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
                 <Text size="xs" c="dimmed" mb="xs">
                   {new Date(a.UpdatedAt).toLocaleString()}
                 </Text>
-                
+
                 {a.Command && (
                   <Box mb="md">
                     <Group gap="xs" mb="xs">
                       <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-                      <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Command</Text>
+                      <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
+                        Command
+                      </Text>
                     </Group>
                     <Code block>{a.Command}</Code>
                   </Box>
@@ -307,7 +380,9 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
 
                 <Group gap="xs" mb="xs">
                   <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-                  <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Output Log</Text>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
+                    Output Log
+                  </Text>
                 </Group>
 
                 <Code
@@ -320,7 +395,8 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
                     lineHeight: 1.7,
                     backgroundColor: "transparent",
                     border: "none",
-                    color: a.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-default)",
+                    color:
+                      a.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-default)",
                   }}
                 >
                   {a.Output || "No output for this attempt."}
@@ -334,16 +410,27 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
               <Box mb="md">
                 <Group gap="xs" mb="xs">
                   <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-                  <Text size="xs" c="dimmed" tt="uppercase" fw={700}>Command</Text>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
+                    Command
+                  </Text>
                 </Group>
                 <Code block>{task.Command}</Code>
               </Box>
             )}
-            
+
             <Group gap="xs" mb="xs">
               <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
               <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-                Output Log{isLive && <> &mdash; <Text span size="xs" c="blue" fw={400}>streaming live</Text></>}
+                Output Log
+                {isLive && (
+                  <>
+                    {" "}
+                    &mdash;{" "}
+                    <Text span size="xs" c="blue" fw={400}>
+                      streaming live
+                    </Text>
+                  </>
+                )}
               </Text>
             </Group>
             <Code
@@ -356,7 +443,8 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
                 lineHeight: 1.7,
                 backgroundColor: "transparent",
                 border: "none",
-                color: task.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-default)",
+                color:
+                  task.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-default)",
               }}
             >
               {displayOutput || (isLive ? "Waiting for output..." : "No output generated yet.")}
@@ -407,12 +495,24 @@ function RunDetailsContent() {
       const res = await apiFetch(`/api/runs/${id}/tasks/${taskID}/retry`, { method: "POST" });
       if (res.ok) {
         fetchTasks();
-        notifications.show({ title: "Task Requeued", message: `Sent ${taskID} back to pending.`, color: "green" });
+        notifications.show({
+          title: "Task Requeued",
+          message: `Sent ${taskID} back to pending.`,
+          color: "green",
+        });
       } else {
-        notifications.show({ title: "Retry Failed", message: `Could not retry ${taskID}.`, color: "red" });
+        notifications.show({
+          title: "Retry Failed",
+          message: `Could not retry ${taskID}.`,
+          color: "red",
+        });
       }
     } catch {
-      notifications.show({ title: "Network Error", message: "Could not communicate with the API.", color: "red" });
+      notifications.show({
+        title: "Network Error",
+        message: "Could not communicate with the API.",
+        color: "red",
+      });
     }
   };
 
@@ -421,9 +521,15 @@ function RunDetailsContent() {
       const res = await apiFetch(`/api/runs/${id}/tasks/${taskID}/kill`, { method: "POST" });
       if (res.ok) {
         fetchTasks();
-        notifications.show({ title: "Task Terminated", message: `Termination signal sent to ${taskID}.`, color: "orange" });
+        notifications.show({
+          title: "Task Terminated",
+          message: `Termination signal sent to ${taskID}.`,
+          color: "orange",
+        });
       }
-    } catch { /* noop */ }
+    } catch {
+      /* noop */
+    }
   };
 
   const handleKillRun = async () => {
@@ -431,18 +537,29 @@ function RunDetailsContent() {
       const res = await apiFetch(`/api/runs/${id}/kill`, { method: "POST" });
       if (res.ok) {
         fetchTasks();
-        notifications.show({ title: "Run Terminated", message: `Termination signal sent to run ${id}.`, color: "orange" });
+        notifications.show({
+          title: "Run Terminated",
+          message: `Termination signal sent to run ${id}.`,
+          color: "orange",
+        });
       }
-    } catch { /* noop */ }
+    } catch {
+      /* noop */
+    }
   };
 
   const getRunStatusColor = (status: string) => {
     switch (status) {
-      case "success": return "green";
-      case "failed": return "red";
-      case "running": return "blue";
-      case "cancelled": return "gray";
-      default: return "gray";
+      case "success":
+        return "green";
+      case "failed":
+        return "red";
+      case "running":
+        return "blue";
+      case "cancelled":
+        return "gray";
+      default:
+        return "gray";
     }
   };
 
@@ -450,8 +567,8 @@ function RunDetailsContent() {
     ? run.CompletedAt
       ? `${Math.max(1, Math.floor((new Date(run.CompletedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
       : run.Status === "running"
-      ? `${Math.max(1, Math.floor((new Date().getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s elapsed`
-      : "—"
+        ? `${Math.max(1, Math.floor((new Date().getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s elapsed`
+        : "—"
     : null;
 
   const successCount = tasks.filter((t) => t.Status === "success").length;
@@ -462,7 +579,9 @@ function RunDetailsContent() {
   if (!id) {
     return (
       <Center h={200}>
-        <Title order={3} c="dimmed">No Run ID provided</Title>
+        <Title order={3} c="dimmed">
+          No Run ID provided
+        </Title>
       </Center>
     );
   }
@@ -471,7 +590,12 @@ function RunDetailsContent() {
     <>
       <Group justify="space-between" mb="xl">
         <Group>
-          <Button variant="subtle" color="gray" leftSection={<IconArrowLeft size={16} />} onClick={() => router.push("/runs")}>
+          <Button
+            variant="subtle"
+            color="gray"
+            leftSection={<IconArrowLeft size={16} />}
+            onClick={() => router.push("/runs")}
+          >
             Back
           </Button>
           <div>
@@ -483,21 +607,28 @@ function RunDetailsContent() {
                 </Badge>
               )}
             </Group>
-            <Text size="xs" c="dimmed" style={{ fontFamily: "monospace" }}>{id}</Text>
+            <Text size="xs" c="dimmed" style={{ fontFamily: "monospace" }}>
+              {id}
+            </Text>
           </div>
         </Group>
         <Group gap="sm">
           {run && run.Status === "running" && (
-            <Button 
-              variant="light" 
-              color="red" 
-              leftSection={<IconPlayerStop size={16} />} 
+            <Button
+              variant="light"
+              color="red"
+              leftSection={<IconPlayerStop size={16} />}
               onClick={handleKillRun}
             >
               Kill Run
             </Button>
           )}
-          <Button variant="light" leftSection={<IconRefresh size={16} />} onClick={fetchTasks} loading={loading}>
+          <Button
+            variant="light"
+            leftSection={<IconRefresh size={16} />}
+            onClick={fetchTasks}
+            loading={loading}
+          >
             Refresh
           </Button>
         </Group>
@@ -505,45 +636,96 @@ function RunDetailsContent() {
 
       {loading && !run ? (
         <Skeleton height={72} mb="xl" radius="md" />
-      ) : run && (
-        <Card padding="md" mb="xl">
-          <Group grow>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Pipeline</Text>
-              <Text fw={600} size="sm" mt={4}
-                style={{ cursor: "pointer", textDecoration: "underline", textUnderlineOffset: "3px" }}
-                onClick={() => router.push(`/dags?id=${run.DAGID}`)}
-              >
-                {run.DAGID}
-              </Text>
-            </div>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Trigger</Text>
-              <Text fw={600} size="sm" mt={4}>{run.TriggerType === "manual" ? "Manual" : run.TriggerType === "scheduled" ? "Scheduled" : "Triggered"}</Text>
-            </div>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Started At</Text>
-              <Text fw={600} size="sm" mt={4}>{new Date(run.CreatedAt).toLocaleString()}</Text>
-            </div>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Duration</Text>
-              <Text fw={600} size="sm" mt={4}>{elapsedTime ?? "—"}</Text>
-            </div>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Tasks</Text>
-              <Group gap={4} mt={4}>
-                {successCount > 0 && <Badge size="xs" color="green" variant="light">{successCount} ok</Badge>}
-                {failedCount > 0 && <Badge size="xs" color="red" variant="light">{failedCount} failed</Badge>}
-                {runningCount > 0 && <Badge size="xs" color="blue" variant="light">{runningCount} running</Badge>}
-                {retryCount > 0 && <Badge size="xs" color="orange" variant="light">{retryCount} retry</Badge>}
-                {tasks.length === 0 && <Text size="xs" c="dimmed">—</Text>}
-              </Group>
-            </div>
-          </Group>
-        </Card>
+      ) : (
+        run && (
+          <Card padding="md" mb="xl">
+            <Group grow>
+              <div>
+                <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
+                  Pipeline
+                </Text>
+                <Text
+                  fw={600}
+                  size="sm"
+                  mt={4}
+                  style={{
+                    cursor: "pointer",
+                    textDecoration: "underline",
+                    textUnderlineOffset: "3px",
+                  }}
+                  onClick={() => router.push(`/dags?id=${run.DAGID}`)}
+                >
+                  {run.DAGID}
+                </Text>
+              </div>
+              <div>
+                <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
+                  Trigger
+                </Text>
+                <Text fw={600} size="sm" mt={4}>
+                  {run.TriggerType === "manual"
+                    ? "Manual"
+                    : run.TriggerType === "scheduled"
+                      ? "Scheduled"
+                      : "Triggered"}
+                </Text>
+              </div>
+              <div>
+                <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
+                  Started At
+                </Text>
+                <Text fw={600} size="sm" mt={4}>
+                  {new Date(run.CreatedAt).toLocaleString()}
+                </Text>
+              </div>
+              <div>
+                <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
+                  Duration
+                </Text>
+                <Text fw={600} size="sm" mt={4}>
+                  {elapsedTime ?? "—"}
+                </Text>
+              </div>
+              <div>
+                <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
+                  Tasks
+                </Text>
+                <Group gap={4} mt={4}>
+                  {successCount > 0 && (
+                    <Badge size="xs" color="green" variant="light">
+                      {successCount} ok
+                    </Badge>
+                  )}
+                  {failedCount > 0 && (
+                    <Badge size="xs" color="red" variant="light">
+                      {failedCount} failed
+                    </Badge>
+                  )}
+                  {runningCount > 0 && (
+                    <Badge size="xs" color="blue" variant="light">
+                      {runningCount} running
+                    </Badge>
+                  )}
+                  {retryCount > 0 && (
+                    <Badge size="xs" color="orange" variant="light">
+                      {retryCount} retry
+                    </Badge>
+                  )}
+                  {tasks.length === 0 && (
+                    <Text size="xs" c="dimmed">
+                      —
+                    </Text>
+                  )}
+                </Group>
+              </div>
+            </Group>
+          </Card>
+        )
       )}
 
-      <Title order={4} mb="md" c="dimmed">Task Execution Log</Title>
+      <Title order={4} mb="md" c="dimmed">
+        Task Execution Log
+      </Title>
       {loading && tasks.length === 0 ? (
         <Stack gap="xs">
           <Skeleton height={56} radius="md" />
@@ -559,7 +741,13 @@ function RunDetailsContent() {
       ) : (
         <Stack gap="xs">
           {tasks.map((task) => (
-            <TaskRow key={task.ID} task={task} runID={id} onRetry={handleRetry} onKill={handleKillTask} />
+            <TaskRow
+              key={task.ID}
+              task={task}
+              runID={id}
+              onRetry={handleRetry}
+              onKill={handleKillTask}
+            />
           ))}
         </Stack>
       )}
@@ -584,12 +772,18 @@ function RunListContent() {
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case "success": return "green";
-      case "failed": return "red";
-      case "running": return "blue";
-      case "queued": return "yellow";
-      case "cancelled": return "gray";
-      default: return "gray";
+      case "success":
+        return "green";
+      case "failed":
+        return "red";
+      case "running":
+        return "blue";
+      case "queued":
+        return "yellow";
+      case "cancelled":
+        return "gray";
+      default:
+        return "gray";
     }
   };
 
@@ -597,7 +791,9 @@ function RunListContent() {
     try {
       setLoading(true);
       const [runsRes, dagsRes] = await Promise.all([
-        apiFetch(`/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`),
+        apiFetch(
+          `/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`
+        ),
         apiFetch("/api/dags"),
       ]);
       if (runsRes.ok) {
@@ -624,7 +820,11 @@ function RunListContent() {
     try {
       const res = await apiFetch(`/api/runs/${runID}/kill`, { method: "POST" });
       if (res.ok) {
-        notifications.show({ title: "Run Terminated", message: `Termination signal sent to run ${runID}.`, color: "orange" });
+        notifications.show({
+          title: "Run Terminated",
+          message: `Termination signal sent to run ${runID}.`,
+          color: "orange",
+        });
         fetchData();
       }
     } catch (err) {
@@ -647,23 +847,63 @@ function RunListContent() {
             <Table.Thead>
               <Table.Tr>
                 <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Text size="sm" fw={700}>Run ID</Text>
+                  <Text size="sm" fw={700}>
+                    Run ID
+                  </Text>
                 </Table.Th>
                 <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
                   <Menu shadow="md" width={200}>
                     <Menu.Target>
                       <UnstyledButton>
                         <Group gap={4}>
-                          <Text size="sm" fw={700} c={dagFilter !== "all" ? "blue" : undefined}>DAG</Text>
-                          <IconFilter size={14} color={dagFilter !== "all" ? "var(--mantine-color-blue-filled)" : "var(--mantine-color-gray-5)"} />
+                          <Text size="sm" fw={700} c={dagFilter !== "all" ? "blue" : undefined}>
+                            DAG
+                          </Text>
+                          <IconFilter
+                            size={14}
+                            color={
+                              dagFilter !== "all"
+                                ? "var(--mantine-color-blue-filled)"
+                                : "var(--mantine-color-gray-5)"
+                            }
+                          />
                         </Group>
                       </UnstyledButton>
                     </Menu.Target>
                     <Menu.Dropdown>
                       <Menu.Label>Filter by DAG</Menu.Label>
-                      <Menu.Item onClick={() => { setDagFilter("all"); setPage(1); }} leftSection={dagFilter === "all" ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}>All DAGs</Menu.Item>
-                      {dags.map(d => (
-                        <Menu.Item key={d.ID} onClick={() => { setDagFilter(d.ID); setPage(1); }} leftSection={dagFilter === d.ID ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}>{d.ID}</Menu.Item>
+                      <Menu.Item
+                        onClick={() => {
+                          setDagFilter("all");
+                          setPage(1);
+                        }}
+                        leftSection={
+                          dagFilter === "all" ? (
+                            <IconCheck size={14} />
+                          ) : (
+                            <div style={{ width: 14 }} />
+                          )
+                        }
+                      >
+                        All DAGs
+                      </Menu.Item>
+                      {dags.map((d) => (
+                        <Menu.Item
+                          key={d.ID}
+                          onClick={() => {
+                            setDagFilter(d.ID);
+                            setPage(1);
+                          }}
+                          leftSection={
+                            dagFilter === d.ID ? (
+                              <IconCheck size={14} />
+                            ) : (
+                              <div style={{ width: 14 }} />
+                            )
+                          }
+                        >
+                          {d.ID}
+                        </Menu.Item>
                       ))}
                     </Menu.Dropdown>
                   </Menu>
@@ -673,66 +913,181 @@ function RunListContent() {
                     <Menu.Target>
                       <UnstyledButton>
                         <Group gap={4}>
-                          <Text size="sm" fw={700} c={statusFilter !== "all" ? "blue" : undefined}>Status</Text>
-                          <IconFilter size={14} color={statusFilter !== "all" ? "var(--mantine-color-blue-filled)" : "var(--mantine-color-gray-5)"} />
+                          <Text size="sm" fw={700} c={statusFilter !== "all" ? "blue" : undefined}>
+                            Status
+                          </Text>
+                          <IconFilter
+                            size={14}
+                            color={
+                              statusFilter !== "all"
+                                ? "var(--mantine-color-blue-filled)"
+                                : "var(--mantine-color-gray-5)"
+                            }
+                          />
                         </Group>
                       </UnstyledButton>
                     </Menu.Target>
                     <Menu.Dropdown>
                       <Menu.Label>Filter by Status</Menu.Label>
-                      {[{ value: "all", label: "All Statuses" }, { value: "success", label: "Success" }, { value: "failed", label: "Failed" }, { value: "cancelled", label: "Cancelled" }, { value: "running", label: "Running" }].map(opt => (
-                        <Menu.Item key={opt.value} onClick={() => { setStatusFilter(opt.value); setPage(1); }} leftSection={statusFilter === opt.value ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}>{opt.label}</Menu.Item>
+                      {[
+                        { value: "all", label: "All Statuses" },
+                        { value: "success", label: "Success" },
+                        { value: "failed", label: "Failed" },
+                        { value: "cancelled", label: "Cancelled" },
+                        { value: "running", label: "Running" },
+                      ].map((opt) => (
+                        <Menu.Item
+                          key={opt.value}
+                          onClick={() => {
+                            setStatusFilter(opt.value);
+                            setPage(1);
+                          }}
+                          leftSection={
+                            statusFilter === opt.value ? (
+                              <IconCheck size={14} />
+                            ) : (
+                              <div style={{ width: 14 }} />
+                            )
+                          }
+                        >
+                          {opt.label}
+                        </Menu.Item>
                       ))}
                     </Menu.Dropdown>
                   </Menu>
                 </Table.Th>
                 <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Text size="sm" fw={700}>Execution Date</Text>
+                  <Text size="sm" fw={700}>
+                    Execution Date
+                  </Text>
                 </Table.Th>
                 <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
                   <Menu shadow="md" width={150}>
                     <Menu.Target>
                       <UnstyledButton>
                         <Group gap={4}>
-                          <Text size="sm" fw={700} c={triggerFilter !== "all" ? "blue" : undefined}>Trigger</Text>
-                          <IconFilter size={14} color={triggerFilter !== "all" ? "var(--mantine-color-blue-filled)" : "var(--mantine-color-gray-5)"} />
+                          <Text size="sm" fw={700} c={triggerFilter !== "all" ? "blue" : undefined}>
+                            Trigger
+                          </Text>
+                          <IconFilter
+                            size={14}
+                            color={
+                              triggerFilter !== "all"
+                                ? "var(--mantine-color-blue-filled)"
+                                : "var(--mantine-color-gray-5)"
+                            }
+                          />
                         </Group>
                       </UnstyledButton>
                     </Menu.Target>
                     <Menu.Dropdown>
                       <Menu.Label>Filter by Trigger</Menu.Label>
-                      {[{ value: "all", label: "All Triggers" }, { value: "manual", label: "Manual" }, { value: "scheduled", label: "Scheduled" }, { value: "triggered", label: "Triggered" }].map(opt => (
-                        <Menu.Item key={opt.value} onClick={() => { setTriggerFilter(opt.value); setPage(1); }} leftSection={triggerFilter === opt.value ? <IconCheck size={14} /> : <div style={{ width: 14 }} />}>{opt.label}</Menu.Item>
+                      {[
+                        { value: "all", label: "All Triggers" },
+                        { value: "manual", label: "Manual" },
+                        { value: "scheduled", label: "Scheduled" },
+                        { value: "triggered", label: "Triggered" },
+                      ].map((opt) => (
+                        <Menu.Item
+                          key={opt.value}
+                          onClick={() => {
+                            setTriggerFilter(opt.value);
+                            setPage(1);
+                          }}
+                          leftSection={
+                            triggerFilter === opt.value ? (
+                              <IconCheck size={14} />
+                            ) : (
+                              <div style={{ width: 14 }} />
+                            )
+                          }
+                        >
+                          {opt.label}
+                        </Menu.Item>
                       ))}
                     </Menu.Dropdown>
                   </Menu>
                 </Table.Th>
                 <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Text size="sm" fw={700}>Elapsed</Text>
+                  <Text size="sm" fw={700}>
+                    Elapsed
+                  </Text>
                 </Table.Th>
                 <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Text size="sm" fw={700}>Actions</Text>
+                  <Text size="sm" fw={700}>
+                    Actions
+                  </Text>
                 </Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
               {runs.map((run) => (
-                <Table.Tr key={run.ID} onClick={() => router.push(`/runs?id=${run.ID}`)} style={{ cursor: "pointer" }}>
-                  <Table.Td><Text size="sm" fw={500}>{run.ID}</Text></Table.Td>
-                  <Table.Td><Badge variant="outline" color="gray">{run.DAGID}</Badge></Table.Td>
+                <Table.Tr
+                  key={run.ID}
+                  onClick={() => router.push(`/runs?id=${run.ID}`)}
+                  style={{ cursor: "pointer" }}
+                >
+                  <Table.Td>
+                    <Text size="sm" fw={500}>
+                      {run.ID}
+                    </Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Badge variant="outline" color="gray">
+                      {run.DAGID}
+                    </Badge>
+                  </Table.Td>
                   <Table.Td>
                     <Badge color={getStatusColor(run.Status)} variant="light" size="sm" radius="sm">
                       {run.Status.toUpperCase()}
                     </Badge>
                   </Table.Td>
-                  <Table.Td><Text size="sm">{new Date(run.ExecDate).toLocaleString()}</Text></Table.Td>
+                  <Table.Td>
+                    <Text size="sm">{new Date(run.ExecDate).toLocaleString()}</Text>
+                  </Table.Td>
                   <Table.Td>
                     {run.TriggerType === "manual" ? (
-                      <Badge variant="light" color="blue" size="sm" leftSection={<IconUser size={12} style={{ display: "flex", alignItems: "center", marginTop: "2px" }} />}>Manual</Badge>
+                      <Badge
+                        variant="light"
+                        color="blue"
+                        size="sm"
+                        leftSection={
+                          <IconUser
+                            size={12}
+                            style={{ display: "flex", alignItems: "center", marginTop: "2px" }}
+                          />
+                        }
+                      >
+                        Manual
+                      </Badge>
                     ) : run.TriggerType === "scheduled" ? (
-                      <Badge variant="light" color="teal" size="sm" leftSection={<IconRobot size={12} style={{ display: "flex", alignItems: "center", marginTop: "2px" }} />}>Scheduled</Badge>
+                      <Badge
+                        variant="light"
+                        color="teal"
+                        size="sm"
+                        leftSection={
+                          <IconRobot
+                            size={12}
+                            style={{ display: "flex", alignItems: "center", marginTop: "2px" }}
+                          />
+                        }
+                      >
+                        Scheduled
+                      </Badge>
                     ) : (
-                      <Badge variant="light" color="violet" size="sm" leftSection={<IconActivity size={12} style={{ display: "flex", alignItems: "center", marginTop: "2px" }} />}>Triggered</Badge>
+                      <Badge
+                        variant="light"
+                        color="violet"
+                        size="sm"
+                        leftSection={
+                          <IconActivity
+                            size={12}
+                            style={{ display: "flex", alignItems: "center", marginTop: "2px" }}
+                          />
+                        }
+                      >
+                        Triggered
+                      </Badge>
                     )}
                   </Table.Td>
                   <Table.Td>
@@ -740,14 +1095,19 @@ function RunListContent() {
                       {run.CompletedAt
                         ? `${Math.max(1, Math.floor((new Date(run.CompletedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
                         : run.Status === "running"
-                        ? `${Math.max(1, Math.floor((new Date().getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
-                        : "—"}
+                          ? `${Math.max(1, Math.floor((new Date().getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
+                          : "—"}
                     </Text>
                   </Table.Td>
                   <Table.Td>
                     {run.Status === "running" && (
                       <Tooltip label="Kill Run">
-                        <ActionIcon variant="light" color="red" onClick={(e) => handleKillRun(e, run.ID)} size="sm">
+                        <ActionIcon
+                          variant="light"
+                          color="red"
+                          onClick={(e) => handleKillRun(e, run.ID)}
+                          size="sm"
+                        >
                           <IconPlayerStop size={14} />
                         </ActionIcon>
                       </Tooltip>
@@ -766,8 +1126,18 @@ function RunListContent() {
           </Table>
         </Table.ScrollContainer>
         {totalRuns > limit && (
-          <Group justify="center" p="md" style={{ borderTop: "1px solid var(--mantine-color-default-border)" }}>
-            <Pagination total={Math.ceil(totalRuns / limit)} value={page} onChange={setPage} color="cyan" withEdges />
+          <Group
+            justify="center"
+            p="md"
+            style={{ borderTop: "1px solid var(--mantine-color-default-border)" }}
+          >
+            <Pagination
+              total={Math.ceil(totalRuns / limit)}
+              value={page}
+              onChange={setPage}
+              color="cyan"
+              withEdges
+            />
           </Group>
         )}
       </Card>
@@ -786,7 +1156,13 @@ function RunsPageContent() {
 
 export default function RunDetails() {
   return (
-    <Suspense fallback={<Center h={200}><Loader color="blue" /></Center>}>
+    <Suspense
+      fallback={
+        <Center h={200}>
+          <Loader color="blue" />
+        </Center>
+      }
+    >
       <RunsPageContent />
     </Suspense>
   );

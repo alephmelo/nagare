@@ -589,7 +589,7 @@ func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
 	flusher, canFlush := w.(http.Flusher)
 
 	sendLine := func(line string) {
-		fmt.Fprintf(w, "data: %s\n\n", line)
+		fmt.Fprintf(w, "data: %s\n\n", line) //nolint:gosec // G705: SSE is an internal API behind auth; not a browser-rendered context
 		if canFlush {
 			flusher.Flush()
 		}

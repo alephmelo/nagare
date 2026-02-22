@@ -120,7 +120,7 @@ func NewStore(dbPath string) (*Store, error) {
 	store := &Store{db: db}
 
 	if err := store.InitSchema(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
@@ -187,12 +187,12 @@ func (s *Store) InitSchema() error {
 		return err
 	}
 
-	// Active Migrations — ignore errors if columns already exist
-	s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN trigger_type TEXT DEFAULT 'scheduled'`)
-	s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN conf TEXT DEFAULT '{}'`)
-	s.db.Exec(`ALTER TABLE task_instances ADD COLUMN attempt INT NOT NULL DEFAULT 1`)
-	s.db.Exec(`ALTER TABLE task_instances ADD COLUMN item_value TEXT`)
-	s.db.Exec(`ALTER TABLE task_instances ADD COLUMN started_at DATETIME`)
+	// Active Migrations — ignore errors if columns already exist (idempotent ALTER TABLE).
+	_, _ = s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN trigger_type TEXT DEFAULT 'scheduled'`)
+	_, _ = s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN conf TEXT DEFAULT '{}'`)
+	_, _ = s.db.Exec(`ALTER TABLE task_instances ADD COLUMN attempt INT NOT NULL DEFAULT 1`)
+	_, _ = s.db.Exec(`ALTER TABLE task_instances ADD COLUMN item_value TEXT`)
+	_, _ = s.db.Exec(`ALTER TABLE task_instances ADD COLUMN started_at DATETIME`)
 
 	return nil
 }
@@ -357,7 +357,7 @@ func (s *Store) GetSystemStats() (*SystemStats, error) {
 	return stats, nil
 }
 
-// GetActiveDagRuns retrieves all DAG runs currently markes as 'running'
+// GetActiveDagRuns retrieves all DAG runs currently marked as 'running'.
 func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
 	query := `SELECT id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at FROM dag_runs WHERE status = ?`
 	rows, err := s.db.Query(query, RunRunning)

@@ -51,7 +51,7 @@ func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 	log.Println("Booting up Nagare: Lean Airflow in Go")
 
 	// Ensure dags directory exists.
-	if err := os.MkdirAll(dagsDir, 0755); err != nil {
+	if err := os.MkdirAll(dagsDir, 0750); err != nil {
 		log.Fatalf("Failed to create dags directory: %v", err)
 	}
 
@@ -81,7 +81,8 @@ func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 	// 2. Initialize scheduler and load DAGs.
 	sched := scheduler.NewScheduler(store)
 	if err := sched.LoadDAGs(dagsDir); err != nil {
-		log.Fatalf("Failed to load DAGs: %v", err)
+		store.Close()                              //nolint:errcheck // error on close after fatal is non-actionable
+		log.Fatalf("Failed to load DAGs: %v", err) //nolint:gocritic // store.Close() called explicitly above
 	}
 
 	getDAG := func(id string) (*models.DAGDef, bool) {

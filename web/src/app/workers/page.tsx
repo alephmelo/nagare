@@ -82,11 +82,7 @@ export default function WorkersPage() {
     <>
       <Group justify="space-between" mb="xl">
         <Title order={2}>Workers</Title>
-        <Button
-          leftSection={<IconRefresh size={16} />}
-          variant="light"
-          onClick={fetchWorkers}
-        >
+        <Button leftSection={<IconRefresh size={16} />} variant="light" onClick={fetchWorkers}>
           Refresh
         </Button>
       </Group>
@@ -98,9 +94,9 @@ export default function WorkersPage() {
           icon={<IconInfoCircle />}
           title="Cluster mode not active"
         >
-          The workers API is only available when nagare is running with a
-          coordinator attached (i.e. remote workers have joined the cluster).
-          Start nagare with remote workers to see cluster status here.
+          The workers API is only available when nagare is running with a coordinator attached (i.e.
+          remote workers have joined the cluster). Start nagare with remote workers to see cluster
+          status here.
         </Alert>
       ) : loading && workers.length === 0 ? (
         <Stack gap="md">
@@ -172,16 +168,9 @@ export default function WorkersPage() {
               <Card padding="md" mb="xl">
                 <Group gap="xs">
                   {allPools.map((pool) => {
-                    const poolWorkers = workers.filter((w) =>
-                      w.pools.includes(pool)
-                    );
-                    const poolOnline = poolWorkers.filter(
-                      (w) => w.status === "online"
-                    );
-                    const poolCapacity = poolOnline.reduce(
-                      (sum, w) => sum + w.max_tasks,
-                      0
-                    );
+                    const poolWorkers = workers.filter((w) => w.pools.includes(pool));
+                    const poolOnline = poolWorkers.filter((w) => w.status === "online");
+                    const poolCapacity = poolOnline.reduce((sum, w) => sum + w.max_tasks, 0);
                     return (
                       <Tooltip
                         key={pool}
@@ -213,22 +202,34 @@ export default function WorkersPage() {
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
-                      <Text size="sm" fw={700}>Worker ID</Text>
+                      <Text size="sm" fw={700}>
+                        Worker ID
+                      </Text>
                     </Table.Th>
                     <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
-                      <Text size="sm" fw={700}>Hostname</Text>
+                      <Text size="sm" fw={700}>
+                        Hostname
+                      </Text>
                     </Table.Th>
                     <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
-                      <Text size="sm" fw={700}>Status</Text>
+                      <Text size="sm" fw={700}>
+                        Status
+                      </Text>
                     </Table.Th>
                     <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
-                      <Text size="sm" fw={700}>Pools</Text>
+                      <Text size="sm" fw={700}>
+                        Pools
+                      </Text>
                     </Table.Th>
                     <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
-                      <Text size="sm" fw={700}>Capacity</Text>
+                      <Text size="sm" fw={700}>
+                        Capacity
+                      </Text>
                     </Table.Th>
                     <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
-                      <Text size="sm" fw={700}>Last Heartbeat</Text>
+                      <Text size="sm" fw={700}>
+                        Last Heartbeat
+                      </Text>
                     </Table.Th>
                   </Table.Tr>
                 </Table.Thead>
@@ -251,9 +252,15 @@ export default function WorkersPage() {
                           radius="sm"
                           leftSection={
                             worker.status === "online" ? (
-                              <IconCircleCheck size={12} style={{ display: "flex", alignItems: "center", marginTop: "2px" }} />
+                              <IconCircleCheck
+                                size={12}
+                                style={{ display: "flex", alignItems: "center", marginTop: "2px" }}
+                              />
                             ) : (
-                              <IconCircleX size={12} style={{ display: "flex", alignItems: "center", marginTop: "2px" }} />
+                              <IconCircleX
+                                size={12}
+                                style={{ display: "flex", alignItems: "center", marginTop: "2px" }}
+                              />
                             )
                           }
                         >

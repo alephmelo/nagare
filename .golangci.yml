@@ -1,0 +1,77 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: none
+  enable:
+    - errcheck       # Unhandled errors
+    - staticcheck    # Bugs, performance, simplifications
+    - govet          # Suspicious constructs
+    - ineffassign    # Assignments to variables never used
+    - unused         # Dead code
+    - gocritic       # Style, performance, and diagnostic hints
+    - gosec          # Security issues
+    - misspell       # Common spelling mistakes
+    - gocyclo        # Cyclomatic complexity
+    - bodyclose      # HTTP response bodies must be closed
+
+  settings:
+    gocyclo:
+      min-complexity: 41
+
+    gocritic:
+      disabled-checks:
+        - appendAssign
+        - ifElseChain    # Prefers switch statements — deferred improvement
+
+    gosec:
+      excludes:
+        - G304  # File path from variable — intentional (DAG loading, config)
+        - G204  # Subprocess launched with variable — intentional (sh -c execution)
+        - G117  # Secret field naming — false positive on config structs
+        - G114  # HTTP server without timeouts — known; tracked separately
+        - G704  # SSRF via taint analysis — false positive for internal cluster calls
+        - G601  # Implicit memory aliasing — Go 1.22+ fix
+        - G115  # Integer overflow conversion — acceptable precision
+        - G306  # File permissions in tests — acceptable
+        - G301  # Directory permissions 0755 — acceptable for DAG dirs
+        - G104  # Unhandled errors — covered by errcheck; duplicate noise
+
+  exclusions:
+    rules:
+      # Test files: ignore unhandled errors in setup/teardown helpers
+      - path: "_test\\.go"
+        linters:
+          - errcheck
+          - gosec
+
+      # defer rows.Close() / defer cli.Close() / defer logReader.Close() — errors
+      # from deferred closes on read paths are non-actionable
+      - linters:
+          - errcheck
+        text: "\\.Close"
+
+      # json.NewEncoder(w).Encode — errors are swallowed on HTTP responses where
+      # the status code has already been written; these are non-actionable
+      - linters:
+          - errcheck
+        text: "Encoder.*Encode"
+
+      # fmt.Fprintf to HTTP ResponseWriter — write errors mean the connection is
+      # already broken; non-actionable
+      - linters:
+          - errcheck
+        text: "fmt\\.Fprintf"
+
+      # Fire-and-forget status updates in worker / cluster — these are best-effort
+      # writes in error-recovery code paths where a secondary error is not actionable
+      - path: "internal/(worker|cluster)/"
+        linters:
+          - errcheck
+        text: "UpdateTaskInstanceStatus|UpdateTaskInstanceStatusAndOutput|SetTaskStartedAt"
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

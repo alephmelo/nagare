@@ -248,9 +248,9 @@ func (rw *RemoteWorker) executeAssignment(ctx context.Context, a TaskAssignmentD
 		inst, checkErr := rw.getCancelStatus(a.TaskInstanceID)
 		if checkErr == nil && inst {
 			reportStatus = "cancelled"
-		} else if result.TimedOut {
-			reportStatus = "failed" // timeout = failed with timed_out flag
 		} else {
+			// Covers both timeout and general failure; TimedOut flag in TaskResult
+			// communicates the distinction to the master.
 			reportStatus = "failed"
 		}
 	}

@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  test-and-build:
-    name: Test & Build
+  backend:
+    name: Backend
     runs-on: ubuntu-latest
 
     steps:
@@ -21,6 +21,39 @@ jobs:
           go-version: "1.20"
           cache: true
 
+      - name: Install GCC (required for CGO / go-sqlite3)
+        run: sudo apt-get install -y gcc
+
+      - name: go vet
+        run: go vet ./...
+        env:
+          CGO_ENABLED: "1"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.10.1
+        env:
+          CGO_ENABLED: "1"
+
+      - name: Run Go tests (with race detector)
+        run: go test -race ./...
+        env:
+          CGO_ENABLED: "1"
+
+      - name: Build binary
+        run: go build -o nagare .
+        env:
+          CGO_ENABLED: "1"
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -32,19 +65,22 @@ jobs:
         working-directory: web
         run: npm ci
 
+      - name: Lint
+        working-directory: web
+        run: npm run lint
+
+      - name: Type check
+        working-directory: web
+        run: npx tsc --noEmit
+
+      - name: Check formatting
+        working-directory: web
+        run: npm run format:check
+
+      - name: Run frontend tests
+        working-directory: web
+        run: npm run test:ci
+
       - name: Build frontend
         working-directory: web
         run: npm run build
-
-      - name: Install GCC (required for CGO / go-sqlite3)
-        run: sudo apt-get install -y gcc
-
-      - name: Run Go tests
-        run: go test ./...
-        env:
-          CGO_ENABLED: "1"
-
-      - name: Build binary
-        run: go build -o nagare .
-        env:
-          CGO_ENABLED: "1"

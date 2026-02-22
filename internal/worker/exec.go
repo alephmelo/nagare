@@ -108,7 +108,7 @@ func killLocalProcess(cmd *exec.Cmd, pr *os.File) {
 	if cmd != nil && cmd.Process != nil {
 		pgid := cmd.Process.Pid
 		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-			cmd.Process.Kill()
+			_ = cmd.Process.Kill() // best-effort fallback; original error is non-recoverable
 		}
 	}
 	if pr != nil {

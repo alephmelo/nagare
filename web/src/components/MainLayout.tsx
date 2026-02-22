@@ -1,8 +1,31 @@
 "use client";
 
-import { AppShell, Burger, Group, Title, ActionIcon, useMantineColorScheme, useComputedColorScheme, Text, Container, Box, NavLink, Tooltip } from "@mantine/core";
+import {
+  AppShell,
+  Burger,
+  Group,
+  Title,
+  ActionIcon,
+  useMantineColorScheme,
+  useComputedColorScheme,
+  Text,
+  Container,
+  Box,
+  NavLink,
+  Tooltip,
+} from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { IconActivity, IconSun, IconMoon, IconDashboard, IconSitemap, IconHistory, IconLogout, IconServer, IconChartBar } from "@tabler/icons-react";
+import {
+  IconActivity,
+  IconSun,
+  IconMoon,
+  IconDashboard,
+  IconSitemap,
+  IconHistory,
+  IconLogout,
+  IconServer,
+  IconChartBar,
+} from "@tabler/icons-react";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAuthContext } from "./AuthProvider";
@@ -12,8 +35,9 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   const { setColorScheme } = useMantineColorScheme();
   const computedColorScheme = useComputedColorScheme("dark", { getInitialValueInEffect: true });
   const [mounted, setMounted] = useState(false);
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { setMounted(true); }, []);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
   const router = useRouter();
   const pathname = usePathname();
   const { apiKey, clearApiKey } = useAuthContext();
@@ -33,7 +57,9 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
           <Group>
             <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" />
             <IconActivity size={28} color="cyan" />
-            <Title order={3} fw={700} c="cyan">Nagare</Title>
+            <Title order={3} fw={700} c="cyan">
+              Nagare
+            </Title>
           </Group>
           <Group gap="xs">
             <ActionIcon
@@ -42,9 +68,15 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
               size="lg"
               aria-label="Toggle color scheme"
             >
-              {mounted
-                ? (computedColorScheme === "dark" ? <IconSun size={18} /> : <IconMoon size={18} />)
-                : <IconMoon size={18} />}
+              {mounted ? (
+                computedColorScheme === "dark" ? (
+                  <IconSun size={18} />
+                ) : (
+                  <IconMoon size={18} />
+                )
+              ) : (
+                <IconMoon size={18} />
+              )}
             </ActionIcon>
           </Group>
         </Group>
@@ -144,9 +176,7 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
       </AppShell.Navbar>
 
       <AppShell.Main>
-        <Container fluid>
-          {children}
-        </Container>
+        <Container fluid>{children}</Container>
       </AppShell.Main>
     </AppShell>
   );
