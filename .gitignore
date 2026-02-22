@@ -11,3 +11,5 @@ web/.next
 .air.toml
 tmp/
 *.log
+*.db-shm
+*.db-wal
