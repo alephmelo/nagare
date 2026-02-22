@@ -45,7 +45,7 @@ jobs:
           CGO_ENABLED: "1"
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.10.1
         env:
