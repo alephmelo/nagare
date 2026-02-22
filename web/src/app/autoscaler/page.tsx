@@ -406,7 +406,7 @@ export default function AutoscalerPage() {
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {pools.length === 0 ? (
+                  {pools.length === 0 && (
                     <Table.Tr>
                       <Table.Td colSpan={5}>
                         <Text c="dimmed" ta="center" py="md">
@@ -414,13 +414,10 @@ export default function AutoscalerPage() {
                         </Text>
                       </Table.Td>
                     </Table.Tr>
-                  ) : (
-                    <>
-                      {pools.map((p) => (
-                        <PoolRow key={p.pool} p={p} />
-                      ))}
-                    </>
                   )}
+                  {pools.map((p) => (
+                    <PoolRow key={p.pool} p={p} />
+                  ))}
                 </Table.Tbody>
               </Table>
             </Table.ScrollContainer>
@@ -453,7 +450,7 @@ export default function AutoscalerPage() {
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {sortedInstances.length === 0 ? (
+                  {sortedInstances.length === 0 && (
                     <Table.Tr>
                       <Table.Td colSpan={7}>
                         <Text c="dimmed" ta="center" py="md">
@@ -461,13 +458,10 @@ export default function AutoscalerPage() {
                         </Text>
                       </Table.Td>
                     </Table.Tr>
-                  ) : (
-                    <>
-                      {sortedInstances.map((inst) => (
-                        <InstanceRow key={inst.id} inst={inst} />
-                      ))}
-                    </>
                   )}
+                  {sortedInstances.map((inst) => (
+                    <InstanceRow key={inst.id} inst={inst} />
+                  ))}
                 </Table.Tbody>
               </Table>
             </Table.ScrollContainer>
