@@ -177,26 +177,35 @@ function useSSELogs(taskInstanceID: string, runID: string, active: boolean): str
 function TaskRow({
   task,
   runID,
+  expanded,
+  onToggleExpand,
   onRetry,
   onKill,
 }: {
   task: RunTask;
   runID: string;
+  expanded: boolean;
+  onToggleExpand: () => void;
   onRetry: (taskID: string) => void;
   onKill: (taskID: string) => void;
 }) {
-  const isLive = task.Status === "running" || task.Status === "queued";
-  // Auto-expand running tasks so the live log stream starts immediately.
-  // Failed/retry tasks also start expanded to surface errors.
-  const [expanded, setExpanded] = useState(
-    isLive || task.Status === "failed" || task.Status === "up_for_retry"
-  );
+  // Only open an SSE stream for tasks that are actively running — queued tasks
+  // produce no output yet and each open stream costs a server connection.
+  const isLive = task.Status === "running";
   const [attempts, setAttempts] = useState<RunTask[]>([]);
   const [loadingAttempts, setLoadingAttempts] = useState(false);
   const liveOutput = useSSELogs(task.ID, runID, isLive && expanded);
   const displayOutput = isLive ? liveOutput : task.Output;
   const hasOutput = displayOutput && displayOutput.trim().length > 0;
   const hasMultipleAttempts = task.Attempt > 1;
+  const logRef = useRef<HTMLElement | null>(null);
+
+  // Auto-scroll the log pane to the bottom whenever new output arrives.
+  useEffect(() => {
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [displayOutput]);
 
   const fetchAttempts = async () => {
     if (attempts.length > 0 || task.Attempt <= 1) return;
@@ -211,11 +220,12 @@ function TaskRow({
     }
   };
 
+  const isExpandable = isLive || task.Status === "queued" || hasOutput || hasMultipleAttempts;
+
   const handleExpand = () => {
-    if (isLive || hasOutput || hasMultipleAttempts) {
-      const next = !expanded;
-      setExpanded(next);
-      if (next) fetchAttempts();
+    if (isExpandable) {
+      if (!expanded) fetchAttempts();
+      onToggleExpand();
     }
   };
 
@@ -255,7 +265,7 @@ function TaskRow({
         px="md"
         py="sm"
         justify="space-between"
-        style={{ cursor: isLive || hasOutput || hasMultipleAttempts ? "pointer" : "default" }}
+        style={{ cursor: isExpandable ? "pointer" : "default" }}
         onClick={handleExpand}
       >
         <Group gap="sm">
@@ -328,7 +338,7 @@ function TaskRow({
               </ActionIcon>
             </Tooltip>
           )}
-          {(isLive || hasOutput || hasMultipleAttempts) && (
+          {isExpandable && (
             <ActionIcon variant="transparent" size="sm" color="dimmed">
               {expanded ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
             </ActionIcon>
@@ -434,6 +444,7 @@ function TaskRow({
               </Text>
             </Group>
             <Code
+              ref={logRef}
               block
               style={{
                 whiteSpace: "pre-wrap",
@@ -463,20 +474,39 @@ function RunDetailsContent() {
   const [tasks, setTasks] = useState<RunTask[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [loading, setLoading] = useState(true);
+  // Lifted expanded state keyed by task instance ID — prevents poll-driven
+  // re-renders from resetting the open/closed state of each TaskRow.
+  const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>({});
+
+  const TERMINAL = new Set(["success", "failed", "cancelled"]);
 
   const fetchTasks = useCallback(async () => {
     if (!id) return;
     try {
-      const [tasksRes, runsRes] = await Promise.all([
+      const [tasksRes, runRes] = await Promise.all([
         apiFetch(`/api/runs/${id}/tasks`),
-        apiFetch(`/api/runs?page=1&limit=100`),
+        apiFetch(`/api/runs/${id}`),
       ]);
-      if (tasksRes.ok) setTasks(await tasksRes.json());
-      if (runsRes.ok) {
-        const runsData = await runsRes.json();
-        const matchedRun = (runsData.data || []).find((r: Run) => r.ID === id);
-        if (matchedRun) setRun(matchedRun);
+      if (tasksRes.ok) {
+        const newTasks: RunTask[] = await tasksRes.json();
+        setTasks(newTasks);
+        // Auto-expand running/failed/retry tasks on first load (only when not
+        // already tracked in the map so we don't clobber user-toggled state).
+        setExpandedMap((prev) => {
+          const next = { ...prev };
+          for (const t of newTasks) {
+            if (!(t.ID in next)) {
+              next[t.ID] =
+                t.Status === "running" ||
+                t.Status === "queued" ||
+                t.Status === "failed" ||
+                t.Status === "up_for_retry";
+            }
+          }
+          return next;
+        });
       }
+      if (runRes.ok) setRun(await runRes.json());
     } catch (err) {
       console.error("Failed to fetch tasks", err);
     } finally {
@@ -486,9 +516,13 @@ function RunDetailsContent() {
 
   useEffect(() => {
     fetchTasks();
-    const interval = setInterval(fetchTasks, 3000);
+    const interval = setInterval(() => {
+      // Stop polling once the run has reached a terminal state.
+      if (run && TERMINAL.has(run.Status)) return;
+      fetchTasks();
+    }, 5000);
     return () => clearInterval(interval);
-  }, [fetchTasks]);
+  }, [fetchTasks, run]);
 
   const handleRetry = async (taskID: string) => {
     try {
@@ -745,6 +779,10 @@ function RunDetailsContent() {
               key={task.ID}
               task={task}
               runID={id}
+              expanded={!!expandedMap[task.ID]}
+              onToggleExpand={() =>
+                setExpandedMap((prev) => ({ ...prev, [task.ID]: !prev[task.ID] }))
+              }
               onRetry={handleRetry}
               onKill={handleKillTask}
             />

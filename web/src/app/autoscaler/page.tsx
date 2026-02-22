@@ -173,7 +173,15 @@ export default function AutoscalerPage() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 5000);
+    // If the autoscaler is not configured the first fetch will set notConfigured=true.
+    // We use a ref so the interval callback can see the latest value without
+    // being re-created (which would restart the timer on every render).
+    const interval = setInterval(() => {
+      setNotConfigured((nc) => {
+        if (!nc) fetchData();
+        return nc;
+      });
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 

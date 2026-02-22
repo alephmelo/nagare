@@ -264,6 +264,25 @@ func (s *Server) handleGetStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
+	// Route: GET /api/runs/{runID}
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	runID := parts[3]
+
+	run, err := s.store.GetDagRun(runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(run)
+}
+
 func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 	// Simple path parameter extraction (e.g. /api/runs/run_1/tasks)
 	parts := strings.Split(r.URL.Path, "/")
@@ -870,6 +889,11 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 		}
 		if strings.HasSuffix(r.URL.Path, "/tasks") {
 			s.handleGetRunTasks(w, r)
+			return
+		}
+		// GET /api/runs/{id} — exactly 4 path segments: ["", "api", "runs", "{id}"]
+		if r.Method == http.MethodGet && len(strings.Split(strings.TrimSuffix(r.URL.Path, "/"), "/")) == 4 {
+			s.handleGetRun(w, r)
 			return
 		}
 		http.NotFound(w, r)
