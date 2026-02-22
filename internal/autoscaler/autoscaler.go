@@ -245,17 +245,38 @@ func (a *Autoscaler) evaluateScaleUp(ctx context.Context, poolStats map[string]P
 		log.Printf("Autoscaler: scaling up pool %s (queued=%d, threshold=%d) → instance %s",
 			pool, stats.QueuedTasks, threshold, instanceID)
 
+		// Pre-register the placeholder instance BEFORE calling SpinUp so that
+		// TryClaimWorker can find it the moment the container boots and sends
+		// its registration POST to the master.  Without this, a fast-starting
+		// container races against SpinUp returning and ends up unmatched.
+		placeholder := WorkerInstance{
+			ID:        instanceID,
+			Pools:     req.Pools,
+			Status:    InstanceProvisioning,
+			CreatedAt: time.Now(),
+		}
+		a.mu.Lock()
+		a.instances[instanceID] = &placeholder
+		a.lastScaleUp[pool] = time.Now()
+		cloudCount++
+		a.mu.Unlock()
+
 		inst, err := a.provider.SpinUp(ctx, req)
 		if err != nil {
 			log.Printf("Autoscaler: SpinUp failed for pool %s: %v", pool, err)
+			// Roll back the placeholder so it doesn't permanently block the cap.
+			a.mu.Lock()
+			delete(a.instances, instanceID)
+			cloudCount--
+			a.mu.Unlock()
 			continue
 		}
 
-		// Track the new instance.
+		// Update the placeholder with the real provider ID returned by SpinUp.
 		a.mu.Lock()
-		a.instances[inst.ID] = &inst
-		a.lastScaleUp[pool] = time.Now()
-		cloudCount++ // update local count
+		if p, ok := a.instances[instanceID]; ok {
+			p.ProviderID = inst.ProviderID
+		}
 		a.mu.Unlock()
 
 		// Persist to the database for crash recovery.
@@ -272,9 +293,31 @@ func (a *Autoscaler) evaluateScaleDown(ctx context.Context, poolStats map[string
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Provisioning timeout: if an instance has been in provisioning state for
+	// too long without a worker claiming it, the container likely failed to
+	// start or connect.  Terminate it so it doesn't block the cloud cap.
+	const provisioningTimeout = 5 * time.Minute
+
 	for id, inst := range a.instances {
+		if inst.Status == InstanceProvisioning {
+			if time.Since(inst.CreatedAt) > provisioningTimeout {
+				log.Printf("Autoscaler: instance %s stuck in provisioning for %s — terminating",
+					id, time.Since(inst.CreatedAt).Round(time.Second))
+				if inst.ProviderID != "" {
+					if err := a.provider.SpinDown(ctx, inst.ProviderID); err != nil {
+						log.Printf("Autoscaler: SpinDown failed for stuck instance %s: %v", id, err)
+					}
+				}
+				if err := a.instanceStore.TerminateInstance(id, time.Now()); err != nil {
+					log.Printf("Autoscaler: warning: failed to terminate stuck instance %s: %v", id, err)
+				}
+				delete(a.instances, id)
+				delete(a.idleSince, id)
+			}
+			// Either way, don't try to idle-down a provisioning instance.
+			continue
+		}
 		if inst.Status != InstanceRunning {
-			// Don't terminate instances that are still booting.
 			continue
 		}
 
