@@ -320,76 +320,64 @@ export default function AutoscalerPage() {
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {pools.length === 0 ? (
-                    <Table.Tr>
-                      <Table.Td colSpan={5}>
-                        <Text c="dimmed" ta="center" py="md">
-                          No pool data available.
-                        </Text>
-                      </Table.Td>
-                    </Table.Tr>
-                  ) : (
-                    pools.map((p) => {
-                      // Treat 3 as a sensible visual max for the bar when no threshold is surfaced.
-                      const barValue = Math.min(
-                        (p.queued_tasks / Math.max(p.queued_tasks, 5)) * 100,
-                        100
-                      );
-                      const pressure =
-                        p.queued_tasks === 0 ? "green" : p.queued_tasks < 3 ? "yellow" : "red";
-                      return (
-                        <Table.Tr key={p.pool}>
-                          <Table.Td>
-                            <Group gap={6}>
-                              {[
-                                <Badge
-                                  key="pool-name"
-                                  variant="outline"
-                                  color="teal"
-                                  size="sm"
-                                  radius="sm"
-                                >
+                  <>
+                    {pools.length === 0 ? (
+                      <Table.Tr>
+                        <Table.Td colSpan={5}>
+                          <Text c="dimmed" ta="center" py="md">
+                            No pool data available.
+                          </Text>
+                        </Table.Td>
+                      </Table.Tr>
+                    ) : (
+                      pools.map((p) => {
+                        // Treat 3 as a sensible visual max for the bar when no threshold is surfaced.
+                        const barValue = Math.min(
+                          (p.queued_tasks / Math.max(p.queued_tasks, 5)) * 100,
+                          100
+                        );
+                        const pressure =
+                          p.queued_tasks === 0 ? "green" : p.queued_tasks < 3 ? "yellow" : "red";
+                        return (
+                          <Table.Tr key={p.pool}>
+                            <Table.Td>
+                              <Group gap={6}>
+                                <Badge variant="outline" color="teal" size="sm" radius="sm">
                                   {p.pool}
-                                </Badge>,
-                                p.needs_gpu && (
-                                  <Badge
-                                    key="gpu"
-                                    variant="outline"
-                                    color="violet"
-                                    size="sm"
-                                    radius="sm"
-                                  >
+                                </Badge>
+                                {p.needs_gpu && (
+                                  <Badge variant="outline" color="violet" size="sm" radius="sm">
                                     GPU
                                   </Badge>
-                                ),
-                              ]}
-                            </Group>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="sm" fw={p.queued_tasks > 0 ? 600 : 400}>
-                              {p.queued_tasks}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="sm">{p.active_workers}</Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="sm" c={p.cloud_workers > 0 ? "cyan" : "dimmed"}>
-                              {p.cloud_workers}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td style={{ minWidth: 120 }}>
-                            <Tooltip
-                              label={`${p.queued_tasks} task${p.queued_tasks !== 1 ? "s" : ""} queued`}
-                              position="right"
-                            >
-                              <Progress value={barValue} color={pressure} size="sm" radius="xl" />
-                            </Tooltip>
-                          </Table.Td>
-                        </Table.Tr>
-                      );
-                    })
-                  )}
+                                )}
+                              </Group>
+                            </Table.Td>
+                            <Table.Td>
+                              <Text size="sm" fw={p.queued_tasks > 0 ? 600 : 400}>
+                                {p.queued_tasks}
+                              </Text>
+                            </Table.Td>
+                            <Table.Td>
+                              <Text size="sm">{p.active_workers}</Text>
+                            </Table.Td>
+                            <Table.Td>
+                              <Text size="sm" c={p.cloud_workers > 0 ? "cyan" : "dimmed"}>
+                                {p.cloud_workers}
+                              </Text>
+                            </Table.Td>
+                            <Table.Td style={{ minWidth: 120 }}>
+                              <Tooltip
+                                label={`${p.queued_tasks} task${p.queued_tasks !== 1 ? "s" : ""} queued`}
+                                position="right"
+                              >
+                                <Progress value={barValue} color={pressure} size="sm" radius="xl" />
+                              </Tooltip>
+                            </Table.Td>
+                          </Table.Tr>
+                        );
+                      })
+                    )}
+                  </>
                 </Table.Tbody>
               </Table>
             </Table.ScrollContainer>
@@ -422,66 +410,72 @@ export default function AutoscalerPage() {
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {sortedInstances.length === 0 ? (
-                    <Table.Tr>
-                      <Table.Td colSpan={7}>
-                        <Text c="dimmed" ta="center" py="md">
-                          No cloud instances provisioned yet.
-                        </Text>
-                      </Table.Td>
-                    </Table.Tr>
-                  ) : (
-                    sortedInstances.map((inst) => (
-                      <Table.Tr key={inst.id}>
-                        <Table.Td>
-                          <Text size="sm" ff="monospace">
-                            {inst.id}
-                          </Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm" ff="monospace" c="dimmed">
-                            {inst.provider_id || "—"}
-                          </Text>
-                        </Table.Td>
-                        <Table.Td>{instanceStatusBadge(inst.status)}</Table.Td>
-                        <Table.Td>
-                          <Group gap={4}>
-                            {(inst.pools ?? []).map((pool) => (
-                              <Badge
-                                key={pool}
-                                variant="outline"
-                                color="teal"
-                                size="sm"
-                                radius="sm"
-                              >
-                                {pool}
-                              </Badge>
-                            ))}
-                          </Group>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm" ff="monospace" c={inst.worker_id ? undefined : "dimmed"}>
-                            {inst.worker_id || "not yet registered"}
-                          </Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Group gap={4}>
-                            <IconClockHour4 size={14} color="var(--mantine-color-dimmed)" />
-                            <Text size="sm" c="dimmed">
-                              {inst.terminated_at
-                                ? uptime(inst.created_at) + " (terminated)"
-                                : uptime(inst.created_at)}
-                            </Text>
-                          </Group>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm" c={inst.cost_per_hour > 0 ? undefined : "dimmed"}>
-                            {inst.cost_per_hour > 0 ? `$${inst.cost_per_hour.toFixed(3)}` : "—"}
+                  <>
+                    {sortedInstances.length === 0 ? (
+                      <Table.Tr>
+                        <Table.Td colSpan={7}>
+                          <Text c="dimmed" ta="center" py="md">
+                            No cloud instances provisioned yet.
                           </Text>
                         </Table.Td>
                       </Table.Tr>
-                    ))
-                  )}
+                    ) : (
+                      sortedInstances.map((inst) => (
+                        <Table.Tr key={inst.id}>
+                          <Table.Td>
+                            <Text size="sm" ff="monospace">
+                              {inst.id}
+                            </Text>
+                          </Table.Td>
+                          <Table.Td>
+                            <Text size="sm" ff="monospace" c="dimmed">
+                              {inst.provider_id || "—"}
+                            </Text>
+                          </Table.Td>
+                          <Table.Td>{instanceStatusBadge(inst.status)}</Table.Td>
+                          <Table.Td>
+                            <Group gap={4}>
+                              {(inst.pools ?? []).map((pool) => (
+                                <Badge
+                                  key={pool}
+                                  variant="outline"
+                                  color="teal"
+                                  size="sm"
+                                  radius="sm"
+                                >
+                                  {pool}
+                                </Badge>
+                              ))}
+                            </Group>
+                          </Table.Td>
+                          <Table.Td>
+                            <Text
+                              size="sm"
+                              ff="monospace"
+                              c={inst.worker_id ? undefined : "dimmed"}
+                            >
+                              {inst.worker_id || "not yet registered"}
+                            </Text>
+                          </Table.Td>
+                          <Table.Td>
+                            <Group gap={4}>
+                              <IconClockHour4 size={14} color="var(--mantine-color-dimmed)" />
+                              <Text size="sm" c="dimmed">
+                                {inst.terminated_at
+                                  ? uptime(inst.created_at) + " (terminated)"
+                                  : uptime(inst.created_at)}
+                              </Text>
+                            </Group>
+                          </Table.Td>
+                          <Table.Td>
+                            <Text size="sm" c={inst.cost_per_hour > 0 ? undefined : "dimmed"}>
+                              {inst.cost_per_hour > 0 ? `$${inst.cost_per_hour.toFixed(3)}` : "—"}
+                            </Text>
+                          </Table.Td>
+                        </Table.Tr>
+                      ))
+                    )}
+                  </>
                 </Table.Tbody>
               </Table>
             </Table.ScrollContainer>
