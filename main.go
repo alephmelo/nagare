@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"embed"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -23,8 +22,8 @@ import (
 	"github.com/alephmelo/nagare/internal/worker"
 )
 
-//go:embed all:web/out
-var frontendEmbedFS embed.FS
+// frontendEmbedFS is declared in frontend_embed.go (normal builds) or
+// frontend_stub.go (nofrontend tag — worker-only Docker image builds).
 
 func main() {
 	// ----- CLI flags ---------------------------------------------------------

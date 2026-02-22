@@ -1,7 +1,7 @@
 # Global configuration for Nagare
 
 worker_pools:
-  default: 4
+  default: 1   # keep low so the autoscaler stress test actually queues tasks
   gpu_workers: 1
 
 cors:
@@ -57,9 +57,12 @@ autoscaler:
     image: "nagare:latest"
 
     # Network mode for spawned worker containers.
-    # "host" lets workers reach the master at localhost:8080.
-    # Use a named bridge network when running master inside Docker too.
-    network: "host"
+    # On Linux "host" lets workers reach the master at localhost:8080.
+    # On macOS (Docker Desktop) "host" networking is not supported — use
+    # "bridge" and set master_addr to host.docker.internal so containers
+    # can reach the master running on your Mac.
+    network: "bridge"
+    master_addr: "http://host.docker.internal:8080"
 #
 #   # AWS EC2 provider — for production deployments.
 #   # Requires: go get github.com/aws/aws-sdk-go-v2/...

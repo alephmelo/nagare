@@ -1,0 +1,26 @@
+# Multi-stage build: compiles nagare inside a container matching the runtime
+# platform, so the binary is always the correct architecture.
+#
+# On macOS (Apple Silicon), Docker Desktop runs linux/arm64 containers natively.
+# Build with:
+#   docker build -t nagare:latest -f Dockerfile.worker .
+FROM golang:1.20-bookworm AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+# Build with nofrontend tag: skips the web/out embed so workers stay small
+# and the build doesn't require a pre-built Next.js output.
+RUN CGO_ENABLED=1 go build -tags nofrontend -o /nagare .
+
+# Minimal runtime image.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /nagare /usr/local/bin/nagare
+RUN chmod +x /usr/local/bin/nagare
+
+ENTRYPOINT []
+CMD []

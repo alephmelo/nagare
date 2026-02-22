@@ -164,10 +164,14 @@ func (d *DockerProvider) SpinUp(ctx context.Context, req SpinUpRequest) (WorkerI
 	}
 
 	// Build the worker command: nagare --worker --join <addr> --pools <p1,p2> [--token <t>]
+	masterAddr := req.MasterAddr
+	if d.cfg.MasterAddr != "" {
+		masterAddr = d.cfg.MasterAddr
+	}
 	cmd := []string{
 		"nagare",
 		"--worker",
-		"--join", req.MasterAddr,
+		"--join", masterAddr,
 		"--pools", strings.Join(req.Pools, ","),
 	}
 	if req.Token != "" {

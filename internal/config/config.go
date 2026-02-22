@@ -24,9 +24,19 @@ type DockerProviderConfig struct {
 	Image string `yaml:"image"`
 
 	// Network is the Docker network mode for spawned worker containers.
-	// Use "host" so containers can reach the master on localhost.
+	// Use "host" so containers can reach the master on localhost (Linux only).
+	// On macOS with Docker Desktop use "bridge" and set MasterAddr to
+	// "http://host.docker.internal:8080".
 	// Defaults to "host" when omitted.
 	Network string `yaml:"network"`
+
+	// MasterAddr overrides the master address passed to spawned worker
+	// containers via --join.  When empty the address is derived from the
+	// master's own listen address (e.g. http://localhost:8080), which works
+	// on Linux with network=host but not on macOS with Docker Desktop.
+	// Set to "http://host.docker.internal:8080" when using bridge networking
+	// on macOS.
+	MasterAddr string `yaml:"master_addr"`
 }
 
 // AWSProviderConfig holds settings for the AWS EC2-based cloud provider.

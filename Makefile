@@ -1,4 +1,4 @@
-.PHONY: dev dev-backend dev-frontend build run test lint clean tools
+.PHONY: dev dev-backend dev-frontend build docker-build run test lint clean tools
 
 # Default target
 all: build
@@ -20,6 +20,11 @@ build:
 	cd web && npm run build
 	@echo "Building Go binary..."
 	go build -o nagare .
+
+# Build the worker Docker image (requires the nagare binary to exist first)
+docker-build: build
+	@echo "Building worker Docker image..."
+	docker build -t nagare:latest -f Dockerfile.worker .
 
 # Run production binary
 run: build
