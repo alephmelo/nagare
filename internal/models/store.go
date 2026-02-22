@@ -206,8 +206,12 @@ func (s *Store) CreateDagRun(run *DagRun) error {
 		}
 	}
 
+	// Normalise to UTC so that RFC3339 string comparisons in SQLite
+	// are unambiguous regardless of the server's local timezone.
+	createdAt := run.CreatedAt.UTC()
+
 	query := `INSERT INTO dag_runs (id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, run.ID, run.DAGID, run.Status, run.ExecDate, run.TriggerType, confJSON, run.CreatedAt, run.CompletedAt)
+	_, err := s.db.Exec(query, run.ID, run.DAGID, run.Status, run.ExecDate, run.TriggerType, confJSON, createdAt, run.CompletedAt)
 	return err
 }
 
@@ -338,9 +342,14 @@ func (s *Store) GetSystemStats() (*SystemStats, error) {
 	}
 
 	// 3. Failed Runs in last 24h
-	// SQLite created_at strings are comparable directly in iso8601
-	yesterday := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
-	err = s.db.QueryRow(`SELECT COUNT(*) FROM dag_runs WHERE status = ? AND created_at >= ?`, RunFailed, yesterday).Scan(&stats.FailedRuns24h)
+	// Use datetime() on both sides so SQLite parses the values as proper
+	// datetimes rather than doing a raw string comparison. The threshold is
+	// expressed in UTC so it is unambiguous regardless of server timezone.
+	yesterday := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	err = s.db.QueryRow(
+		`SELECT COUNT(*) FROM dag_runs WHERE status = ? AND datetime(created_at) >= datetime(?)`,
+		RunFailed, yesterday,
+	).Scan(&stats.FailedRuns24h)
 	if err != nil {
 		return nil, err
 	}
