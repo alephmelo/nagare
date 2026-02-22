@@ -189,6 +189,28 @@ function PoolRow({ p }: { p: PoolStats }) {
   );
 }
 
+function OverrideRow({ dagID, override }: { dagID: string; override: DAGAutoscalerOverride }) {
+  return (
+    <Table.Tr>
+      <Table.Td>
+        <Badge variant="outline" color="teal" size="sm" radius="sm">
+          {dagID}
+        </Badge>
+      </Table.Td>
+      <Table.Td>
+        <Text size="sm" fw={600}>
+          {override.scale_up_threshold}
+        </Text>
+      </Table.Td>
+      <Table.Td>
+        <Text size="sm" fw={600}>
+          {override.max_cloud_workers}
+        </Text>
+      </Table.Td>
+    </Table.Tr>
+  );
+}
+
 function InstanceRow({ inst }: { inst: WorkerInstance }) {
   return (
     <Table.Tr>
@@ -454,23 +476,7 @@ export default function AutoscalerPage() {
                     </Table.Thead>
                     <Table.Tbody>
                       {Object.entries(status.per_dag_overrides).map(([dagID, override]) => (
-                        <Table.Tr key={dagID}>
-                          <Table.Td>
-                            <Badge variant="outline" color="teal" size="sm" radius="sm">
-                              {dagID}
-                            </Badge>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="sm" fw={600}>
-                              {override.scale_up_threshold}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="sm" fw={600}>
-                              {override.max_cloud_workers}
-                            </Text>
-                          </Table.Td>
-                        </Table.Tr>
+                        <OverrideRow key={dagID} dagID={dagID} override={override} />
                       ))}
                     </Table.Tbody>
                   </Table>
