@@ -34,8 +34,15 @@ type Pool struct {
 // NewPool initializes a new worker pool manager
 func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string, string, map[string]string) (*models.DagRun, error), sizes map[string]int, broker *logbroker.Broker) *Pool {
 	queues := make(map[string]chan models.TaskInstance)
-	for name := range sizes {
-		queues[name] = make(chan models.TaskInstance, 100)
+	for name, size := range sizes {
+		// Buffer exactly matches the number of goroutines so Dispatch can only
+		// pre-claim as many tasks as there are workers ready to execute them.
+		// Tasks beyond this cap stay in 'queued' state, which is what the
+		// autoscaler monitors to decide whether to spin up cloud workers.
+		if size < 1 {
+			size = 1
+		}
+		queues[name] = make(chan models.TaskInstance, size)
 	}
 
 	return &Pool{
