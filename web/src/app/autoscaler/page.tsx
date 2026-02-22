@@ -341,26 +341,28 @@ export default function AutoscalerPage() {
                         <Table.Tr key={p.pool}>
                           <Table.Td>
                             <Group gap={6}>
-                              <Badge
-                                key="pool-name"
-                                variant="outline"
-                                color="teal"
-                                size="sm"
-                                radius="sm"
-                              >
-                                {p.pool}
-                              </Badge>
-                              {p.needs_gpu && (
+                              {[
                                 <Badge
-                                  key="gpu"
+                                  key="pool-name"
                                   variant="outline"
-                                  color="violet"
+                                  color="teal"
                                   size="sm"
                                   radius="sm"
                                 >
-                                  GPU
-                                </Badge>
-                              )}
+                                  {p.pool}
+                                </Badge>,
+                                p.needs_gpu && (
+                                  <Badge
+                                    key="gpu"
+                                    variant="outline"
+                                    color="violet"
+                                    size="sm"
+                                    radius="sm"
+                                  >
+                                    GPU
+                                  </Badge>
+                                ),
+                              ]}
                             </Group>
                           </Table.Td>
                           <Table.Td>
