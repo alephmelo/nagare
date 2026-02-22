@@ -415,7 +415,11 @@ export default function AutoscalerPage() {
                       </Table.Td>
                     </Table.Tr>
                   ) : (
-                    pools.map((p) => <PoolRow key={p.pool} p={p} />)
+                    <>
+                      {pools.map((p) => (
+                        <PoolRow key={p.pool} p={p} />
+                      ))}
+                    </>
                   )}
                 </Table.Tbody>
               </Table>
@@ -458,7 +462,11 @@ export default function AutoscalerPage() {
                       </Table.Td>
                     </Table.Tr>
                   ) : (
-                    sortedInstances.map((inst) => <InstanceRow key={inst.id} inst={inst} />)
+                    <>
+                      {sortedInstances.map((inst) => (
+                        <InstanceRow key={inst.id} inst={inst} />
+                      ))}
+                    </>
                   )}
                 </Table.Tbody>
               </Table>
