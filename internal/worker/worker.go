@@ -224,6 +224,14 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 
 	log.Printf("executeTask %s: RunCommand done, err=%v", ti.ID, runErr)
 
+	// If the executor returned an error but produced no output (e.g. Docker
+	// daemon unreachable, image pull failure, container creation error), use
+	// the error message itself as the output so the user sees something useful
+	// in the dashboard instead of "No output generated yet."
+	if runErr != nil && strings.TrimSpace(result.Output) == "" {
+		result.Output = runErr.Error()
+	}
+
 	// Persist resource metrics regardless of success/failure.
 	p.persistMetrics(ti, run.DAGID, result)
 
