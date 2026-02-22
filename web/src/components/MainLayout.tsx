@@ -25,6 +25,7 @@ import {
   IconLogout,
   IconServer,
   IconChartBar,
+  IconCloudComputing,
 } from "@tabler/icons-react";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -138,6 +139,17 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
             onClick={(e) => {
               e.preventDefault();
               router.push("/workers");
+            }}
+            variant="filled"
+          />
+          <NavLink
+            href="/autoscaler"
+            label="Autoscaler"
+            leftSection={<IconCloudComputing size="1rem" stroke={1.5} />}
+            active={pathname === "/autoscaler"}
+            onClick={(e) => {
+              e.preventDefault();
+              router.push("/autoscaler");
             }}
             variant="filled"
           />
