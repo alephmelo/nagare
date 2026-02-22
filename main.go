@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alephmelo/nagare/internal/api"
+	"github.com/alephmelo/nagare/internal/autoscaler"
 	"github.com/alephmelo/nagare/internal/cluster"
 	"github.com/alephmelo/nagare/internal/config"
 	"github.com/alephmelo/nagare/internal/logbroker"
@@ -99,16 +100,38 @@ func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 	coord := cluster.NewCoordinator(store, getDAG, 60*time.Second, token)
 	coord.SetBroker(broker)
 
-	// 5. Initialize API server and attach coordinator.
+	// 5. Initialize autoscaler when enabled.
+	//    The coordinator implements StatsSource; a storeAdapter translates
+	//    models.Store into the autoscaler's InstanceStore interface.
+	var as *autoscaler.Autoscaler
+	if cfg.Autoscaler.Enabled {
+		provider, err := autoscaler.NewProvider(cfg.Autoscaler)
+		if err != nil {
+			log.Fatalf("Autoscaler: failed to initialize provider %q: %v", cfg.Autoscaler.Provider, err)
+		}
+		storeAdapt := autoscaler.NewStoreAdapter(store)
+		as = autoscaler.New(cfg.Autoscaler, provider, coord, storeAdapt)
+		coord.SetAutoscaler(as)
+		log.Printf("Autoscaler: initialized (provider=%s, max=%d)", cfg.Autoscaler.Provider, cfg.Autoscaler.MaxCloudWorkers)
+	} else {
+		// Disabled autoscaler: pass a no-op instance store so coordinator still works.
+		as = autoscaler.New(cfg.Autoscaler, nil, coord, autoscaler.NewStoreAdapter(store))
+	}
+
+	// 6. Initialize API server and attach coordinator and autoscaler.
 	apiServer := api.NewServer(store, sched, pool, broker, cfg.CORS.AllowedOrigins, resolvedAPIKey)
 	apiServer.WithCoordinator(coord)
+	apiServer.WithAutoscaler(as)
 
 	// Context for graceful shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 6. Start local workers and API server.
+	// 7. Start local workers, autoscaler, and API server.
 	pool.Start(ctx)
+
+	// Start the autoscaler background loop (no-op when disabled).
+	go as.Run(ctx, 30*time.Second, fmt.Sprintf("http://localhost%s", addr), token)
 
 	go func() {
 		fSys, err := fs.Sub(frontendEmbedFS, "web/out")
@@ -120,7 +143,7 @@ func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 		}
 	}()
 
-	// 7. Periodic stale-worker expiry.
+	// 8. Periodic stale-worker expiry.
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()

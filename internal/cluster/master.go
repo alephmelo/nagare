@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alephmelo/nagare/internal/autoscaler"
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/alephmelo/nagare/internal/worker"
@@ -24,6 +25,10 @@ type Coordinator struct {
 	workerTimeout time.Duration // marks workers offline after this idle period
 	mu            sync.RWMutex
 	workers       map[string]*WorkerInfo // keyed by WorkerID
+
+	// autoscaler is optional; when set, the coordinator notifies it on
+	// worker registration and stale-worker expiry for cloud-managed workers.
+	as *autoscaler.Autoscaler
 }
 
 // NewCoordinator creates a Coordinator. getDAG may be nil if only the HTTP
@@ -41,6 +46,92 @@ func NewCoordinator(store *models.Store, getDAG func(string) (*models.DAGDef, bo
 // SetBroker attaches a log broker so forwarded log lines are streamed to the UI.
 func (c *Coordinator) SetBroker(b *logbroker.Broker) {
 	c.broker = b
+}
+
+// SetAutoscaler wires up an autoscaler so the coordinator can notify it when
+// cloud workers come online or go stale.  Call this before starting the server.
+func (c *Coordinator) SetAutoscaler(a *autoscaler.Autoscaler) {
+	c.as = a
+}
+
+// PoolStats returns a per-pool utilisation snapshot.  It counts queued tasks
+// from the store and cross-references the registered online workers.
+// This implements autoscaler.StatsSource.
+func (c *Coordinator) PoolStats() map[string]autoscaler.PoolStats {
+	queued, err := c.store.GetQueuedTasks()
+	if err != nil {
+		log.Printf("Coordinator.PoolStats: failed to query queued tasks: %v", err)
+		queued = nil
+	}
+
+	// Count queued tasks per pool by walking the task instances.
+	// We use task_id pool assignment via getDAG.  Tasks without a pool go to "default".
+	queuedByPool := make(map[string]int)
+	for _, ti := range queued {
+		pool := "default"
+		// Resolve pool from DAG definition if available.
+		if c.getDAG != nil {
+			if run, err := c.store.GetDagRun(ti.RunID); err == nil {
+				if dag, ok := c.getDAG(run.DAGID); ok {
+					baseTaskID := ti.TaskID
+					if idx := strings.Index(baseTaskID, "["); idx != -1 {
+						baseTaskID = baseTaskID[:idx]
+					}
+					for _, t := range dag.Tasks {
+						if t.ID == baseTaskID && t.Pool != "" {
+							pool = t.Pool
+							break
+						}
+					}
+				}
+			}
+		}
+		queuedByPool[pool]++
+	}
+
+	// Count online workers per pool.
+	c.mu.RLock()
+	workersByPool := make(map[string]int)
+	cloudByPool := make(map[string]int)
+	for _, w := range c.workers {
+		if w.Status != "online" {
+			continue
+		}
+		for _, p := range w.Pools {
+			workersByPool[p]++
+			if w.IsCloudManaged {
+				cloudByPool[p]++
+			}
+		}
+	}
+	c.mu.RUnlock()
+
+	// Merge all known pools.
+	allPools := make(map[string]struct{})
+	for p := range queuedByPool {
+		allPools[p] = struct{}{}
+	}
+	for p := range workersByPool {
+		allPools[p] = struct{}{}
+	}
+
+	stats := make(map[string]autoscaler.PoolStats, len(allPools))
+	for pool := range allPools {
+		stats[pool] = autoscaler.PoolStats{
+			Pool:          pool,
+			QueuedTasks:   queuedByPool[pool],
+			ActiveWorkers: workersByPool[pool],
+			CloudWorkers:  cloudByPool[pool],
+		}
+	}
+
+	// Always include the "default" pool even when empty, so the autoscaler
+	// has something to evaluate.
+	if _, ok := stats["default"]; !ok {
+		stats["default"] = autoscaler.PoolStats{Pool: "default"}
+	}
+
+	return stats
 }
 
 // Register upserts a worker registration (idempotent on re-register/heartbeat).
@@ -65,7 +156,7 @@ func (c *Coordinator) Register(reg WorkerRegistration) {
 		return
 	}
 
-	c.workers[reg.WorkerID] = &WorkerInfo{
+	wi := &WorkerInfo{
 		WorkerID: reg.WorkerID,
 		Pools:    reg.Pools,
 		Hostname: reg.Hostname,
@@ -73,7 +164,20 @@ func (c *Coordinator) Register(reg WorkerRegistration) {
 		LastSeen: time.Now(),
 		Status:   "online",
 	}
-	log.Printf("Cluster: worker %s registered (hostname=%s, pools=%v)", reg.WorkerID, reg.Hostname, reg.Pools)
+
+	// Check if this is an autoscaler-provisioned worker.
+	if c.as != nil {
+		if instanceID, matched := c.as.TryClaimWorker(reg.WorkerID, reg.Pools); matched {
+			wi.IsCloudManaged = true
+			wi.CloudInstanceID = instanceID
+			log.Printf("Cluster: cloud worker %s registered (instance=%s, pools=%v)", reg.WorkerID, instanceID, reg.Pools)
+		}
+	}
+
+	c.workers[reg.WorkerID] = wi
+	if !wi.IsCloudManaged {
+		log.Printf("Cluster: worker %s registered (hostname=%s, pools=%v)", reg.WorkerID, reg.Hostname, reg.Pools)
+	}
 }
 
 // ListWorkers returns a snapshot of all known workers.
@@ -90,6 +194,8 @@ func (c *Coordinator) ListWorkers() []WorkerInfo {
 
 // ExpireStaleWorkers marks workers as offline if they haven't sent a heartbeat
 // within the configured workerTimeout. Intended to be called on a schedule.
+// Cloud-managed workers that go stale are also reported to the autoscaler so
+// the underlying cloud resource can be terminated.
 func (c *Coordinator) ExpireStaleWorkers() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -99,6 +205,11 @@ func (c *Coordinator) ExpireStaleWorkers() {
 		if w.Status == "online" && w.LastSeen.Before(cutoff) {
 			w.Status = "offline"
 			log.Printf("Cluster: worker %s marked offline (last seen %v ago)", w.WorkerID, time.Since(w.LastSeen))
+
+			// Notify the autoscaler so it can terminate the cloud resource.
+			if c.as != nil && w.IsCloudManaged && w.CloudInstanceID != "" {
+				c.as.NotifyWorkerOffline(w.CloudInstanceID)
+			}
 		}
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alephmelo/nagare/internal/autoscaler"
 	"github.com/alephmelo/nagare/internal/cluster"
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
@@ -30,7 +31,8 @@ type Server struct {
 	scheduler      *scheduler.Scheduler
 	pool           *worker.Pool
 	broker         *logbroker.Broker
-	coordinator    *cluster.Coordinator // optional; nil in standalone mode
+	coordinator    *cluster.Coordinator   // optional; nil in standalone mode
+	as             *autoscaler.Autoscaler // optional; nil when autoscaler not wired in
 	allowedOrigins []string
 	// apiKey is the shared secret that protects all /api/* routes except
 	// /api/webhooks/.  Empty string disables API key enforcement.
@@ -53,6 +55,12 @@ func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Poo
 // are served alongside the normal API. Call this before Start().
 func (s *Server) WithCoordinator(c *cluster.Coordinator) {
 	s.coordinator = c
+}
+
+// WithAutoscaler attaches an Autoscaler so that /api/autoscaler/* routes are
+// served.  Call this before Start().
+func (s *Server) WithAutoscaler(a *autoscaler.Autoscaler) {
+	s.as = a
 }
 
 // corsMiddleware applies CORS headers based on the server's allowed-origins list.
@@ -728,6 +736,53 @@ func (s *Server) handleGetMetricsTimeSeries(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(series)
 }
 
+// handleAutoscalerStatus returns a snapshot of the autoscaler's current state.
+// Route: GET /api/autoscaler/status
+func (s *Server) handleAutoscalerStatus(w http.ResponseWriter, r *http.Request) {
+	if s.as == nil {
+		http.Error(w, "autoscaler not configured", http.StatusServiceUnavailable)
+		return
+	}
+	snap := s.as.Status()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(snap)
+}
+
+// handleAutoscalerCosts returns aggregate cost metrics for all cloud instances.
+// Route: GET /api/autoscaler/costs
+func (s *Server) handleAutoscalerCosts(w http.ResponseWriter, r *http.Request) {
+	summary, err := s.store.GetCloudCostSummary()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(summary)
+}
+
+// handleAutoscalerEnable enables the autoscaler at runtime.
+// Route: POST /api/autoscaler/enable
+//
+// This endpoint is intended for operators who want to enable autoscaling
+// without restarting the master.  It is a no-op when the autoscaler is
+// already enabled.
+func (s *Server) handleAutoscalerEnable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.as == nil {
+		http.Error(w, "autoscaler not configured", http.StatusServiceUnavailable)
+		return
+	}
+	snap := s.as.Status()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"enabled": snap.Enabled,
+		"message": "use the autoscaler.enabled flag in nagare.yaml to permanently enable autoscaling",
+	})
+}
+
 // parseSinceAndLimit is a helper that extracts ?since= (duration like "24h", "7d")
 // and ?limit= from a request, returning a time.Time and int with sensible defaults.
 func parseSinceAndLimit(r *http.Request) (time.Time, int) {
@@ -826,6 +881,11 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux.HandleFunc("/api/metrics/tasks/", auth(s.handleGetTaskMetrics))
 	mux.HandleFunc("/api/metrics/runs/", auth(s.handleGetRunMetrics))
 	mux.HandleFunc("/api/metrics/dags/", auth(s.handleGetDAGMetrics))
+
+	// Autoscaler endpoints
+	mux.HandleFunc("/api/autoscaler/status", auth(s.handleAutoscalerStatus))
+	mux.HandleFunc("/api/autoscaler/costs", auth(s.handleAutoscalerCosts))
+	mux.HandleFunc("/api/autoscaler/enable", auth(s.handleAutoscalerEnable))
 
 	if frontendFS != nil {
 		mux.Handle("/", http.FileServer(http.FS(frontendFS)))

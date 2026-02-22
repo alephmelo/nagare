@@ -389,3 +389,188 @@ func TestGetSystemStats(t *testing.T) {
 		t.Errorf("FailedRuns24h: got %d, want 1", stats.FailedRuns24h)
 	}
 }
+
+// ---- Cloud instances table tests ----
+
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := NewStore("file::memory:?cache=shared&mode=memory")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func TestCloudInstance_SaveAndList(t *testing.T) {
+	s := newTestStore(t)
+
+	inst := CloudInstance{
+		ID:           "docker-abc123",
+		Provider:     "docker",
+		ProviderID:   "container-xyz",
+		WorkerID:     "",
+		Pools:        `["default"]`,
+		InstanceType: "",
+		Region:       "",
+		Status:       "provisioning",
+		CostPerHour:  0,
+		CreatedAt:    time.Now().UTC().Truncate(time.Second),
+	}
+
+	if err := s.SaveCloudInstance(inst); err != nil {
+		t.Fatalf("SaveCloudInstance: %v", err)
+	}
+
+	active, err := s.ListActiveCloudInstances()
+	if err != nil {
+		t.Fatalf("ListActiveCloudInstances: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active instance, got %d", len(active))
+	}
+	got := active[0]
+	if got.ID != inst.ID {
+		t.Errorf("ID: got %q, want %q", got.ID, inst.ID)
+	}
+	if got.Status != "provisioning" {
+		t.Errorf("Status: got %q, want provisioning", got.Status)
+	}
+}
+
+func TestCloudInstance_UpdateStatus(t *testing.T) {
+	s := newTestStore(t)
+
+	inst := CloudInstance{
+		ID:         "aws-abc",
+		Provider:   "aws",
+		ProviderID: "i-12345",
+		Pools:      `["default"]`,
+		Status:     "provisioning",
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := s.SaveCloudInstance(inst); err != nil {
+		t.Fatalf("SaveCloudInstance: %v", err)
+	}
+
+	if err := s.UpdateCloudInstanceStatus("aws-abc", "running"); err != nil {
+		t.Fatalf("UpdateCloudInstanceStatus: %v", err)
+	}
+
+	active, _ := s.ListActiveCloudInstances()
+	if len(active) != 1 || active[0].Status != "running" {
+		t.Errorf("expected status running after update, got %v", active)
+	}
+}
+
+func TestCloudInstance_UpdateWorkerID(t *testing.T) {
+	s := newTestStore(t)
+
+	inst := CloudInstance{
+		ID:         "docker-wid",
+		Provider:   "docker",
+		ProviderID: "ctr-1",
+		Pools:      `["default"]`,
+		Status:     "running",
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := s.SaveCloudInstance(inst); err != nil {
+		t.Fatalf("SaveCloudInstance: %v", err)
+	}
+
+	if err := s.UpdateCloudInstanceWorkerID("docker-wid", "worker-remote-1"); err != nil {
+		t.Fatalf("UpdateCloudInstanceWorkerID: %v", err)
+	}
+
+	active, _ := s.ListActiveCloudInstances()
+	if len(active) != 1 || active[0].WorkerID != "worker-remote-1" {
+		t.Errorf("expected worker ID worker-remote-1, got %v", active)
+	}
+}
+
+func TestCloudInstance_TerminateExcludesFromList(t *testing.T) {
+	s := newTestStore(t)
+
+	for i := 0; i < 3; i++ {
+		err := s.SaveCloudInstance(CloudInstance{
+			ID:         fmt.Sprintf("inst-%d", i),
+			Provider:   "docker",
+			ProviderID: fmt.Sprintf("ctr-%d", i),
+			Pools:      `["default"]`,
+			Status:     "running",
+			CreatedAt:  time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("SaveCloudInstance %d: %v", i, err)
+		}
+	}
+
+	// Terminate the first instance.
+	if err := s.TerminateCloudInstance("inst-0", time.Now().UTC()); err != nil {
+		t.Fatalf("TerminateCloudInstance: %v", err)
+	}
+
+	active, err := s.ListActiveCloudInstances()
+	if err != nil {
+		t.Fatalf("ListActiveCloudInstances: %v", err)
+	}
+	if len(active) != 2 {
+		t.Errorf("expected 2 active instances after termination, got %d", len(active))
+	}
+	for _, a := range active {
+		if a.ID == "inst-0" {
+			t.Error("terminated instance should not appear in active list")
+		}
+	}
+}
+
+func TestCloudInstance_GetCostSummary(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().UTC()
+	oneHourAgo := now.Add(-1 * time.Hour)
+
+	// One running instance at $0.10/hr started 1 hour ago.
+	if err := s.SaveCloudInstance(CloudInstance{
+		ID:          "cost-1",
+		Provider:    "aws",
+		ProviderID:  "i-cost-1",
+		Pools:       `["default"]`,
+		Status:      "running",
+		CostPerHour: 0.10,
+		CreatedAt:   oneHourAgo,
+	}); err != nil {
+		t.Fatalf("SaveCloudInstance: %v", err)
+	}
+
+	// One terminated instance at $0.50/hr, ran for 30 minutes.
+	halfHourAgo := now.Add(-30 * time.Minute)
+	if err := s.SaveCloudInstance(CloudInstance{
+		ID:           "cost-2",
+		Provider:     "aws",
+		ProviderID:   "i-cost-2",
+		Pools:        `["gpu_workers"]`,
+		Status:       "terminated",
+		CostPerHour:  0.50,
+		CreatedAt:    now.Add(-1 * time.Hour),
+		TerminatedAt: &halfHourAgo,
+	}); err != nil {
+		t.Fatalf("SaveCloudInstance: %v", err)
+	}
+
+	summary, err := s.GetCloudCostSummary()
+	if err != nil {
+		t.Fatalf("GetCloudCostSummary: %v", err)
+	}
+
+	if summary.TotalInstances != 2 {
+		t.Errorf("expected TotalInstances=2, got %d", summary.TotalInstances)
+	}
+	if summary.ActiveInstances != 1 {
+		t.Errorf("expected ActiveInstances=1, got %d", summary.ActiveInstances)
+	}
+	// Estimated cost should be positive.
+	if summary.EstimatedCostUSD <= 0 {
+		t.Errorf("expected positive estimated cost, got %f", summary.EstimatedCostUSD)
+	}
+}

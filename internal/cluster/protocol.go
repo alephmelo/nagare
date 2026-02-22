@@ -22,6 +22,15 @@ type WorkerInfo struct {
 	MaxTasks int       `json:"max_tasks"`
 	LastSeen time.Time `json:"last_seen"`
 	Status   string    `json:"status"` // "online" | "offline"
+
+	// IsCloudManaged is true when this worker was auto-provisioned by the
+	// autoscaler rather than started manually.  The UI uses this flag to
+	// display a cloud badge and to show the associated cloud instance ID.
+	IsCloudManaged bool `json:"is_cloud_managed"`
+
+	// CloudInstanceID is the Nagare-internal autoscaler instance ID
+	// (e.g. "docker-a3f1b2") when IsCloudManaged is true.  Empty otherwise.
+	CloudInstanceID string `json:"cloud_instance_id,omitempty"`
 }
 
 // PollRequest is sent by a worker when asking for a task to execute.

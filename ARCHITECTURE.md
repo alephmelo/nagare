@@ -212,3 +212,118 @@ The `/metrics` page is a client component that:
 `MainLayout.tsx` exposes the page under an **Observability** nav group (`IconChartBar`).
 
 `runs/page.tsx` — `TaskRow` shows duration and peak memory badges inline next to the task name when `task.Metrics` is present, with automatic unit formatting (ms → s, bytes → KB/MB/GB).
+
+---
+
+## 7. Autoscaler (`internal/autoscaler/`)
+
+The autoscaler automatically provisions cloud workers when queue depth exceeds configured thresholds and terminates idle workers to keep infrastructure costs proportional to load. It is fully opt-in (`autoscaler.enabled: false` by default).
+
+### Architecture
+
+```
+Coordinator (master)
+      │ implements StatsSource
+      ▼
+  Autoscaler ──── tick loop (every 30s)
+      │               │
+      │      scale-up │ queued > threshold AND below cap AND past cooldown
+      │               ▼
+      │         CloudProvider.SpinUp()
+      │               │ returns WorkerInstance{Status: provisioning}
+      │               ▼
+      │         models.cloud_instances (persisted for crash recovery)
+      │               │
+      │               ▼ registers via POST /api/workers/register
+      └──────── Coordinator.Register() → TryClaimWorker() → marks IsCloudManaged=true
+                      │
+      scale-down       │ idle > ScaleDownIdleMins
+      CloudProvider.SpinDown() + TerminateCloudInstance()
+```
+
+### Key Types
+
+| Type | File | Purpose |
+|---|---|---|
+| `Autoscaler` | `autoscaler.go` | Core engine: tick loop, scale-up/down decisions |
+| `CloudProvider` | `provider.go` | Interface: `SpinUp`, `SpinDown`, `List`, `Name` |
+| `WorkerInstance` | `provider.go` | Describes a cloud-provisioned worker |
+| `PoolStats` | `provider.go` | Queue depth + worker counts per pool |
+| `InstanceStore` | `autoscaler.go` | Interface for persisting instance lifecycle |
+| `StatsSource` | `autoscaler.go` | Interface for queue-depth metrics (Coordinator implements this) |
+| `DockerProvider` | `docker.go` | Docker daemon backend (dev/test) |
+| `AWSProvider` | `aws.go` | AWS EC2 backend (production) |
+| `storeAdapter` | `store_adapter.go` | Bridges `models.Store` → `InstanceStore` (avoids circular import) |
+
+### Database
+
+A `cloud_instances` table is added to the SQLite schema:
+
+```sql
+CREATE TABLE cloud_instances (
+    id              TEXT PRIMARY KEY,        -- "docker-a3f1b2"
+    provider        TEXT NOT NULL,           -- "docker" | "aws"
+    provider_id     TEXT NOT NULL,           -- container ID or EC2 instance ID
+    worker_id       TEXT NOT NULL DEFAULT '', -- nagare worker ID after registration
+    pools           TEXT NOT NULL DEFAULT '[]', -- JSON array
+    instance_type   TEXT NOT NULL DEFAULT '',
+    region          TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'provisioning',
+    cost_per_hour   REAL NOT NULL DEFAULT 0,
+    created_at      DATETIME NOT NULL,
+    terminated_at   DATETIME
+);
+```
+
+On master restart, `reconcile()` reloads active instances from this table so the autoscaler doesn't leak cloud resources after a crash.
+
+### Scale-Up Logic (per pool, per tick)
+
+1. `QueuedTasks > ScaleUpThreshold`
+2. Total cloud instances < `MaxCloudWorkers`
+3. Time since last scale-up for this pool > `CooldownSecs`
+
+### Scale-Down Logic (per cloud instance, per tick)
+
+1. Instance is in `running` state
+2. All pools it serves have 0 queued tasks
+3. It has been idle for at least `ScaleDownIdleMins`
+
+### Cloud Worker Correlation
+
+When a cloud-provisioned container boots and calls `POST /api/workers/register`, the Coordinator calls `Autoscaler.TryClaimWorker(workerID, pools)`. The autoscaler scans its in-memory provisioning instances for a pool overlap and returns the `instanceID`. The worker is then tagged `IsCloudManaged=true` and `CloudInstanceID` in its `WorkerInfo`. This is a best-effort heuristic that works correctly when workers register sequentially.
+
+### Configuration (`nagare.yaml`)
+
+```yaml
+autoscaler:
+  enabled: true
+  provider: docker           # "docker" | "aws"
+  max_cloud_workers: 5
+  scale_up_threshold: 3      # queued tasks needed to trigger scale-up
+  cooldown_secs: 60
+  scale_down_idle_mins: 5
+  docker:
+    image: nagare:latest
+    network: host
+  aws:
+    region: us-east-1
+    instance_type: t3.medium
+    gpu_instance_type: g4dn.xlarge
+    ami_id: ami-0abc123
+    key_name: my-key
+    security_group: sg-abc123
+    subnet_id: subnet-abc123
+```
+
+### API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/autoscaler/status` | Current autoscaler state snapshot |
+| `GET` | `/api/autoscaler/costs` | Aggregate cloud cost summary |
+| `POST` | `/api/autoscaler/enable` | Runtime enable (persists across restart only via config) |
+
+### AWS Provider
+
+`NewAWSProvider()` currently returns an error stub pending `go get github.com/aws/aws-sdk-go-v2/...`. Once that dependency is added, the `ec2RealClient` wiring in `aws.go` must be completed. All AWS logic and tests already exist; only the SDK import is missing.

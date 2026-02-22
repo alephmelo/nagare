@@ -177,6 +177,21 @@ func (s *Store) InitSchema() error {
 		FOREIGN KEY(task_instance_id) REFERENCES task_instances(id)
 	);`
 
+	cloudInstancesSchema := `
+	CREATE TABLE IF NOT EXISTS cloud_instances (
+		id              TEXT PRIMARY KEY,
+		provider        TEXT NOT NULL,
+		provider_id     TEXT NOT NULL,
+		worker_id       TEXT NOT NULL DEFAULT '',
+		pools           TEXT NOT NULL DEFAULT '[]',
+		instance_type   TEXT NOT NULL DEFAULT '',
+		region          TEXT NOT NULL DEFAULT '',
+		status          TEXT NOT NULL DEFAULT 'provisioning',
+		cost_per_hour   REAL NOT NULL DEFAULT 0,
+		created_at      DATETIME NOT NULL,
+		terminated_at   DATETIME
+	);`
+
 	if _, err := s.db.Exec(dagRunsSchema); err != nil {
 		return err
 	}
@@ -184,6 +199,9 @@ func (s *Store) InitSchema() error {
 		return err
 	}
 	if _, err := s.db.Exec(taskMetricsSchema); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(cloudInstancesSchema); err != nil {
 		return err
 	}
 
@@ -841,6 +859,157 @@ func (s *Store) scanTaskMetrics(rows *sql.Rows) ([]TaskMetrics, error) {
 		metrics = append(metrics, m)
 	}
 	return metrics, rows.Err()
+}
+
+// CloudInstance records a cloud worker instance provisioned by the autoscaler.
+// It mirrors the cloud_instances table and is used for cost tracking and
+// crash recovery (reconciling orphaned resources after a master restart).
+type CloudInstance struct {
+	// ID is the Nagare-internal identifier (e.g. "docker-a3f1b2").
+	ID string
+	// Provider is the cloud backend name ("docker", "aws").
+	Provider string
+	// ProviderID is the cloud-specific resource identifier (container ID, EC2 instance ID).
+	ProviderID string
+	// WorkerID is the nagare cluster worker ID that the remote process registered with.
+	// Empty until the worker has called POST /api/workers/register.
+	WorkerID string
+	// Pools is a JSON-encoded string of pool names this instance serves (e.g. `["default"]`).
+	Pools string
+	// InstanceType is the cloud machine type (e.g. "t3.medium").  Empty for Docker.
+	InstanceType string
+	// Region is the geographic region.  Empty for Docker.
+	Region string
+	// Status is the lifecycle state ("provisioning", "running", "draining", "terminated").
+	Status string
+	// CostPerHour is the estimated hourly cost in USD.
+	CostPerHour float64
+	// CreatedAt is when Nagare requested the instance.
+	CreatedAt time.Time
+	// TerminatedAt is when the instance was terminated.  Nil if still alive.
+	TerminatedAt *time.Time
+}
+
+// CloudCostSummary holds aggregate cost and instance counts for the autoscaler
+// cost dashboard endpoint.
+type CloudCostSummary struct {
+	TotalInstances   int     `json:"total_instances"`
+	ActiveInstances  int     `json:"active_instances"`
+	EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+}
+
+// SaveCloudInstance inserts a new CloudInstance record into the database.
+func (s *Store) SaveCloudInstance(inst CloudInstance) error {
+	query := `
+		INSERT INTO cloud_instances
+			(id, provider, provider_id, worker_id, pools, instance_type, region, status,
+			 cost_per_hour, created_at, terminated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query,
+		inst.ID, inst.Provider, inst.ProviderID, inst.WorkerID,
+		inst.Pools, inst.InstanceType, inst.Region, inst.Status,
+		inst.CostPerHour, inst.CreatedAt.UTC(), inst.TerminatedAt,
+	)
+	return err
+}
+
+// ListActiveCloudInstances returns all cloud instances that are not terminated.
+// Used on master startup to reconcile orphaned cloud resources.
+func (s *Store) ListActiveCloudInstances() ([]CloudInstance, error) {
+	rows, err := s.db.Query(`
+		SELECT id, provider, provider_id, worker_id, pools, instance_type, region,
+		       status, cost_per_hour, created_at, terminated_at
+		FROM cloud_instances
+		WHERE status != 'terminated'
+		ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCloudInstances(rows)
+}
+
+// UpdateCloudInstanceStatus updates the status column for the given instance.
+func (s *Store) UpdateCloudInstanceStatus(id, status string) error {
+	_, err := s.db.Exec(`UPDATE cloud_instances SET status = ? WHERE id = ?`, status, id)
+	return err
+}
+
+// UpdateCloudInstanceWorkerID stores the nagare worker ID that the spawned
+// process registered with after booting.
+func (s *Store) UpdateCloudInstanceWorkerID(id, workerID string) error {
+	_, err := s.db.Exec(`UPDATE cloud_instances SET worker_id = ? WHERE id = ?`, workerID, id)
+	return err
+}
+
+// TerminateCloudInstance marks an instance as terminated and records the time.
+func (s *Store) TerminateCloudInstance(id string, terminatedAt time.Time) error {
+	t := terminatedAt.UTC()
+	_, err := s.db.Exec(
+		`UPDATE cloud_instances SET status = 'terminated', terminated_at = ? WHERE id = ?`,
+		t, id,
+	)
+	return err
+}
+
+// GetCloudCostSummary returns aggregate cost metrics across all tracked instances.
+// EstimatedCostUSD is calculated as:
+//   - For running instances: cost_per_hour * hours_since_created_at
+//   - For terminated instances: cost_per_hour * hours_between_created_at_and_terminated_at
+func (s *Store) GetCloudCostSummary() (*CloudCostSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT cost_per_hour, created_at, terminated_at, status
+		FROM cloud_instances`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	summary := &CloudCostSummary{}
+	now := time.Now().UTC()
+
+	for rows.Next() {
+		var costPerHour float64
+		var createdAt time.Time
+		var terminatedAt *time.Time
+		var status string
+
+		if err := rows.Scan(&costPerHour, &createdAt, &terminatedAt, &status); err != nil {
+			return nil, err
+		}
+		summary.TotalInstances++
+
+		endTime := now
+		if terminatedAt != nil {
+			endTime = *terminatedAt
+		} else {
+			summary.ActiveInstances++
+		}
+
+		hours := endTime.Sub(createdAt).Hours()
+		if hours < 0 {
+			hours = 0
+		}
+		summary.EstimatedCostUSD += costPerHour * hours
+	}
+	return summary, rows.Err()
+}
+
+// scanCloudInstances is a shared helper to scan rows into []CloudInstance.
+func scanCloudInstances(rows *sql.Rows) ([]CloudInstance, error) {
+	var instances []CloudInstance
+	for rows.Next() {
+		var inst CloudInstance
+		if err := rows.Scan(
+			&inst.ID, &inst.Provider, &inst.ProviderID, &inst.WorkerID,
+			&inst.Pools, &inst.InstanceType, &inst.Region, &inst.Status,
+			&inst.CostPerHour, &inst.CreatedAt, &inst.TerminatedAt,
+		); err != nil {
+			return nil, err
+		}
+		instances = append(instances, inst)
+	}
+	return instances, rows.Err()
 }
 
 // GetDagRuns retrieves recent DAG runs ordered by creation mostly recent first

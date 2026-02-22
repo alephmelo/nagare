@@ -18,3 +18,58 @@ cors:
 # Priority order: --api-key flag > NAGARE_API_KEY env var > this field.
 #
 # api_key: "your-secret-key-here"
+
+# ---------------------------------------------------------------------------
+# Autoscaler — automatic cloud worker provisioning
+#
+# When enabled, Nagare monitors queue depth per pool and spins up / tears down
+# cloud workers automatically.  Workers are ordinary nagare processes started
+# with --worker; the autoscaler handles the lifecycle transparently.
+#
+# To test locally with Docker, uncomment the block below and build the image
+# first:
+#
+#   docker build -t nagare:latest -f Dockerfile.worker .
+#
+# See docs/autoscaler.md for the full setup guide.
+# ---------------------------------------------------------------------------
+#
+# autoscaler:
+#   enabled: true
+#   provider: "docker"          # "docker" (local) | "aws" (production)
+#
+#   # Scale up when a pool has more than this many queued tasks.
+#   scale_up_threshold: 3
+#
+#   # Maximum number of cloud workers running at any time (across all pools).
+#   max_cloud_workers: 5
+#
+#   # Terminate a cloud worker after it has been idle for this many minutes.
+#   scale_down_idle_mins: 2
+#
+#   # Minimum seconds between consecutive scale-ups for the same pool.
+#   # Prevents thrashing when tasks arrive in bursts.
+#   cooldown_secs: 30
+#
+#   docker:
+#     # Docker image that contains the nagare binary at /usr/local/bin/nagare.
+#     # Build it with: docker build -t nagare:latest -f Dockerfile.worker .
+#     image: "nagare:latest"
+#
+#     # Network mode for spawned worker containers.
+#     # "host" lets workers reach the master at localhost:8080.
+#     # Use a named bridge network when running master inside Docker too.
+#     network: "host"
+#
+#   # AWS EC2 provider — for production deployments.
+#   # Requires: go get github.com/aws/aws-sdk-go-v2/...
+#   # aws:
+#   #   region: "us-east-1"
+#   #   instance_type: "t3.medium"
+#   #   ami_id: "ami-0abc123def456"    # AMI with nagare binary pre-installed
+#   #   key_name: "my-keypair"
+#   #   security_group: "sg-0abc123"
+#   #   subnet_id: "subnet-0abc123"
+#   #   iam_instance_profile: "nagare-worker-role"
+#   #   nagare_download_url: "https://releases.example.com/nagare/latest/nagare-linux-amd64"
+#   #   gpu_instance_type: "g4dn.xlarge"  # used when a task sets resources.gpus

@@ -1,0 +1,52 @@
+id: autoscale_stress_test
+description: >
+  Stress test for the autoscaler.  Triggers a burst of slow tasks that will
+  push the 'default' pool's queue depth above the scale_up_threshold, causing
+  the autoscaler to spin up cloud workers automatically.
+
+  Run this DAG manually from the dashboard (workflow_dispatch) or via:
+    curl -X POST http://localhost:8080/api/dags/autoscale_stress_test/trigger
+
+  Watch the autoscaler log lines and the /api/autoscaler/status endpoint to
+  see workers appear and disappear.
+
+schedule: "workflow_dispatch"
+
+tasks:
+  # -------------------------------------------------------------------------
+  # Fan-out: 8 slow jobs submitted to the 'default' pool simultaneously.
+  # With scale_up_threshold: 3, the autoscaler should spin up workers after
+  # the first scheduler tick following the trigger.
+  # -------------------------------------------------------------------------
+  - id: slow_job
+    type: command
+    pool: default
+    # Each task sleeps for 45 seconds, keeping the queue deep long enough for
+    # the autoscaler to notice and act.  Adjust sleep time to taste.
+    command: |
+      echo "[$(date '+%H:%M:%S')] slow_job item={{item}} starting on $(hostname)"
+      sleep 45
+      echo "[$(date '+%H:%M:%S')] slow_job item={{item}} done"
+    with_items:
+      - "batch_1"
+      - "batch_2"
+      - "batch_3"
+      - "batch_4"
+      - "batch_5"
+      - "batch_6"
+      - "batch_7"
+      - "batch_8"
+
+  # -------------------------------------------------------------------------
+  # Aggregator: runs after all fan-out tasks complete, proving the cloud
+  # workers executed the work and reported results back to the master.
+  # -------------------------------------------------------------------------
+  - id: aggregate_results
+    type: command
+    pool: default
+    command: |
+      echo "[$(date '+%H:%M:%S')] All slow_job tasks finished."
+      echo "Cloud workers handled the burst and are now idle."
+      echo "The autoscaler will scale them down after scale_down_idle_mins."
+    depends_on:
+      - slow_job
