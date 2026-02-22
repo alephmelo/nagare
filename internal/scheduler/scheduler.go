@@ -106,10 +106,12 @@ func (s *Scheduler) LoadDAGs(dirPath string) error {
 	s.dags = newDags
 	s.dagErrors = newErrors
 
-	// Initialize lastExec for new DAGs to 1 minute ago so they trigger immediately on boot for testing
+	// Initialize lastExec for new DAGs to now so they wait for their first natural cron interval.
+	// Setting this to the past caused all scheduled DAGs to fire simultaneously on boot,
+	// saturating the worker pool and freezing the process on startup.
 	for id := range s.dags {
 		if _, exists := s.lastExec[id]; !exists {
-			s.lastExec[id] = time.Now().Add(-1 * time.Minute)
+			s.lastExec[id] = time.Now()
 		}
 	}
 
