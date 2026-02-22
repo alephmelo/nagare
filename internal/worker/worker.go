@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
@@ -206,6 +207,10 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 
 	exec := NewExecutor(assignment)
 
+	// Record when actual execution begins.
+	startedAt := time.Now()
+	p.store.SetTaskStartedAt(ti.ID, startedAt)
+
 	result, runErr := exec.Run(ctx, assignment,
 		func(line string) {
 			p.broker.Publish(ti.ID, line)
@@ -220,6 +225,9 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 	log.Printf("executeTask %s: RunCommand done, err=%v", ti.ID, runErr)
 
 	p.broker.Close(ti.ID)
+
+	// Persist resource metrics regardless of success/failure.
+	p.persistMetrics(ti, run.DAGID, result)
 
 	if runErr != nil {
 		if result.TimedOut {
@@ -253,6 +261,27 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 	}
 
 	p.broker.Cleanup(ti.ID)
+}
+
+// persistMetrics saves a TaskMetrics row for a completed task execution.
+// Errors are logged but do not affect task status.
+func (p *Pool) persistMetrics(ti models.TaskInstance, dagID string, result RunResult) {
+	m := &models.TaskMetrics{
+		TaskInstanceID:  ti.ID,
+		RunID:           ti.RunID,
+		DAGID:           dagID,
+		TaskID:          ti.TaskID,
+		DurationMs:      result.DurationMs,
+		CpuUserMs:       result.CpuUserMs,
+		CpuSystemMs:     result.CpuSystemMs,
+		PeakMemoryBytes: result.PeakMemoryBytes,
+		ExitCode:        result.ExitCode,
+		ExecutorType:    result.ExecutorType,
+		CreatedAt:       time.Now(),
+	}
+	if err := p.store.InsertTaskMetrics(m); err != nil {
+		log.Printf("Warning: failed to persist metrics for task %s: %v", ti.ID, err)
+	}
 }
 
 // KillTask terminates a running task process or container

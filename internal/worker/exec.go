@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -91,8 +92,14 @@ func PrepareTaskAssignment(run *models.DagRun, ti models.TaskInstance, dag *mode
 
 // RunResult is returned by RunCommand after a command finishes.
 type RunResult struct {
-	Output   string
-	TimedOut bool
+	Output          string
+	TimedOut        bool
+	DurationMs      int64
+	CpuUserMs       int64
+	CpuSystemMs     int64
+	PeakMemoryBytes int64
+	ExitCode        int
+	ExecutorType    string // "local" or "docker"
 }
 
 // killLocalProcess terminates a running local process and its entire process
@@ -152,6 +159,8 @@ func RunCommand(ctx context.Context, cmdStr string, extraEnv []string, timeoutSe
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 
+	startTime := time.Now()
+
 	if err := cmd.Start(); err != nil {
 		pw.Close()
 		pr.Close()
@@ -182,12 +191,32 @@ func RunCommand(ctx context.Context, cmdStr string, extraEnv []string, timeoutSe
 	}()
 
 	runErr := cmd.Wait()
+	durationMs := time.Since(startTime).Milliseconds()
 	pr.Close() // signal EOF to scanner
 	<-scanDone
 
 	result := RunResult{
-		Output:   buf.String(),
-		TimedOut: cmdCtx.Err() == context.DeadlineExceeded,
+		Output:       buf.String(),
+		TimedOut:     cmdCtx.Err() == context.DeadlineExceeded,
+		DurationMs:   durationMs,
+		ExecutorType: "local",
+	}
+
+	// Extract post-exit resource usage from ProcessState.
+	if cmd.ProcessState != nil {
+		result.ExitCode = cmd.ProcessState.ExitCode()
+		if rusage, ok := cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
+			userNs := cmd.ProcessState.UserTime().Nanoseconds()
+			sysNs := cmd.ProcessState.SystemTime().Nanoseconds()
+			result.CpuUserMs = userNs / int64(time.Millisecond)
+			result.CpuSystemMs = sysNs / int64(time.Millisecond)
+			// MaxRSS is bytes on macOS/BSD, kilobytes on Linux.
+			if runtime.GOOS == "linux" {
+				result.PeakMemoryBytes = rusage.Maxrss * 1024
+			} else {
+				result.PeakMemoryBytes = rusage.Maxrss
+			}
+		}
 	}
 
 	return result, runErr

@@ -19,11 +19,13 @@ Instead of heavy Python-style base classes, Nagare uses lightweight Go structs.
 
 ### 2. The Metadata Database (`internal/models/store.go`)
 Workflow orchestration relies on a robust state machine. Nagare uses an embedded **SQLite** database (`mattn/go-sqlite3`). 
-There are two core tables:
+There are three core tables:
 - `dag_runs`: Tracks entire workflow executions (Status, Execution Date).
 - `task_instances`: Tracks individual units of work within a run. 
   - Statuses advance linearly: `pending` -> `queued` -> `running` -> `success` | `failed`.
   - Runs and tasks can also be moved to `cancelled` if terminated by the user.
+  - Includes a `started_at` column populated by the worker immediately before execution begins.
+- `task_metrics`: Stores post-execution resource measurements for every completed task instance (see [Observability](#6-observability)).
 
 ### 3. The Scheduler (`internal/scheduler/scheduler.go`)
 The brain of the operation. It runs on a continuous `time.Ticker` cycle (e.g. every 5 seconds).
@@ -63,7 +65,7 @@ Runs the command inside an ephemeral Docker container using the **Docker SDK for
 5. **Wait + remove** — waits for the container to exit, collects the exit code, and force-removes the container via a deferred `ContainerRemove`.
 
 #### Shared execution helpers (`internal/worker/exec.go`)
-- **`RunCommand(ctx, cmd, env, timeoutSecs, onLine, onStart)`**: pure shell execution via `sh -c`; places the process in its own group (`Setpgid`) for clean kills; calls `onLine` for each output line and `onStart(cancelFn)` after `cmd.Start()` so the caller can register a kill callback.
+- **`RunCommand(ctx, cmd, env, timeoutSecs, onLine, onStart)`**: pure shell execution via `sh -c`; places the process in its own group (`Setpgid`) for clean kills; calls `onLine` for each output line and `onStart(cancelFn)` after `cmd.Start()` so the caller can register a kill callback. Records `startTime` before `cmd.Start()` and extracts `ProcessState.SysUsage().(*syscall.Rusage)` after `cmd.Wait()` to populate `RunResult` with `DurationMs`, `PeakMemoryBytes`, `CpuUserMs`, and `CpuSystemMs`. `Maxrss` is normalised from kilobytes (Linux) to bytes (macOS) via a `runtime.GOOS` check.
 - **`PrepareTaskAssignment(run, ti, dag)`**: resolves a `TaskInstance` + `DagRun` into a `TaskAssignment` by looking up the task definition, applying `{{item}}` substitution, assembling the full environment slice, and copying container fields (`Image`, `Workdir`, `Volumes`, `Resources`).
 
 ### 5. The Cluster Layer (`internal/cluster/`)
@@ -98,7 +100,7 @@ Runs on worker-only nodes (launched with `--worker --join <addr>`). Responsibili
 
 #### `internal/worker/exec.go` — shared execution helpers
 Extracted from `worker.go` to be reusable by both local and remote paths:
-- **`RunCommand(ctx, cmd, env, timeoutSecs, onLine, onStart)`**: pure shell execution via `sh -c`; places the process in its own group (`Setpgid`) for clean kills; calls `onLine` for each output line and `onStart(cancelFn)` after `cmd.Start()` to register a kill callback.
+- **`RunCommand(ctx, cmd, env, timeoutSecs, onLine, onStart)`**: pure shell execution via `sh -c`; places the process in its own group (`Setpgid`) for clean kills; calls `onLine` for each output line and `onStart(cancelFn)` after `cmd.Start()` to register a kill callback. Records wall-clock duration and extracts `rusage` metrics after `cmd.Wait()` — see [Observability](#6-observability).
 - **`PrepareTaskAssignment(run, ti, dag)`**: resolves a `TaskInstance` + `DagRun` into a `TaskAssignment` by looking up the task definition, applying `{{item}}` substitution, assembling the full environment slice, and copying container fields (`Image`, `Workdir`, `Volumes`, `Resources`).
 
 #### CLI entry points (`main.go`)
@@ -133,3 +135,80 @@ When no key is configured the server starts with a warning and all routes remain
 
 We adhere strictly to TDD (`go test ./...` should pass cleanly at all times).
 When testing database logic, we utilize SQLite's shared in-memory mode (`file::memory:?cache=shared`) to ensure fast, isolated test runs that don't pollute the disk.
+
+## 6. Observability (`internal/worker/`, `internal/models/store.go`, `internal/api/server.go`)
+
+Nagare automatically records resource metrics for every task execution. The design keeps the zero-external-dependency philosophy intact — all data lands in the existing SQLite database.
+
+### Schema
+
+`task_metrics` is created (and migrated on an existing DB) in `store.go`:
+
+```sql
+CREATE TABLE IF NOT EXISTS task_metrics (
+    id              TEXT PRIMARY KEY,
+    task_instance_id TEXT NOT NULL,
+    run_id          TEXT NOT NULL,
+    dag_id          TEXT NOT NULL,
+    task_id         TEXT NOT NULL,
+    started_at      DATETIME,
+    duration_ms     INTEGER,
+    cpu_user_ms     INTEGER,
+    cpu_system_ms   INTEGER,
+    peak_memory_bytes INTEGER,
+    exit_code       INTEGER,
+    executor_type   TEXT,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+`task_instances` gains a `started_at` column (added via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
+
+### Collection — local processes (`exec.go`)
+
+`RunCommand` captures a `startTime` before `cmd.Start()`. After `cmd.Wait()` returns it:
+1. Computes `DurationMs = time.Since(startTime).Milliseconds()`.
+2. Casts `cmd.ProcessState.SysUsage()` to `*syscall.Rusage` and reads `Maxrss` (peak RSS) and `Utime`/`Stime` (user/kernel CPU time).
+3. Normalises `Maxrss` to bytes: Linux reports kilobytes, macOS reports bytes — a `runtime.GOOS == "linux"` guard multiplies by 1024 on Linux.
+4. Returns a populated `RunResult` struct carrying all fields.
+
+### Collection — Docker containers (`exec_docker.go`)
+
+`DockerExecutor.Run` launches a background goroutine before `ContainerStart` that calls `client.ContainerStats` in streaming mode. The goroutine:
+- Decodes each `types.StatsJSON` frame.
+- Updates `peakMemoryBytes` (via `sync/atomic`) whenever `MemoryStats.Usage` exceeds the current peak.
+- Accumulates `totalCPUDelta` from `CPUStats.CPUUsage.TotalUsage`.
+
+After the container exits, `statsCancel()` stops the stream and `statsWg.Wait()` ensures the goroutine has flushed its final frame before the values are read into `RunResult`.
+
+### Persistence (`worker.go`)
+
+`executeTask` calls `store.SetTaskStartedAt` immediately before handing off to the executor, then calls `persistMetrics(result)` after execution. `persistMetrics` builds a `models.TaskMetrics` value and calls `store.InsertTaskMetrics`.
+
+### API (`server.go`)
+
+Five new routes are registered **before** the static-file catch-all:
+
+| Method | Path | Handler |
+|---|---|---|
+| `GET` | `/api/metrics/overview` | `handleGetMetricsOverview` |
+| `GET` | `/api/metrics/timeseries` | `handleGetMetricsTimeSeries` |
+| `GET` | `/api/metrics/tasks/{id}` | `handleGetTaskMetrics` |
+| `GET` | `/api/metrics/runs/{id}` | `handleGetRunMetrics` |
+| `GET` | `/api/metrics/dags/{id}` | `handleGetDAGMetrics` |
+
+All routes accept a `since` query parameter (`1h`, `6h`, `24h`, `7d`, `30d`).
+
+`handleGetRunTasks` is also enriched — it now joins `task_metrics` so each task in the run-detail response carries an inline `Metrics` field consumed by the frontend `TaskRow` component.
+
+### Frontend (`web/src/app/metrics/page.tsx`)
+
+The `/metrics` page is a client component that:
+- Calls `/api/metrics/overview` and `/api/metrics/timeseries` on mount and whenever the `since` window or DAG filter changes.
+- Renders overview stat cards (Mantine `SimpleGrid` + `Paper`).
+- Renders `AreaChart` (duration, CPU) and `BarChart` (memory) from `@mantine/charts` / `recharts`.
+- Renders per-DAG success-rate `Progress` bars and summary tables.
+
+`MainLayout.tsx` exposes the page under an **Observability** nav group (`IconChartBar`).
+
+`runs/page.tsx` — `TaskRow` shows duration and peak memory badges inline next to the task name when `task.Metrics` is present, with automatic unit formatting (ms → s, bytes → KB/MB/GB).

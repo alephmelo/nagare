@@ -55,6 +55,14 @@ interface RunTask {
   CreatedAt: string;
   UpdatedAt: string;
   Command?: string;
+  Metrics?: {
+    DurationMs: number;
+    CpuUserMs: number;
+    CpuSystemMs: number;
+    PeakMemoryBytes: number;
+    ExitCode: number;
+    ExecutorType: string;
+  };
 }
 
 interface Run {
@@ -196,6 +204,22 @@ function TaskRow({ task, runID, onRetry, onKill }: { task: RunTask; runID: strin
               <Text fw={600} size="sm">{task.TaskID}</Text>
               {hasMultipleAttempts && (
                 <Badge size="xs" variant="dot" color="orange">Attempt #{task.Attempt}</Badge>
+              )}
+              {task.Metrics && task.Metrics.DurationMs > 0 && (
+                <Badge size="xs" variant="outline" color="gray">
+                  {task.Metrics.DurationMs >= 1000
+                    ? `${(task.Metrics.DurationMs / 1000).toFixed(1)}s`
+                    : `${task.Metrics.DurationMs}ms`}
+                </Badge>
+              )}
+              {task.Metrics && task.Metrics.PeakMemoryBytes > 0 && (
+                <Badge size="xs" variant="outline" color="cyan">
+                  {task.Metrics.PeakMemoryBytes >= 1024 * 1024 * 1024
+                    ? `${(task.Metrics.PeakMemoryBytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+                    : task.Metrics.PeakMemoryBytes >= 1024 * 1024
+                    ? `${(task.Metrics.PeakMemoryBytes / (1024 * 1024)).toFixed(1)} MB`
+                    : `${(task.Metrics.PeakMemoryBytes / 1024).toFixed(0)} KB`}
+                </Badge>
               )}
             </Group>
             <Text size="xs" c="dimmed">

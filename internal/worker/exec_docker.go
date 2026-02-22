@@ -9,6 +9,8 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -90,9 +92,59 @@ func (e *DockerExecutor) Run(ctx context.Context, assignment *TaskAssignment, on
 	}
 
 	// ---- start container ------------------------------------------------
+	startTime := time.Now()
 	if err := cli.ContainerStart(runCtx, containerID, types.ContainerStartOptions{}); err != nil {
 		return RunResult{}, fmt.Errorf("docker: ContainerStart: %w", err)
 	}
+
+	// ---- resource stats collection goroutine ----------------------------
+	var peakMemoryBytes uint64
+	var totalCPUDelta uint64
+	var statsWg sync.WaitGroup
+	statsCtx, statsCancel := context.WithCancel(context.Background())
+	defer statsCancel()
+
+	statsWg.Add(1)
+	go func() {
+		defer statsWg.Done()
+		statsReader, err := cli.ContainerStats(statsCtx, containerID, true)
+		if err != nil {
+			return
+		}
+		defer statsReader.Body.Close()
+
+		dec := json.NewDecoder(statsReader.Body)
+		var prevCPU, prevSystem uint64
+		first := true
+
+		for {
+			var s types.StatsJSON
+			if err := dec.Decode(&s); err != nil {
+				// EOF or context cancelled — normal shutdown
+				return
+			}
+			// Track peak memory
+			if s.MemoryStats.MaxUsage > 0 {
+				if s.MemoryStats.MaxUsage > atomic.LoadUint64(&peakMemoryBytes) {
+					atomic.StoreUint64(&peakMemoryBytes, s.MemoryStats.MaxUsage)
+				}
+			} else if s.MemoryStats.Usage > 0 {
+				if s.MemoryStats.Usage > atomic.LoadUint64(&peakMemoryBytes) {
+					atomic.StoreUint64(&peakMemoryBytes, s.MemoryStats.Usage)
+				}
+			}
+
+			// Accumulate CPU delta (user+kernel total)
+			cpuDelta := s.CPUStats.CPUUsage.TotalUsage - prevCPU
+			systemDelta := s.CPUStats.SystemUsage - prevSystem
+			if !first && systemDelta > 0 && cpuDelta > 0 {
+				atomic.AddUint64(&totalCPUDelta, cpuDelta)
+			}
+			prevCPU = s.CPUStats.CPUUsage.TotalUsage
+			prevSystem = s.CPUStats.SystemUsage
+			first = false
+		}
+	}()
 
 	// ---- stream logs ----------------------------------------------------
 	logOpts := types.ContainerLogsOptions{
@@ -139,14 +191,32 @@ func (e *DockerExecutor) Run(ctx context.Context, assignment *TaskAssignment, on
 	case waitErr = <-errCh:
 	}
 
+	durationMs := time.Since(startTime).Milliseconds()
+
+	// Stop the stats goroutine now that the container has exited.
+	statsCancel()
+	statsWg.Wait()
+
 	// Wait for log scanning to finish.
 	<-scanDone
 
 	timedOut := runCtx.Err() == context.DeadlineExceeded
 
+	// totalCPUDelta is in nanoseconds (Docker CPU accounting).
+	cpuMs := int64(atomic.LoadUint64(&totalCPUDelta)) / int64(time.Millisecond)
+	if cpuMs < 0 {
+		cpuMs = 0
+	}
+
 	result := RunResult{
-		Output:   buf.String(),
-		TimedOut: timedOut,
+		Output:          buf.String(),
+		TimedOut:        timedOut,
+		DurationMs:      durationMs,
+		CpuUserMs:       cpuMs, // Docker doesn't split user/kernel easily; store in CpuUserMs
+		CpuSystemMs:     0,
+		PeakMemoryBytes: int64(atomic.LoadUint64(&peakMemoryBytes)),
+		ExitCode:        int(exitCode),
+		ExecutorType:    "docker",
 	}
 
 	if waitErr != nil {

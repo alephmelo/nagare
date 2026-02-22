@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alephmelo/nagare/internal/cluster"
 	"github.com/alephmelo/nagare/internal/logbroker"
@@ -271,9 +272,11 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// We enrich the TaskInstance with the Command from the DAG definition for the UI
+	// and with resource metrics if available.
 	type EnrichedTask struct {
 		models.TaskInstance
-		Command string `json:"Command"`
+		Command string              `json:"Command"`
+		Metrics *models.TaskMetrics `json:"Metrics,omitempty"`
 	}
 
 	run, err := s.store.GetDagRun(runID)
@@ -296,9 +299,11 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		m, _ := s.store.GetTaskMetrics(t.ID)
 		enriched = append(enriched, EnrichedTask{
 			TaskInstance: t,
 			Command:      cmd,
+			Metrics:      m,
 		})
 	}
 
@@ -621,6 +626,140 @@ func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleGetTaskMetrics returns metrics for a specific task instance.
+// Route: GET /api/metrics/tasks/{taskInstanceID}
+func (s *Server) handleGetTaskMetrics(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	// /api/metrics/tasks/{id} → parts = ["", "api", "metrics", "tasks", "{id}"]
+	if len(parts) < 5 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	taskInstanceID := parts[4]
+
+	m, err := s.store.GetTaskMetrics(taskInstanceID)
+	if err != nil {
+		http.Error(w, "Metrics not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(m)
+}
+
+// handleGetRunMetrics returns all task metrics for a specific run.
+// Route: GET /api/metrics/runs/{runID}
+func (s *Server) handleGetRunMetrics(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	// /api/metrics/runs/{id} → parts = ["", "api", "metrics", "runs", "{id}"]
+	if len(parts) < 5 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	runID := parts[4]
+
+	metrics, err := s.store.GetMetricsByRunID(runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+// handleGetDAGMetrics returns recent task metrics and aggregate stats for a DAG.
+// Route: GET /api/metrics/dags/{dagID}?since=24h&limit=200
+func (s *Server) handleGetDAGMetrics(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	// /api/metrics/dags/{id} → parts = ["", "api", "metrics", "dags", "{id}"]
+	if len(parts) < 5 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	dagID := parts[4]
+
+	since, limit := parseSinceAndLimit(r)
+
+	agg, err := s.store.GetAggregateMetrics(dagID, since)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	series, err := s.store.GetMetricsTimeSeries(dagID, since, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]interface{}{
+		"aggregate":   agg,
+		"time_series": series,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGetMetricsOverview returns system-wide metrics for the Metrics dashboard.
+// Route: GET /api/metrics/overview?since=24h
+func (s *Server) handleGetMetricsOverview(w http.ResponseWriter, r *http.Request) {
+	since, _ := parseSinceAndLimit(r)
+
+	overview, err := s.store.GetOverviewMetrics(since)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(overview)
+}
+
+// handleGetMetricsTimeSeries returns global time-series data for charting.
+// Route: GET /api/metrics/timeseries?dag_id=...&since=24h&limit=500
+func (s *Server) handleGetMetricsTimeSeries(w http.ResponseWriter, r *http.Request) {
+	dagID := r.URL.Query().Get("dag_id")
+	since, limit := parseSinceAndLimit(r)
+
+	series, err := s.store.GetMetricsTimeSeries(dagID, since, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(series)
+}
+
+// parseSinceAndLimit is a helper that extracts ?since= (duration like "24h", "7d")
+// and ?limit= from a request, returning a time.Time and int with sensible defaults.
+func parseSinceAndLimit(r *http.Request) (time.Time, int) {
+	sinceStr := r.URL.Query().Get("since")
+	if sinceStr == "" {
+		sinceStr = "24h"
+	}
+	// Allow shorthand like "7d" in addition to standard Go durations.
+	sinceStr = strings.ReplaceAll(sinceStr, "d", "h") // crude: 7d → 168h (7*24=168)
+	// Handle days properly
+	if strings.HasSuffix(r.URL.Query().Get("since"), "d") {
+		daysStr := strings.TrimSuffix(r.URL.Query().Get("since"), "d")
+		if days, err := strconv.Atoi(daysStr); err == nil {
+			return time.Now().Add(-time.Duration(days) * 24 * time.Hour), parseLimit(r)
+		}
+	}
+	d, err := time.ParseDuration(sinceStr)
+	if err != nil {
+		d = 24 * time.Hour
+	}
+	return time.Now().Add(-d), parseLimit(r)
+}
+
+func parseLimit(r *http.Request) int {
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 500
+}
+
 // Start launches the HTTP server
 func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	if len(s.allowedOrigins) == 0 {
@@ -680,6 +819,13 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 		}
 		http.NotFound(w, r)
 	}))
+
+	// Metrics endpoints
+	mux.HandleFunc("/api/metrics/overview", auth(s.handleGetMetricsOverview))
+	mux.HandleFunc("/api/metrics/timeseries", auth(s.handleGetMetricsTimeSeries))
+	mux.HandleFunc("/api/metrics/tasks/", auth(s.handleGetTaskMetrics))
+	mux.HandleFunc("/api/metrics/runs/", auth(s.handleGetRunMetrics))
+	mux.HandleFunc("/api/metrics/dags/", auth(s.handleGetDAGMetrics))
 
 	if frontendFS != nil {
 		mux.Handle("/", http.FileServer(http.FS(frontendFS)))

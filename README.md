@@ -16,6 +16,7 @@ It is designed as a lightweight alternative to heavy data pipeline tools like Ap
 - **Dynamic Map Tasks**: Fan-out workflows dynamically using standard output JSON arrays (`type: map`), natively supporting the Unix philosophy.
 - **Worker Pools (Queues)**: Throttle and route specific tasks (e.g. ML inference) to dedicated worker pools via `pool: <queue_name>` and standard global allocations (`nagare.yaml`).
 - **Container Executor**: Sandbox any task inside a Docker image with a single `image:` field. Supports per-step CPU/memory limits, GPU passthrough, and volume bind-mounts — opt-in, fully backward compatible.
+- **Observability Dashboard**: Built-in metrics collection for every task execution — duration, peak memory, and CPU usage — stored in SQLite and surfaced as interactive charts on the `/metrics` dashboard page.
 - **Single Binary Web UI**: The entire Next.js + Mantine dashboard is compiled into static files and embedded directly into the Go binary (`//go:embed all:web/out`). Drop the executable onto a server, and you get a production-ready engine + dashboard on port `8080` instantly.
 
 ---
@@ -211,6 +212,53 @@ tasks:
 - GPU passthrough requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host.
 
 See `dags/container_example.yaml` for a working end-to-end example.
+
+---
+## Observability
+
+Nagare automatically collects resource metrics for every task execution — no configuration required. Metrics are stored in the embedded SQLite database and exposed via a dedicated dashboard page and REST API.
+
+### What is collected
+
+| Metric | Local process | Docker container |
+|---|---|---|
+| Wall-clock duration (ms) | yes | yes |
+| Peak memory usage (bytes) | yes (`rusage.Maxrss`) | yes (Docker Stats API) |
+| CPU user time (ms) | yes | yes (total CPU delta) |
+| CPU kernel time (ms) | yes | — |
+| Exit code | yes | yes |
+| Executor type | `local` | `docker` |
+
+> On Linux, `rusage.Maxrss` is in kilobytes; on macOS it is in bytes. Nagare normalises both to bytes automatically.
+
+### Metrics Dashboard (`/metrics`)
+
+The **Observability → Metrics** page in the web UI provides:
+
+- **Overview stat cards** — total tasks tracked, average duration, peak memory, overall success rate for the selected time window.
+- **Duration trend** — area chart of average task duration over time.
+- **Memory trend** — bar chart of peak memory usage over time.
+- **CPU trend** — area chart of CPU consumption over time.
+- **Per-DAG breakdown** — success-rate progress bars and a DAG performance summary table.
+- **Slowest tasks** and **recent task executions** tables.
+
+Use the time-window selector (1 h / 6 h / 24 h / 7 d / 30 d) and the DAG filter to narrow the view.
+
+### Inline task metrics
+
+In the **Runs → Run Detail** view, each completed task row displays its duration and peak memory consumption directly next to the task name as small badges — no need to navigate to the metrics page for a quick sanity check.
+
+### Metrics API
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/metrics/overview?since=24h` | Aggregate stats for the given window |
+| `GET /api/metrics/timeseries?since=24h` | Time-series data points (duration, memory, CPU) |
+| `GET /api/metrics/tasks/{taskInstanceID}` | Metrics for a specific task instance |
+| `GET /api/metrics/runs/{runID}` | All task metrics for a run |
+| `GET /api/metrics/dags/{dagID}?since=24h&limit=50` | Per-task metrics for a DAG |
+
+`since` accepts `1h`, `6h`, `24h`, `7d`, or `30d`.
 
 ---
 ## Authentication
