@@ -256,10 +256,16 @@ func (rw *RemoteWorker) executeAssignment(ctx context.Context, a TaskAssignmentD
 	}
 
 	taskResult := TaskResult{
-		TaskInstanceID: a.TaskInstanceID,
-		Status:         reportStatus,
-		Output:         result.Output,
-		TimedOut:       result.TimedOut,
+		TaskInstanceID:  a.TaskInstanceID,
+		Status:          reportStatus,
+		Output:          result.Output,
+		TimedOut:        result.TimedOut,
+		DurationMs:      result.DurationMs,
+		CpuUserMs:       result.CpuUserMs,
+		CpuSystemMs:     result.CpuSystemMs,
+		PeakMemoryBytes: result.PeakMemoryBytes,
+		ExitCode:        result.ExitCode,
+		ExecutorType:    result.ExecutorType,
 	}
 
 	resp, err := rw.post("/api/workers/result", taskResult)

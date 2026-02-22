@@ -55,6 +55,15 @@ type TaskResult struct {
 	Status         string `json:"status"` // "success" | "failed" | "cancelled"
 	Output         string `json:"output"`
 	TimedOut       bool   `json:"timed_out"`
+
+	// Resource metrics collected on the remote worker during execution.
+	// Zero values are ignored by the master (e.g. cancelled tasks).
+	DurationMs      int64  `json:"duration_ms,omitempty"`
+	CpuUserMs       int64  `json:"cpu_user_ms,omitempty"`
+	CpuSystemMs     int64  `json:"cpu_system_ms,omitempty"`
+	PeakMemoryBytes int64  `json:"peak_memory_bytes,omitempty"`
+	ExitCode        int    `json:"exit_code,omitempty"`
+	ExecutorType    string `json:"executor_type,omitempty"`
 }
 
 // LogBatch is sent by workers to stream log lines back to the master in real time.

@@ -241,6 +241,10 @@ func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Record the dispatch time as the task's started_at so metrics have a
+		// valid start timestamp even when the worker reports them later.
+		c.store.SetTaskStartedAt(ti.ID, time.Now())
+
 		dto := TaskAssignmentDTO{
 			TaskInstanceID: assignment.TaskInstanceID,
 			RunID:          assignment.RunID,
@@ -291,6 +295,35 @@ func (c *Coordinator) handleResult(w http.ResponseWriter, r *http.Request) {
 	if err := c.store.UpdateTaskInstanceStatusAndOutput(res.TaskInstanceID, status, res.Output); err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
+	}
+
+	// Persist resource metrics reported by the remote worker.
+	// We look up the task instance to get dag_id / task_id which the worker
+	// does not carry in its result payload.
+	if res.DurationMs > 0 || res.PeakMemoryBytes > 0 {
+		if ti, err := c.store.GetTaskInstance(res.TaskInstanceID); err == nil {
+			run, runErr := c.store.GetDagRun(ti.RunID)
+			dagID := ""
+			if runErr == nil {
+				dagID = run.DAGID
+			}
+			m := &models.TaskMetrics{
+				TaskInstanceID:  res.TaskInstanceID,
+				RunID:           ti.RunID,
+				DAGID:           dagID,
+				TaskID:          ti.TaskID,
+				DurationMs:      res.DurationMs,
+				CpuUserMs:       res.CpuUserMs,
+				CpuSystemMs:     res.CpuSystemMs,
+				PeakMemoryBytes: res.PeakMemoryBytes,
+				ExitCode:        res.ExitCode,
+				ExecutorType:    res.ExecutorType,
+				CreatedAt:       time.Now(),
+			}
+			if err := c.store.InsertTaskMetrics(m); err != nil {
+				log.Printf("Cluster: warning: failed to persist metrics for task %s: %v", res.TaskInstanceID, err)
+			}
+		}
 	}
 
 	// Close the broker entry so SSE subscribers receive EOF.
