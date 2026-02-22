@@ -922,5 +922,14 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	}
 
 	log.Printf("Starting Nagare API on %s", addr)
-	return http.ListenAndServe(addr, mux)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+		// Prevent slow-loris / header-flooding attacks and stale keepalive
+		// connections from exhausting goroutines. WriteTimeout is intentionally
+		// absent so that long-lived SSE streams (handleTaskLogs) are not killed.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	return srv.ListenAndServe()
 }

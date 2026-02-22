@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef, Suspense, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { apiFetch } from "../../lib/apiFetch";
+import { useVisibilityPoll } from "../../lib/useVisibilityPoll";
 import {
   Title,
   Card,
@@ -514,15 +515,16 @@ function RunDetailsContent() {
     }
   }, [id]);
 
-  useEffect(() => {
-    fetchTasks();
-    const interval = setInterval(() => {
-      // Stop polling once the run has reached a terminal state.
+  // Poll for task/run updates. useVisibilityPoll pauses when the tab is hidden.
+  // Skip the poll once the run reaches a terminal state.
+  useVisibilityPoll(
+    () => {
       if (run && TERMINAL.has(run.Status)) return;
       fetchTasks();
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [fetchTasks, run]);
+    },
+    5000,
+    [fetchTasks, run]
+  );
 
   const handleRetry = async (taskID: string) => {
     try {
@@ -847,11 +849,7 @@ function RunListContent() {
     }
   }, [page, dagFilter, statusFilter, triggerFilter]);
 
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+  useVisibilityPoll(fetchData, 5000, [fetchData]);
 
   const handleKillRun = async (e: React.MouseEvent, runID: string) => {
     e.stopPropagation();

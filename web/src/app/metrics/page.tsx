@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { apiFetch } from "../../lib/apiFetch";
+import { useVisibilityPoll } from "../../lib/useVisibilityPoll";
 import {
   Title,
   Card,
@@ -185,12 +186,7 @@ export default function MetricsPage() {
     }
   }, [since, dagFilter]);
 
-  useEffect(() => {
-    setLoading(true);
-    fetchData();
-    const id = setInterval(fetchData, 15000);
-    return () => clearInterval(id);
-  }, [fetchData]);
+  useVisibilityPoll(fetchData, 15000, [fetchData]);
 
   // ---- Transform time-series for charts -----------------------------------
 

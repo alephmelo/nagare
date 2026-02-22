@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useVisibilityPoll } from "../lib/useVisibilityPoll";
 import {
   Title,
   Card,
@@ -105,11 +106,7 @@ export default function Dashboard() {
     }
   };
 
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, [page, dagFilter, statusFilter, triggerFilter]);
+  useVisibilityPoll(fetchData, 5000, [page, dagFilter, statusFilter, triggerFilter]);
 
   const handleTrigger = async (dagID: string) => {
     setTriggering((prev) => ({ ...prev, [dagID]: true }));

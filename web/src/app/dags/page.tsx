@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { apiFetch } from "../../lib/apiFetch";
+import { useVisibilityPoll } from "../../lib/useVisibilityPoll";
 import {
   Title,
   Card,
@@ -138,11 +139,7 @@ function DagListContent() {
     }
   };
 
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, []);
+  useVisibilityPoll(fetchData, 5000);
 
   const handleTrigger = async (dagID: string) => {
     setTriggering((prev) => ({ ...prev, [dagID]: true }));
@@ -427,13 +424,7 @@ function DagDetailsContent() {
     }
   };
 
-  useEffect(() => {
-    if (!id) return;
-
-    fetchRuns();
-    const interval = setInterval(fetchRuns, 5000);
-    return () => clearInterval(interval);
-  }, [id, page, statusFilter, triggerFilter]);
+  useVisibilityPoll(fetchRuns, 5000, [id, page, statusFilter, triggerFilter]);
 
   const handleTrigger = async () => {
     if (!id) return;

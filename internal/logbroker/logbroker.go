@@ -11,6 +11,7 @@ type Broker struct {
 }
 
 type taskLog struct {
+	mu          sync.Mutex
 	lines       []string
 	subscribers []chan string
 	closed      bool
@@ -24,17 +25,28 @@ func NewBroker() *Broker {
 
 // Publish appends a line to the task's history and delivers it to all
 // current subscribers. Safe to call concurrently.
+//
+// The send to each subscriber channel is non-blocking: if the channel
+// is full the line is dropped for that subscriber rather than blocking
+// the caller (and holding the lock). A slow SSE consumer will miss
+// lines but will never stall backend goroutines.
 func (b *Broker) Publish(taskID, line string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	tl := b.getOrCreate(taskID)
+
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+
 	if tl.closed {
 		return
 	}
 	tl.lines = append(tl.lines, line)
 	for _, ch := range tl.subscribers {
-		ch <- line
+		select {
+		case ch <- line:
+		default:
+			// Subscriber channel full — drop the line for this consumer.
+			// The full output is persisted to the DB at task completion.
+		}
 	}
 }
 
@@ -43,9 +55,9 @@ func (b *Broker) Publish(taskID, line string) {
 // The returned unsubscribe function must be called to release resources; it
 // closes the channel. The channel is also closed by Close(taskID).
 func (b *Broker) Subscribe(taskID string) (<-chan string, func()) {
-	b.mu.Lock()
-
 	tl := b.getOrCreate(taskID)
+
+	tl.mu.Lock()
 
 	// Buffered enough to hold history + a reasonable burst of live lines.
 	ch := make(chan string, len(tl.lines)+128)
@@ -57,24 +69,20 @@ func (b *Broker) Subscribe(taskID string) (<-chan string, func()) {
 
 	// If already closed (or cleaned up), seal the channel now and return a no-op unsub.
 	if tl.closed || tl.cleaned {
-		b.mu.Unlock()
+		tl.mu.Unlock()
 		close(ch)
 		return ch, func() {}
 	}
 
 	tl.subscribers = append(tl.subscribers, ch)
-	b.mu.Unlock()
+	tl.mu.Unlock()
 
 	unsub := func() {
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		tl2, ok := b.tasks[taskID]
-		if !ok {
-			return
-		}
-		for i, sub := range tl2.subscribers {
+		tl.mu.Lock()
+		defer tl.mu.Unlock()
+		for i, sub := range tl.subscribers {
 			if sub == ch {
-				tl2.subscribers = append(tl2.subscribers[:i], tl2.subscribers[i+1:]...)
+				tl.subscribers = append(tl.subscribers[:i], tl.subscribers[i+1:]...)
 				close(ch)
 				break
 			}
@@ -87,11 +95,12 @@ func (b *Broker) Subscribe(taskID string) (<-chan string, func()) {
 // Close marks the task as finished, closes all subscriber channels, and
 // retains the history buffer for late subscribers until Cleanup is called.
 func (b *Broker) Close(taskID string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	tl := b.getOrCreate(taskID)
 
-	tl, ok := b.tasks[taskID]
-	if !ok || tl.closed {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+
+	if tl.closed {
 		return
 	}
 	tl.closed = true
@@ -104,21 +113,23 @@ func (b *Broker) Close(taskID string) {
 // Cleanup removes all state for taskID. Call this after the final output has
 // been persisted to the database to free memory.
 func (b *Broker) Cleanup(taskID string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if tl, ok := b.tasks[taskID]; ok {
-		tl.lines = nil
-		tl.cleaned = true
-	}
+	tl := b.getOrCreate(taskID)
+
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+
+	tl.lines = nil
+	tl.cleaned = true
 }
 
 // getOrCreate returns the taskLog for taskID, creating it if necessary.
-// Caller must hold b.mu.
 func (b *Broker) getOrCreate(taskID string) *taskLog {
+	b.mu.Lock()
 	tl, ok := b.tasks[taskID]
 	if !ok {
 		tl = &taskLog{}
 		b.tasks[taskID] = tl
 	}
+	b.mu.Unlock()
 	return tl
 }

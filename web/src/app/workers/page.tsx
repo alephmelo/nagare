@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useVisibilityPoll } from "../../lib/useVisibilityPoll";
 import {
   Title,
   Card,
@@ -67,11 +68,7 @@ export default function WorkersPage() {
     }
   };
 
-  useEffect(() => {
-    fetchWorkers();
-    const interval = setInterval(fetchWorkers, 5000);
-    return () => clearInterval(interval);
-  }, []);
+  useVisibilityPoll(fetchWorkers, 5000);
 
   const online = workers.filter((w) => w.status === "online");
   const offline = workers.filter((w) => w.status === "offline");
