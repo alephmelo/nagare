@@ -12,6 +12,12 @@ description: >
 
 schedule: "workflow_dispatch"
 
+# Per-DAG autoscaler overrides — this DAG is latency-sensitive so it lowers
+# the scale_up_threshold to 2 (vs the global 3) and caps cloud workers at 3.
+autoscaler:
+  scale_up_threshold: 2
+  max_cloud_workers: 3
+
 tasks:
   # -------------------------------------------------------------------------
   # Fan-out: 8 slow jobs submitted to the 'default' pool simultaneously.

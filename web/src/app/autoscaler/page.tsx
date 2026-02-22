@@ -53,6 +53,11 @@ interface WorkerInstance {
   terminated_at: string | null;
 }
 
+interface DAGAutoscalerOverride {
+  scale_up_threshold: number;
+  max_cloud_workers: number;
+}
+
 interface StatusSnapshot {
   enabled: boolean;
   provider: string;
@@ -60,6 +65,7 @@ interface StatusSnapshot {
   max_cloud_workers: number;
   pools: Record<string, PoolStats>;
   instances: WorkerInstance[];
+  per_dag_overrides?: Record<string, DAGAutoscalerOverride>;
 }
 
 interface CostSummary {
@@ -422,6 +428,56 @@ export default function AutoscalerPage() {
               </Table>
             </Table.ScrollContainer>
           </Card>
+
+          {/* ── Per-DAG Overrides ───────────────────────────────────────── */}
+          {status?.per_dag_overrides && Object.keys(status.per_dag_overrides).length > 0 && (
+            <>
+              <Title order={4} mb="md" c="dimmed">
+                Per-DAG Overrides
+              </Title>
+              <Card padding="0" mb="xl">
+                <Table.ScrollContainer minWidth={400}>
+                  <Table verticalSpacing="sm" horizontalSpacing="md" striped highlightOnHover>
+                    <Table.Thead>
+                      <Table.Tr>
+                        {["DAG", "Scale-Up Threshold", "Max Cloud Workers"].map((h) => (
+                          <Table.Th
+                            key={h}
+                            style={{ borderBottom: "2px solid var(--border-color)" }}
+                          >
+                            <Text size="sm" fw={700}>
+                              {h}
+                            </Text>
+                          </Table.Th>
+                        ))}
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {Object.entries(status.per_dag_overrides).map(([dagID, override]) => (
+                        <Table.Tr key={dagID}>
+                          <Table.Td>
+                            <Badge variant="outline" color="teal" size="sm" radius="sm">
+                              {dagID}
+                            </Badge>
+                          </Table.Td>
+                          <Table.Td>
+                            <Text size="sm" fw={600}>
+                              {override.scale_up_threshold}
+                            </Text>
+                          </Table.Td>
+                          <Table.Td>
+                            <Text size="sm" fw={600}>
+                              {override.max_cloud_workers}
+                            </Text>
+                          </Table.Td>
+                        </Table.Tr>
+                      ))}
+                    </Table.Tbody>
+                  </Table>
+                </Table.ScrollContainer>
+              </Card>
+            </>
+          )}
 
           {/* ── Cloud instances ─────────────────────────────────────────────── */}
           <Title order={4} mb="md" c="dimmed">

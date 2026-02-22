@@ -8,17 +8,19 @@ import (
 	"time"
 
 	"github.com/alephmelo/nagare/internal/config"
+	"github.com/alephmelo/nagare/internal/models"
 )
 
 // StatusSnapshot is a point-in-time view of the autoscaler's state, suitable
 // for serialising to the /api/autoscaler/status API endpoint.
 type StatusSnapshot struct {
-	Enabled         bool                 `json:"enabled"`
-	Provider        string               `json:"provider"`
-	CloudWorkers    int                  `json:"cloud_workers"`
-	MaxCloudWorkers int                  `json:"max_cloud_workers"`
-	Pools           map[string]PoolStats `json:"pools"`
-	Instances       []WorkerInstance     `json:"instances"`
+	Enabled         bool                                  `json:"enabled"`
+	Provider        string                                `json:"provider"`
+	CloudWorkers    int                                   `json:"cloud_workers"`
+	MaxCloudWorkers int                                   `json:"max_cloud_workers"`
+	Pools           map[string]PoolStats                  `json:"pools"`
+	Instances       []WorkerInstance                      `json:"instances"`
+	PerDAGOverrides map[string]models.DAGAutoscalerConfig `json:"per_dag_overrides,omitempty"`
 }
 
 // InstanceStore is the persistence interface the autoscaler uses to durably
@@ -50,8 +52,8 @@ type StatsSource interface {
 // (scales up) or terminates (scales down) cloud workers in response to load.
 //
 // Scale-up logic (per pool, per tick):
-//  1. QueuedTasks > ScaleUpThreshold
-//  2. Total cloud instances < MaxCloudWorkers
+//  1. QueuedTasks > effective ScaleUpThreshold (global or per-DAG minimum)
+//  2. Total cloud instances < effective MaxCloudWorkers (global or per-DAG maximum)
 //  3. Time since last scale-up for this pool > CooldownSecs
 //
 // Scale-down logic (per cloud instance, per tick):
@@ -67,6 +69,12 @@ type Autoscaler struct {
 	statsSource   StatsSource
 	instanceStore InstanceStore
 
+	// activeDAGs returns the current set of loaded DAG definitions. The
+	// autoscaler reads their Autoscaler overrides on every tick to apply
+	// per-DAG scale-up thresholds and max-worker caps using
+	// "most permissive wins" semantics. A nil func is treated as no overrides.
+	activeDAGs func() map[string]*models.DAGDef
+
 	mu          sync.RWMutex
 	instances   map[string]*WorkerInstance // keyed by Nagare instance ID
 	lastScaleUp map[string]time.Time       // pool name → last scale-up time
@@ -78,12 +86,14 @@ type Autoscaler struct {
 // provider must not be nil when cfg.Enabled is true.
 // statsSource must always be non-nil.
 // instanceStore must always be non-nil.
-func New(cfg config.AutoscalerConfig, provider CloudProvider, statsSource StatsSource, instanceStore InstanceStore) *Autoscaler {
+// activeDAGs may be nil (treated as no per-DAG overrides).
+func New(cfg config.AutoscalerConfig, provider CloudProvider, statsSource StatsSource, instanceStore InstanceStore, activeDAGs func() map[string]*models.DAGDef) *Autoscaler {
 	return &Autoscaler{
 		cfg:           cfg,
 		provider:      provider,
 		statsSource:   statsSource,
 		instanceStore: instanceStore,
+		activeDAGs:    activeDAGs,
 		instances:     make(map[string]*WorkerInstance),
 		lastScaleUp:   make(map[string]time.Time),
 		idleSince:     make(map[string]time.Time),
@@ -148,20 +158,65 @@ func (a *Autoscaler) tick(ctx context.Context, masterAddr, token string) {
 	a.evaluateScaleDown(ctx, poolStats)
 }
 
+// effectiveScaleParams returns the scale-up threshold and max-cloud-workers
+// cap to use for a given tick, merging global config with any per-DAG
+// overrides. Zero values in a DAGAutoscalerConfig mean "not set / use global".
+//
+// Resolution rules ("most permissive wins among overrides"):
+//   - threshold: min(global, min of all non-zero per-DAG thresholds)
+//     → the most eager DAG lowers the bar for everyone
+//   - maxWorkers: min(global, max of all non-zero per-DAG maxWorkers)
+//     → per-DAG overrides can only constrain below the global cap;
+//     among multiple per-DAG values the largest (most permissive) wins
+func (a *Autoscaler) effectiveScaleParams() (threshold, maxWorkers int) {
+	threshold = a.cfg.ScaleUpThreshold
+	maxWorkers = a.cfg.MaxCloudWorkers
+
+	if a.activeDAGs == nil {
+		return
+	}
+
+	bestThreshold := threshold // lowest non-zero DAG threshold seen
+	bestMax := 0               // highest non-zero DAG max seen (0 = none set)
+
+	for _, dag := range a.activeDAGs() {
+		if dag.Autoscaler == nil {
+			continue
+		}
+		if t := dag.Autoscaler.ScaleUpThreshold; t > 0 && t < bestThreshold {
+			bestThreshold = t
+		}
+		if m := dag.Autoscaler.MaxCloudWorkers; m > 0 && m > bestMax {
+			bestMax = m
+		}
+	}
+
+	threshold = bestThreshold
+	if bestMax > 0 {
+		// Clamp to global ceiling.
+		if bestMax < maxWorkers {
+			maxWorkers = bestMax
+		}
+	}
+	return
+}
+
 // evaluateScaleUp spins up a new worker for any pool whose queue depth exceeds
 // the threshold, subject to the global cap and per-pool cooldown.
 func (a *Autoscaler) evaluateScaleUp(ctx context.Context, poolStats map[string]PoolStats, masterAddr, token string) {
+	threshold, maxWorkers := a.effectiveScaleParams()
+
 	a.mu.RLock()
 	cloudCount := len(a.instances)
 	a.mu.RUnlock()
 
 	for pool, stats := range poolStats {
-		if stats.QueuedTasks <= a.cfg.ScaleUpThreshold {
+		if stats.QueuedTasks <= threshold {
 			continue
 		}
 
-		if cloudCount >= a.cfg.MaxCloudWorkers {
-			log.Printf("Autoscaler: pool %s needs workers but cloud cap (%d) reached", pool, a.cfg.MaxCloudWorkers)
+		if cloudCount >= maxWorkers {
+			log.Printf("Autoscaler: pool %s needs workers but cloud cap (%d) reached", pool, maxWorkers)
 			continue
 		}
 
@@ -185,7 +240,7 @@ func (a *Autoscaler) evaluateScaleUp(ctx context.Context, poolStats map[string]P
 		}
 
 		log.Printf("Autoscaler: scaling up pool %s (queued=%d, threshold=%d) → instance %s",
-			pool, stats.QueuedTasks, a.cfg.ScaleUpThreshold, instanceID)
+			pool, stats.QueuedTasks, threshold, instanceID)
 
 		inst, err := a.provider.SpinUp(ctx, req)
 		if err != nil {
@@ -389,6 +444,20 @@ func (a *Autoscaler) Status() StatusSnapshot {
 		providerName = a.provider.Name()
 	}
 
+	// Collect per-DAG overrides from active DAGs that have an autoscaler block.
+	var perDAGOverrides map[string]models.DAGAutoscalerConfig
+	if a.activeDAGs != nil {
+		for id, dag := range a.activeDAGs() {
+			if dag.Autoscaler == nil {
+				continue
+			}
+			if perDAGOverrides == nil {
+				perDAGOverrides = make(map[string]models.DAGAutoscalerConfig)
+			}
+			perDAGOverrides[id] = *dag.Autoscaler
+		}
+	}
+
 	return StatusSnapshot{
 		Enabled:         a.cfg.Enabled,
 		Provider:        providerName,
@@ -396,6 +465,7 @@ func (a *Autoscaler) Status() StatusSnapshot {
 		MaxCloudWorkers: a.cfg.MaxCloudWorkers,
 		Pools:           a.statsSource.PoolStats(),
 		Instances:       instances,
+		PerDAGOverrides: perDAGOverrides,
 	}
 }
 

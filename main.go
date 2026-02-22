@@ -110,12 +110,12 @@ func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 			log.Fatalf("Autoscaler: failed to initialize provider %q: %v", cfg.Autoscaler.Provider, err)
 		}
 		storeAdapt := autoscaler.NewStoreAdapter(store)
-		as = autoscaler.New(cfg.Autoscaler, provider, coord, storeAdapt)
+		as = autoscaler.New(cfg.Autoscaler, provider, coord, storeAdapt, sched.GetDAGs)
 		coord.SetAutoscaler(as)
 		log.Printf("Autoscaler: initialized (provider=%s, max=%d)", cfg.Autoscaler.Provider, cfg.Autoscaler.MaxCloudWorkers)
 	} else {
 		// Disabled autoscaler: pass a no-op instance store so coordinator still works.
-		as = autoscaler.New(cfg.Autoscaler, nil, coord, autoscaler.NewStoreAdapter(store))
+		as = autoscaler.New(cfg.Autoscaler, nil, coord, autoscaler.NewStoreAdapter(store), sched.GetDAGs)
 	}
 
 	// 6. Initialize API server and attach coordinator and autoscaler.

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alephmelo/nagare/internal/config"
+	"github.com/alephmelo/nagare/internal/models"
 )
 
 // ---- Fake provider used across autoscaler engine tests ----
@@ -164,6 +165,7 @@ func newTestAutoscaler(cfg config.AutoscalerConfig, provider CloudProvider, stat
 		provider:      provider,
 		statsSource:   stats,
 		instanceStore: istore,
+		activeDAGs:    nil,
 		instances:     make(map[string]*WorkerInstance),
 		lastScaleUp:   make(map[string]time.Time),
 		idleSince:     make(map[string]time.Time),
@@ -697,5 +699,212 @@ func TestAutoscaler_InstanceIDForWorker_NotFound(t *testing.T) {
 	_, ok := a.InstanceIDForWorker("ghost-worker")
 	if ok {
 		t.Error("expected InstanceIDForWorker to return false for unknown worker")
+	}
+}
+
+// ---- Per-DAG autoscaler override tests ------------------------------------
+
+// newTestAutoscalerWithDAGs builds an Autoscaler that reads DAG definitions
+// from the supplied map (simulating what the scheduler would provide).
+func newTestAutoscalerWithDAGs(
+	cfg config.AutoscalerConfig,
+	provider CloudProvider,
+	stats *fakeStatsSource,
+	dags map[string]*models.DAGDef,
+) (*Autoscaler, *fakeInstanceStore) {
+	istore := newFakeInstanceStore()
+	a := &Autoscaler{
+		cfg:           cfg,
+		provider:      provider,
+		statsSource:   stats,
+		instanceStore: istore,
+		instances:     make(map[string]*WorkerInstance),
+		lastScaleUp:   make(map[string]time.Time),
+		idleSince:     make(map[string]time.Time),
+		activeDAGs:    func() map[string]*models.DAGDef { return dags },
+	}
+	return a, istore
+}
+
+func TestAutoscaler_PerDAG_LowerThresholdTriggersScaleUp(t *testing.T) {
+	// Global threshold=5, DAG override=2. Pool has 3 queued tasks.
+	// Without the override: no scale-up. With override: scale-up.
+	provider := &fakeProvider{}
+	stats := &fakeStatsSource{stats: map[string]PoolStats{
+		"default": {Pool: "default", QueuedTasks: 3},
+	}}
+	cfg := config.AutoscalerConfig{
+		Enabled:          true,
+		MaxCloudWorkers:  5,
+		ScaleUpThreshold: 5, // global: would NOT trigger at 3
+		CooldownSecs:     0,
+	}
+	dags := map[string]*models.DAGDef{
+		"stress": {
+			ID: "stress",
+			Autoscaler: &models.DAGAutoscalerConfig{
+				ScaleUpThreshold: 2, // per-DAG: triggers at 3
+			},
+		},
+	}
+	a, _ := newTestAutoscalerWithDAGs(cfg, provider, stats, dags)
+	a.tick(context.Background(), "http://master:8080", "")
+
+	if provider.spunUpCount() != 1 {
+		t.Errorf("expected 1 SpinUp due to per-DAG lower threshold, got %d", provider.spunUpCount())
+	}
+}
+
+func TestAutoscaler_PerDAG_NoScaleUpWhenAboveOverrideButBelowGlobal(t *testing.T) {
+	// Global threshold=2. DAG override is absent. Pool has 1 queued task.
+	// Should respect global threshold — no scale-up.
+	provider := &fakeProvider{}
+	stats := &fakeStatsSource{stats: map[string]PoolStats{
+		"default": {Pool: "default", QueuedTasks: 1},
+	}}
+	cfg := config.AutoscalerConfig{
+		Enabled:          true,
+		MaxCloudWorkers:  5,
+		ScaleUpThreshold: 2,
+		CooldownSecs:     0,
+	}
+	a, _ := newTestAutoscalerWithDAGs(cfg, provider, stats, nil)
+	a.tick(context.Background(), "http://master:8080", "")
+
+	if provider.spunUpCount() != 0 {
+		t.Errorf("expected 0 SpinUp below global threshold, got %d", provider.spunUpCount())
+	}
+}
+
+func TestAutoscaler_PerDAG_MostPermissiveThresholdWins(t *testing.T) {
+	// Two DAGs active on "default": one with threshold=4, one with threshold=1.
+	// Pool has 2 queued tasks. Most permissive (1) should win → scale-up.
+	provider := &fakeProvider{}
+	stats := &fakeStatsSource{stats: map[string]PoolStats{
+		"default": {Pool: "default", QueuedTasks: 2},
+	}}
+	cfg := config.AutoscalerConfig{
+		Enabled:          true,
+		MaxCloudWorkers:  5,
+		ScaleUpThreshold: 10, // global very high
+		CooldownSecs:     0,
+	}
+	dags := map[string]*models.DAGDef{
+		"dag_a": {ID: "dag_a", Autoscaler: &models.DAGAutoscalerConfig{ScaleUpThreshold: 4}},
+		"dag_b": {ID: "dag_b", Autoscaler: &models.DAGAutoscalerConfig{ScaleUpThreshold: 1}},
+	}
+	a, _ := newTestAutoscalerWithDAGs(cfg, provider, stats, dags)
+	a.tick(context.Background(), "http://master:8080", "")
+
+	if provider.spunUpCount() != 1 {
+		t.Errorf("expected 1 SpinUp (most permissive threshold wins), got %d", provider.spunUpCount())
+	}
+}
+
+func TestAutoscaler_PerDAG_MaxCloudWorkersCapIsRespected(t *testing.T) {
+	// DAG override sets max_cloud_workers=2. Global is 10.
+	// 2 instances already running → should not spin up another.
+	provider := &fakeProvider{}
+	stats := &fakeStatsSource{stats: map[string]PoolStats{
+		"default": {Pool: "default", QueuedTasks: 10},
+	}}
+	cfg := config.AutoscalerConfig{
+		Enabled:          true,
+		MaxCloudWorkers:  10, // global cap not reached
+		ScaleUpThreshold: 3,
+		CooldownSecs:     0,
+	}
+	dags := map[string]*models.DAGDef{
+		"stress": {
+			ID: "stress",
+			Autoscaler: &models.DAGAutoscalerConfig{
+				ScaleUpThreshold: 1,
+				MaxCloudWorkers:  2, // per-DAG cap
+			},
+		},
+	}
+	a, istore := newTestAutoscalerWithDAGs(cfg, provider, stats, dags)
+	// Pre-fill 2 running instances — hitting the per-DAG cap.
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("inst-%d", i)
+		inst := WorkerInstance{ID: id, ProviderID: "fake-" + id, Status: InstanceRunning}
+		a.instances[id] = &inst
+		istore.SaveInstance(inst) //nolint:errcheck
+	}
+
+	a.tick(context.Background(), "http://master:8080", "")
+
+	if provider.spunUpCount() != 0 {
+		t.Errorf("expected 0 SpinUp: per-DAG MaxCloudWorkers cap (2) already reached, got %d", provider.spunUpCount())
+	}
+}
+
+func TestAutoscaler_PerDAG_MostPermissiveMaxWins(t *testing.T) {
+	// Two DAGs: one with max=1, one with max=4. 2 instances running.
+	// Most permissive (4) wins → should still allow scale-up.
+	provider := &fakeProvider{}
+	stats := &fakeStatsSource{stats: map[string]PoolStats{
+		"default": {Pool: "default", QueuedTasks: 10},
+	}}
+	cfg := config.AutoscalerConfig{
+		Enabled:          true,
+		MaxCloudWorkers:  10,
+		ScaleUpThreshold: 3,
+		CooldownSecs:     0,
+	}
+	dags := map[string]*models.DAGDef{
+		"dag_a": {ID: "dag_a", Autoscaler: &models.DAGAutoscalerConfig{MaxCloudWorkers: 1}},
+		"dag_b": {ID: "dag_b", Autoscaler: &models.DAGAutoscalerConfig{MaxCloudWorkers: 4}},
+	}
+	a, istore := newTestAutoscalerWithDAGs(cfg, provider, stats, dags)
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("inst-%d", i)
+		inst := WorkerInstance{ID: id, ProviderID: "fake-" + id, Status: InstanceRunning}
+		a.instances[id] = &inst
+		istore.SaveInstance(inst) //nolint:errcheck
+	}
+
+	a.tick(context.Background(), "http://master:8080", "")
+
+	if provider.spunUpCount() != 1 {
+		t.Errorf("expected 1 SpinUp (most permissive max=4 wins over max=1), got %d", provider.spunUpCount())
+	}
+}
+
+func TestAutoscaler_PerDAG_StatusIncludesOverrides(t *testing.T) {
+	provider := &fakeProvider{}
+	stats := &fakeStatsSource{stats: map[string]PoolStats{
+		"default": {Pool: "default", QueuedTasks: 0},
+	}}
+	cfg := config.AutoscalerConfig{
+		Enabled:          true,
+		MaxCloudWorkers:  5,
+		ScaleUpThreshold: 3,
+		Provider:         "fake",
+	}
+	dags := map[string]*models.DAGDef{
+		"stress": {
+			ID: "stress",
+			Autoscaler: &models.DAGAutoscalerConfig{
+				ScaleUpThreshold: 2,
+				MaxCloudWorkers:  3,
+			},
+		},
+	}
+	a, _ := newTestAutoscalerWithDAGs(cfg, provider, stats, dags)
+	snap := a.Status()
+
+	if len(snap.PerDAGOverrides) != 1 {
+		t.Fatalf("expected 1 per-DAG override in status, got %d", len(snap.PerDAGOverrides))
+	}
+	override, ok := snap.PerDAGOverrides["stress"]
+	if !ok {
+		t.Fatal("expected override for dag 'stress'")
+	}
+	if override.ScaleUpThreshold != 2 {
+		t.Errorf("expected ScaleUpThreshold=2, got %d", override.ScaleUpThreshold)
+	}
+	if override.MaxCloudWorkers != 3 {
+		t.Errorf("expected MaxCloudWorkers=3, got %d", override.MaxCloudWorkers)
 	}
 }

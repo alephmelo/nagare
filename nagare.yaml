@@ -34,32 +34,32 @@ cors:
 # See docs/autoscaler.md for the full setup guide.
 # ---------------------------------------------------------------------------
 #
-# autoscaler:
-#   enabled: true
-#   provider: "docker"          # "docker" (local) | "aws" (production)
-#
-#   # Scale up when a pool has more than this many queued tasks.
-#   scale_up_threshold: 3
-#
-#   # Maximum number of cloud workers running at any time (across all pools).
-#   max_cloud_workers: 5
-#
-#   # Terminate a cloud worker after it has been idle for this many minutes.
-#   scale_down_idle_mins: 2
-#
-#   # Minimum seconds between consecutive scale-ups for the same pool.
-#   # Prevents thrashing when tasks arrive in bursts.
-#   cooldown_secs: 30
-#
-#   docker:
-#     # Docker image that contains the nagare binary at /usr/local/bin/nagare.
-#     # Build it with: docker build -t nagare:latest -f Dockerfile.worker .
-#     image: "nagare:latest"
-#
-#     # Network mode for spawned worker containers.
-#     # "host" lets workers reach the master at localhost:8080.
-#     # Use a named bridge network when running master inside Docker too.
-#     network: "host"
+autoscaler:
+  enabled: true
+  provider: "docker"          # "docker" (local) | "aws" (production)
+
+  # Scale up when a pool has more than this many queued tasks.
+  scale_up_threshold: 3
+
+  # Maximum number of cloud workers running at any time (across all pools).
+  max_cloud_workers: 5
+
+  # Terminate a cloud worker after it has been idle for this many minutes.
+  scale_down_idle_mins: 2
+
+  # Minimum seconds between consecutive scale-ups for the same pool.
+  # Prevents thrashing when tasks arrive in bursts.
+  cooldown_secs: 30
+
+  docker:
+    # Docker image that contains the nagare binary at /usr/local/bin/nagare.
+    # Build it with: docker build -t nagare:latest -f Dockerfile.worker .
+    image: "nagare:latest"
+
+    # Network mode for spawned worker containers.
+    # "host" lets workers reach the master at localhost:8080.
+    # Use a named bridge network when running master inside Docker too.
+    network: "host"
 #
 #   # AWS EC2 provider — for production deployments.
 #   # Requires: go get github.com/aws/aws-sdk-go-v2/...

@@ -514,6 +514,80 @@ func TestValidate_ContainerTask_GPUs_All(t *testing.T) {
 	}
 }
 
+// ---- Per-DAG autoscaler override tests ------------------------------------
+
+func TestParseDAG_AutoscalerOverride_Present(t *testing.T) {
+	yaml := []byte(`
+id: overriding_dag
+schedule: "workflow_dispatch"
+autoscaler:
+  scale_up_threshold: 2
+  max_cloud_workers: 3
+tasks:
+  - id: t1
+    type: command
+    command: "echo hi"
+`)
+	dag, err := ParseDAG(yaml)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if dag.Autoscaler == nil {
+		t.Fatal("expected Autoscaler override to be parsed, got nil")
+	}
+	if dag.Autoscaler.ScaleUpThreshold != 2 {
+		t.Errorf("expected ScaleUpThreshold=2, got %d", dag.Autoscaler.ScaleUpThreshold)
+	}
+	if dag.Autoscaler.MaxCloudWorkers != 3 {
+		t.Errorf("expected MaxCloudWorkers=3, got %d", dag.Autoscaler.MaxCloudWorkers)
+	}
+}
+
+func TestParseDAG_AutoscalerOverride_Absent(t *testing.T) {
+	yaml := []byte(`
+id: plain_dag
+schedule: "workflow_dispatch"
+tasks:
+  - id: t1
+    type: command
+    command: "echo hi"
+`)
+	dag, err := ParseDAG(yaml)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if dag.Autoscaler != nil {
+		t.Errorf("expected Autoscaler to be nil when not specified, got %+v", dag.Autoscaler)
+	}
+}
+
+func TestParseDAG_AutoscalerOverride_PartialFields(t *testing.T) {
+	// Only scale_up_threshold set — max_cloud_workers should be zero (meaning "use global").
+	yaml := []byte(`
+id: partial_dag
+schedule: "workflow_dispatch"
+autoscaler:
+  scale_up_threshold: 1
+tasks:
+  - id: t1
+    type: command
+    command: "echo hi"
+`)
+	dag, err := ParseDAG(yaml)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if dag.Autoscaler == nil {
+		t.Fatal("expected Autoscaler override to be parsed, got nil")
+	}
+	if dag.Autoscaler.ScaleUpThreshold != 1 {
+		t.Errorf("expected ScaleUpThreshold=1, got %d", dag.Autoscaler.ScaleUpThreshold)
+	}
+	if dag.Autoscaler.MaxCloudWorkers != 0 {
+		t.Errorf("expected MaxCloudWorkers=0 (unset), got %d", dag.Autoscaler.MaxCloudWorkers)
+	}
+}
+
 func TestParseDAG_ContainerFields(t *testing.T) {
 	yamlContent := []byte(`
 id: ml_dag

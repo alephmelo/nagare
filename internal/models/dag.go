@@ -22,6 +22,22 @@ type ResourcesDef struct {
 	GPUs   string `yaml:"gpus,omitempty"`
 }
 
+// DAGAutoscalerConfig holds per-DAG autoscaler overrides. Zero values mean
+// "use the global autoscaler config". Both fields use "most permissive wins"
+// semantics when multiple DAGs with overrides are active on the same pool:
+// the lowest ScaleUpThreshold and highest MaxCloudWorkers across all active
+// DAGs are applied.
+type DAGAutoscalerConfig struct {
+	// ScaleUpThreshold overrides the global scale_up_threshold for this DAG's
+	// tasks. The autoscaler will provision a new worker when the pool's queue
+	// depth exceeds this value. Zero means "use global config".
+	ScaleUpThreshold int `yaml:"scale_up_threshold,omitempty"`
+	// MaxCloudWorkers caps the total number of cloud workers that may be
+	// running when this DAG's tasks are the reason for scaling. Zero means
+	// "use global config".
+	MaxCloudWorkers int `yaml:"max_cloud_workers,omitempty"`
+}
+
 // TaskDef defines a unit of work within a DAG
 type TaskDef struct {
 	ID                string            `yaml:"id"`
@@ -56,12 +72,13 @@ type TriggerDef struct {
 
 // DAGDef defines the workflow graph of Tasks
 type DAGDef struct {
-	ID          string      `yaml:"id"`
-	Description string      `yaml:"description"`
-	Schedule    string      `yaml:"schedule"`          // Cron expression
-	Catchup     *bool       `yaml:"catchup,omitempty"` // Controls backfill behavior
-	Trigger     *TriggerDef `yaml:"trigger,omitempty"` // Event-driven trigger
-	Tasks       []TaskDef   `yaml:"tasks"`
+	ID          string               `yaml:"id"`
+	Description string               `yaml:"description"`
+	Schedule    string               `yaml:"schedule"`             // Cron expression
+	Catchup     *bool                `yaml:"catchup,omitempty"`    // Controls backfill behavior
+	Trigger     *TriggerDef          `yaml:"trigger,omitempty"`    // Event-driven trigger
+	Autoscaler  *DAGAutoscalerConfig `yaml:"autoscaler,omitempty"` // Per-DAG autoscaler overrides
+	Tasks       []TaskDef            `yaml:"tasks"`
 }
 
 func ParseDAG(data []byte) (*DAGDef, error) {

@@ -517,7 +517,7 @@ func TestCoordinator_PoolStats_CloudWorkersTagged(t *testing.T) {
 		Enabled:         true,
 		MaxCloudWorkers: 5,
 	}
-	as := autoscaler.New(cfg, &stubProvider{}, &stubStatsSource{}, newFakeInstanceStore())
+	as := autoscaler.New(cfg, &stubProvider{}, &stubStatsSource{}, newFakeInstanceStore(), nil)
 
 	// Pre-register a provisioning instance so TryClaimWorker can match.
 	as.ForceAddInstance("docker-cloud01", []string{"default"})
@@ -551,7 +551,7 @@ func TestCoordinator_Register_TagsCloudWorker(t *testing.T) {
 		Enabled:         true,
 		MaxCloudWorkers: 5,
 	}
-	as := autoscaler.New(cfg, &stubProvider{}, &stubStatsSource{}, newFakeInstanceStore())
+	as := autoscaler.New(cfg, &stubProvider{}, &stubStatsSource{}, newFakeInstanceStore(), nil)
 	as.ForceAddInstance("docker-tag01", []string{"default"})
 
 	coord := cluster.NewCoordinator(store, nil, 30*time.Second, "")
@@ -607,7 +607,7 @@ func TestCoordinator_Register_PoolMismatchNotTagged(t *testing.T) {
 	store := newTestStore(t)
 
 	cfg := config.AutoscalerConfig{Enabled: true, MaxCloudWorkers: 5}
-	as := autoscaler.New(cfg, &stubProvider{}, &stubStatsSource{}, newFakeInstanceStore())
+	as := autoscaler.New(cfg, &stubProvider{}, &stubStatsSource{}, newFakeInstanceStore(), nil)
 	// Provisioning instance is for "gpu" pool.
 	as.ForceAddInstance("docker-gpu01", []string{"gpu"})
 
@@ -638,7 +638,7 @@ func TestCoordinator_ExpireStaleWorkers_NotifiesAutoscaler(t *testing.T) {
 
 	fp := &stubProvider{}
 	cfg := config.AutoscalerConfig{Enabled: true, MaxCloudWorkers: 5}
-	as := autoscaler.New(cfg, fp, &stubStatsSource{}, newFakeInstanceStore())
+	as := autoscaler.New(cfg, fp, &stubStatsSource{}, newFakeInstanceStore(), nil)
 	// Pre-seed a running instance so NotifyWorkerOffline can clean it up.
 	as.ForceAddRunningInstance("docker-stale01", "stale-worker-id", []string{"default"})
 
