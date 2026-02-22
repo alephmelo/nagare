@@ -4,10 +4,33 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
+
+// nagareDriverName is the name under which our custom SQLite driver is
+// registered.  It sets PRAGMA busy_timeout on every new connection so that
+// concurrent writers wait instead of returning SQLITE_BUSY immediately.
+const nagareDriverName = "sqlite3_nagare"
+
+var registerDriverOnce sync.Once
+
+// registerDriver registers a custom sqlite3 driver that applies our desired
+// PRAGMAs to every connection.  Called lazily on first NewStore invocation.
+func registerDriver() {
+	registerDriverOnce.Do(func() {
+		sql.Register(nagareDriverName, &sqlite3.SQLiteDriver{
+			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+				if _, err := conn.Exec("PRAGMA busy_timeout=5000", nil); err != nil {
+					return fmt.Errorf("set busy_timeout: %w", err)
+				}
+				return nil
+			},
+		})
+	})
+}
 
 // TaskMetrics stores resource usage captured during a task execution.
 type TaskMetrics struct {
@@ -112,9 +135,20 @@ type Store struct {
 
 // NewStore initializes an SQLite database and creates necessary tables
 func NewStore(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	registerDriver()
+
+	db, err := sql.Open(nagareDriverName, dbPath)
 	if err != nil {
 		return nil, err
+	}
+
+	// Enable WAL journal mode so concurrent writers serialise gracefully.
+	// WAL is a database-level property that persists on disk; setting it once
+	// is enough (unlike busy_timeout which is per-connection, handled in the
+	// ConnectHook above).
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
 
 	store := &Store{db: db}

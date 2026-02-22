@@ -257,6 +257,7 @@ func (rw *RemoteWorker) executeAssignment(ctx context.Context, a TaskAssignmentD
 
 	taskResult := TaskResult{
 		TaskInstanceID:  a.TaskInstanceID,
+		WorkerID:        rw.cfg.WorkerID,
 		Status:          reportStatus,
 		Output:          result.Output,
 		TimedOut:        result.TimedOut,
@@ -268,12 +269,23 @@ func (rw *RemoteWorker) executeAssignment(ctx context.Context, a TaskAssignmentD
 		ExecutorType:    result.ExecutorType,
 	}
 
-	resp, err := rw.post("/api/workers/result", taskResult)
-	if err != nil {
-		log.Printf("RemoteWorker %s: result post error: %v", rw.cfg.WorkerID, err)
-		return
+	// Post the result to the master.  Retry a few times on transient errors
+	// (e.g. SQLITE_BUSY causing a 500) so the task is never silently lost.
+	const maxResultRetries = 5
+	for attempt := 1; attempt <= maxResultRetries; attempt++ {
+		resp, err := rw.post("/api/workers/result", taskResult)
+		if err != nil {
+			log.Printf("RemoteWorker %s: result post error (attempt %d/%d): %v", rw.cfg.WorkerID, attempt, maxResultRetries, err)
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+		log.Printf("RemoteWorker %s: result post returned HTTP %d (attempt %d/%d), retrying", rw.cfg.WorkerID, resp.StatusCode, attempt, maxResultRetries)
+		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
 	}
-	resp.Body.Close()
 	log.Printf("RemoteWorker %s: task %s completed with status %s", rw.cfg.WorkerID, a.TaskInstanceID, reportStatus)
 }
 

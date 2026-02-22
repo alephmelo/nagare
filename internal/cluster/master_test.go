@@ -712,6 +712,8 @@ func (s *stubStatsSource) PoolStats() map[string]autoscaler.PoolStats {
 	}
 }
 
+func (s *stubStatsSource) WorkerActiveTasks(_ string) int { return 0 }
+
 // fakeInstanceStore (cluster test copy) implements autoscaler.InstanceStore.
 type fakeInstanceStore struct {
 	mu        sync.Mutex

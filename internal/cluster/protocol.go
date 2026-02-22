@@ -23,6 +23,11 @@ type WorkerInfo struct {
 	LastSeen time.Time `json:"last_seen"`
 	Status   string    `json:"status"` // "online" | "offline"
 
+	// ActiveTasks is the number of tasks currently executing on this worker.
+	// Incremented when a task is dispatched via handlePoll; decremented when
+	// the worker posts a result via handleResult.
+	ActiveTasks int `json:"active_tasks"`
+
 	// IsCloudManaged is true when this worker was auto-provisioned by the
 	// autoscaler rather than started manually.  The UI uses this flag to
 	// display a cloud badge and to show the associated cloud instance ID.
@@ -61,7 +66,8 @@ type TaskAssignmentDTO struct {
 // TaskResult is posted by a worker after a task finishes (success, failure, or cancel).
 type TaskResult struct {
 	TaskInstanceID string `json:"task_instance_id"`
-	Status         string `json:"status"` // "success" | "failed" | "cancelled"
+	WorkerID       string `json:"worker_id"` // ID of the worker that executed this task
+	Status         string `json:"status"`    // "success" | "failed" | "cancelled"
 	Output         string `json:"output"`
 	TimedOut       bool   `json:"timed_out"`
 

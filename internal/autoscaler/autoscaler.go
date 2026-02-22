@@ -46,6 +46,9 @@ type InstanceStore interface {
 type StatsSource interface {
 	// PoolStats returns a map of pool name → current utilisation snapshot.
 	PoolStats() map[string]PoolStats
+	// WorkerActiveTasks returns the number of tasks currently executing on
+	// the named nagare worker.  Returns 0 when the worker is unknown.
+	WorkerActiveTasks(workerID string) int
 }
 
 // Autoscaler monitors worker pool queue depths and automatically provisions
@@ -284,6 +287,13 @@ func (a *Autoscaler) evaluateScaleDown(ctx context.Context, poolStats map[string
 			}
 		}
 
+		// Also skip scale-down if the worker is still executing tasks.
+		if !workerHasWork && inst.WorkerID != "" {
+			if a.statsSource.WorkerActiveTasks(inst.WorkerID) > 0 {
+				workerHasWork = true
+			}
+		}
+
 		if workerHasWork {
 			// Worker is needed — reset idle timer.
 			delete(a.idleSince, id)
@@ -472,23 +482,65 @@ func (a *Autoscaler) Status() StatusSnapshot {
 // reconcile queries the cloud provider for instances that were created during
 // a previous master run and re-populates the in-memory map.  Called once on
 // startup.
+//
+// It cross-references the persistent store with the live provider state:
+// instances that exist in the DB but are no longer alive in the provider are
+// marked terminated so they don't count against the cloud cap.
 func (a *Autoscaler) reconcile(ctx context.Context) {
-	// First try the persistent store.
+	// Load what the persistent store thinks is active.
 	stored, err := a.instanceStore.ListActiveInstances()
 	if err != nil {
 		log.Printf("Autoscaler: reconcile: failed to load instances from store: %v", err)
 		return
 	}
+	if len(stored) == 0 {
+		return
+	}
+
+	// Ask the provider which instances are actually alive right now.
+	liveInstances, err := a.provider.List(ctx)
+	if err != nil {
+		log.Printf("Autoscaler: reconcile: provider.List failed (%v) — assuming all stored instances are still live", err)
+		// Fall back to trusting the DB so we don't accidentally leak resources.
+		a.mu.Lock()
+		for _, inst := range stored {
+			cp := inst
+			a.instances[inst.ID] = &cp
+		}
+		a.mu.Unlock()
+		log.Printf("Autoscaler: reconciled %d instances from previous run (unverified)", len(stored))
+		return
+	}
+
+	// Build a set of live provider IDs for fast lookup.
+	liveByProviderID := make(map[string]struct{}, len(liveInstances))
+	for _, li := range liveInstances {
+		liveByProviderID[li.ProviderID] = struct{}{}
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	alive := 0
 	for _, inst := range stored {
-		cp := inst
-		a.instances[inst.ID] = &cp
+		if _, isLive := liveByProviderID[inst.ProviderID]; isLive {
+			cp := inst
+			a.instances[inst.ID] = &cp
+			alive++
+		} else {
+			// The container no longer exists — mark it terminated in the DB so
+			// it doesn't count against the cloud cap on future reconciles.
+			log.Printf("Autoscaler: reconcile: instance %s (provider=%s) not found in provider — marking terminated", inst.ID, inst.ProviderID)
+			if err := a.instanceStore.TerminateInstance(inst.ID, time.Now()); err != nil {
+				log.Printf("Autoscaler: reconcile: warning: failed to terminate ghost instance %s: %v", inst.ID, err)
+			}
+		}
 	}
 
-	if len(stored) > 0 {
-		log.Printf("Autoscaler: reconciled %d instances from previous run", len(stored))
+	if alive > 0 {
+		log.Printf("Autoscaler: reconciled %d live instances from previous run (%d ghosts terminated)", alive, len(stored)-alive)
+	} else if len(stored) > 0 {
+		log.Printf("Autoscaler: reconcile: all %d stored instances were ghosts — cloud cap reset to 0", len(stored))
 	}
 }
 

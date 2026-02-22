@@ -91,6 +91,8 @@ func (f *fakeStatsSource) PoolStats() map[string]PoolStats {
 	return out
 }
 
+func (f *fakeStatsSource) WorkerActiveTasks(_ string) int { return 0 }
+
 // ---- Fake instance store (cloud_instances table substitute) ----
 
 type fakeInstanceStore struct {

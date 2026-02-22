@@ -54,6 +54,18 @@ func (c *Coordinator) SetAutoscaler(a *autoscaler.Autoscaler) {
 	c.as = a
 }
 
+// WorkerActiveTasks returns the number of tasks currently executing on the
+// named worker.  Returns 0 when the worker is unknown or offline.
+// This implements autoscaler.StatsSource.
+func (c *Coordinator) WorkerActiveTasks(workerID string) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if w, ok := c.workers[workerID]; ok {
+		return w.ActiveTasks
+	}
+	return 0
+}
+
 // PoolStats returns a per-pool utilisation snapshot.  It counts queued tasks
 // from the store and cross-references the registered online workers.
 // This implements autoscaler.StatsSource.
@@ -307,6 +319,22 @@ func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
 		poolSet[p] = true
 	}
 
+	// Enforce MaxTasks: check how many tasks this worker is currently running.
+	c.mu.RLock()
+	wi, workerKnown := c.workers[req.WorkerID]
+	var activeTasks, maxTasks int
+	if workerKnown {
+		activeTasks = wi.ActiveTasks
+		maxTasks = wi.MaxTasks
+	}
+	c.mu.RUnlock()
+
+	if workerKnown && maxTasks > 0 && activeTasks >= maxTasks {
+		// Worker is at capacity — tell it to come back later.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	queued, err := c.store.GetQueuedTasks()
 	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
@@ -351,6 +379,13 @@ func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
 		if err := c.store.UpdateTaskInstanceStatus(ti.ID, models.TaskRunning); err != nil {
 			continue
 		}
+
+		// Increment the active-task counter for this worker.
+		c.mu.Lock()
+		if ww, ok := c.workers[req.WorkerID]; ok {
+			ww.ActiveTasks++
+		}
+		c.mu.Unlock()
 
 		// Record the dispatch time as the task's started_at so metrics have a
 		// valid start timestamp even when the worker reports them later.
@@ -406,6 +441,15 @@ func (c *Coordinator) handleResult(w http.ResponseWriter, r *http.Request) {
 	if err := c.store.UpdateTaskInstanceStatusAndOutput(res.TaskInstanceID, status, res.Output); err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
+	}
+
+	// Decrement the active-task counter for the worker that reported this result.
+	if res.WorkerID != "" {
+		c.mu.Lock()
+		if ww, ok := c.workers[res.WorkerID]; ok && ww.ActiveTasks > 0 {
+			ww.ActiveTasks--
+		}
+		c.mu.Unlock()
 	}
 
 	// Persist resource metrics reported by the remote worker.
