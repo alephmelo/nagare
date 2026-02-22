@@ -522,6 +522,35 @@ func (s *Store) GetQueuedTasks() ([]TaskInstance, error) {
 	return s.GetTasksByStatus(TaskQueued)
 }
 
+// ResetStaleTasks marks any task instances left in 'running' or 'queued' state
+// as 'failed'. This is called once at master startup to clean up orphaned tasks
+// from a previous process that was killed or crashed before they could complete.
+// DAG runs that owned those tasks are also marked failed so the user can see
+// what was interrupted and re-trigger if needed.
+func (s *Store) ResetStaleTasks() (int64, error) {
+	result, err := s.db.Exec(
+		`UPDATE task_instances SET status = ?, updated_at = ? WHERE status IN (?, ?)`,
+		TaskFailed, time.Now(), TaskRunning, TaskQueued,
+	)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	// Also fail any DAG runs still marked as 'running' — their tasks just died.
+	if _, err := s.db.Exec(
+		`UPDATE dag_runs SET status = ?, completed_at = ? WHERE status = ?`,
+		RunFailed, time.Now(), RunRunning,
+	); err != nil {
+		return affected, err
+	}
+
+	return affected, nil
+}
+
 // GetTaskInstance retrieves a specific TaskInstance by its unique ID
 func (s *Store) GetTaskInstance(id string) (*TaskInstance, error) {
 	query := `SELECT id, run_id, task_id, status, COALESCE(output,''), item_value, attempt, created_at, updated_at, started_at FROM task_instances WHERE id = ?`

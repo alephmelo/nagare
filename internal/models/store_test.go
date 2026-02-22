@@ -574,3 +574,86 @@ func TestCloudInstance_GetCostSummary(t *testing.T) {
 		t.Errorf("expected positive estimated cost, got %f", summary.EstimatedCostUSD)
 	}
 }
+
+func TestResetStaleTasks(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	// Create a dag run in 'running' state (simulating a run that was interrupted).
+	run := DagRun{
+		ID: "stale-run-1", DAGID: "my_dag", Status: RunRunning,
+		ExecDate: now, TriggerType: "scheduled", CreatedAt: now,
+	}
+	if err := s.CreateDagRun(&run); err != nil {
+		t.Fatalf("CreateDagRun: %v", err)
+	}
+
+	// One task running, one queued — both should become failed.
+	for _, ti := range []TaskInstance{
+		{ID: "t-running", RunID: "stale-run-1", TaskID: "t1", Status: TaskRunning, Attempt: 1, CreatedAt: now, UpdatedAt: now},
+		{ID: "t-queued", RunID: "stale-run-1", TaskID: "t2", Status: TaskQueued, Attempt: 1, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := s.CreateTaskInstance(&ti); err != nil {
+			t.Fatalf("CreateTaskInstance %s: %v", ti.ID, err)
+		}
+	}
+
+	// Create a task that is already succeeded — it must NOT be touched.
+	run2 := DagRun{
+		ID: "done-run-1", DAGID: "my_dag", Status: RunSuccess,
+		ExecDate: now, TriggerType: "scheduled", CreatedAt: now,
+	}
+	if err := s.CreateDagRun(&run2); err != nil {
+		t.Fatalf("CreateDagRun: %v", err)
+	}
+	success := TaskInstance{ID: "t-success", RunID: "done-run-1", TaskID: "t3", Status: TaskSuccess, Attempt: 1, CreatedAt: now, UpdatedAt: now}
+	if err := s.CreateTaskInstance(&success); err != nil {
+		t.Fatalf("CreateTaskInstance t-success: %v", err)
+	}
+
+	affected, err := s.ResetStaleTasks()
+	if err != nil {
+		t.Fatalf("ResetStaleTasks: %v", err)
+	}
+	if affected != 2 {
+		t.Errorf("expected 2 stale tasks reset, got %d", affected)
+	}
+
+	// Running and queued tasks should now be failed.
+	for _, id := range []string{"t-running", "t-queued"} {
+		ti, err := s.GetTaskInstance(id)
+		if err != nil {
+			t.Fatalf("GetTaskInstance %s: %v", id, err)
+		}
+		if ti.Status != TaskFailed {
+			t.Errorf("task %s: expected status=%s, got %s", id, TaskFailed, ti.Status)
+		}
+	}
+
+	// Successful task should be untouched.
+	ti, err := s.GetTaskInstance("t-success")
+	if err != nil {
+		t.Fatalf("GetTaskInstance t-success: %v", err)
+	}
+	if ti.Status != TaskSuccess {
+		t.Errorf("t-success: expected status=%s, got %s", TaskSuccess, ti.Status)
+	}
+
+	// The interrupted dag run should now be marked failed.
+	staleRun, err := s.GetDagRun("stale-run-1")
+	if err != nil {
+		t.Fatalf("GetDagRun stale-run-1: %v", err)
+	}
+	if staleRun.Status != RunFailed {
+		t.Errorf("stale-run-1: expected status=%s, got %s", RunFailed, staleRun.Status)
+	}
+
+	// The completed run should be untouched.
+	doneRun, err := s.GetDagRun("done-run-1")
+	if err != nil {
+		t.Fatalf("GetDagRun done-run-1: %v", err)
+	}
+	if doneRun.Status != RunSuccess {
+		t.Errorf("done-run-1: expected status=%s, got %s", RunSuccess, doneRun.Status)
+	}
+}

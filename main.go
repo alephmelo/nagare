@@ -127,7 +127,16 @@ func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 7. Start local workers, autoscaler, and API server.
+	// 7. Reset any tasks left running/queued by a previous process that was killed
+	//    or crashed. Those processes are dead, so the tasks can never complete —
+	//    mark them failed so runs surface as failed in the UI and can be re-triggered.
+	if n, err := store.ResetStaleTasks(); err != nil {
+		log.Printf("Warning: failed to reset stale tasks: %v", err)
+	} else if n > 0 {
+		log.Printf("Startup: reset %d stale task(s) from previous run to 'failed'", n)
+	}
+
+	// 8. Start local workers, autoscaler, and API server.
 	pool.Start(ctx)
 
 	// Start the autoscaler background loop (no-op when disabled).
@@ -143,7 +152,7 @@ func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 		}
 	}()
 
-	// 8. Periodic stale-worker expiry.
+	// 9. Periodic stale-worker expiry.
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
