@@ -164,19 +164,19 @@ type CloudProvider interface {
 // The autoscaler uses this to decide whether to scale up or down.
 type PoolStats struct {
 	// Pool is the pool name.
-	Pool string
+	Pool string `json:"pool"`
 
 	// QueuedTasks is the number of tasks currently waiting to be picked up.
-	QueuedTasks int
+	QueuedTasks int `json:"queued_tasks"`
 
 	// ActiveWorkers is the number of workers (local + cloud) currently
 	// online for this pool.
-	ActiveWorkers int
+	ActiveWorkers int `json:"active_workers"`
 
 	// CloudWorkers is the subset of ActiveWorkers that were auto-provisioned.
-	CloudWorkers int
+	CloudWorkers int `json:"cloud_workers"`
 
 	// NeedsGPU is true when at least one queued task in this pool has GPU
 	// resource requirements.
-	NeedsGPU bool
+	NeedsGPU bool `json:"needs_gpu"`
 }
