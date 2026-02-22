@@ -224,8 +224,6 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 
 	log.Printf("executeTask %s: RunCommand done, err=%v", ti.ID, runErr)
 
-	p.broker.Close(ti.ID)
-
 	// Persist resource metrics regardless of success/failure.
 	p.persistMetrics(ti, run.DAGID, result)
 
@@ -234,6 +232,7 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 			errMsg := fmt.Sprintf("Task timed out after %d seconds\nOutput: %s", assignment.TimeoutSecs, result.Output)
 			log.Printf("Worker %d: Task %s TIMEOUT: %s", workerID, ti.ID, errMsg)
 			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, errMsg)
+			p.broker.Close(ti.ID)
 			p.broker.Cleanup(ti.ID)
 			return
 		}
@@ -245,6 +244,7 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 		if getErr == nil && latest.Status == models.TaskCancelled {
 			log.Printf("Worker %d: Task %s was already marked as CANCELLED, skipping failure update", workerID, ti.ID)
 			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskCancelled, result.Output)
+			p.broker.Close(ti.ID)
 			p.broker.Cleanup(ti.ID)
 			return
 		}
@@ -260,6 +260,7 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 		p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, result.Output)
 	}
 
+	p.broker.Close(ti.ID)
 	p.broker.Cleanup(ti.ID)
 }
 

@@ -526,6 +526,23 @@ function RunDetailsContent() {
     [fetchTasks, run]
   );
 
+  // When the run first enters a terminal state, do one final fetch after a
+  // short delay. This catches task output that is written to the DB in the
+  // same tick as the status transition (the normal poll may have landed in
+  // the narrow window before the output column was updated).
+  const prevRunStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!run) return;
+    const wasTerminal = prevRunStatusRef.current !== null && TERMINAL.has(prevRunStatusRef.current);
+    const isTerminal = TERMINAL.has(run.Status);
+    if (isTerminal && !wasTerminal) {
+      const timer = setTimeout(fetchTasks, 500);
+      prevRunStatusRef.current = run.Status;
+      return () => clearTimeout(timer);
+    }
+    prevRunStatusRef.current = run.Status;
+  }, [run, fetchTasks]);
+
   const handleRetry = async (taskID: string) => {
     try {
       const res = await apiFetch(`/api/runs/${id}/tasks/${taskID}/retry`, { method: "POST" });
