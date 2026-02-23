@@ -20,16 +20,12 @@ builds:
     goos:
       - linux
       - darwin
-      - windows
     goarch:
       - amd64
       - arm64
-    ignore:
-      - goos: windows
-        goarch: arm64
     # Running on macos-latest runner:
     # - darwin targets use the native Clang (no override needed)
-    # - linux and windows targets use Zig for cross-compilation
+    # - linux targets use Zig for cross-compilation
     overrides:
       - goos: linux
         goarch: amd64
@@ -43,20 +39,11 @@ builds:
           - CGO_ENABLED=1
           - CC=zig cc -target aarch64-linux-musl
           - CXX=zig c++ -target aarch64-linux-musl
-      - goos: windows
-        goarch: amd64
-        env:
-          - CGO_ENABLED=1
-          - CC=zig cc -target x86_64-windows
-          - CXX=zig c++ -target x86_64-windows
 
 archives:
   - id: nagare
     builds: [nagare]
     name_template: "nagare_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format_overrides:
-      - goos: windows
-        formats: [zip]
     # Include the sample nagare.yaml so users have a starting config
     files:
       - nagare.yaml
