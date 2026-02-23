@@ -1,0 +1,67 @@
+id: aws_autoscaler_test
+description: >
+  Cheap end-to-end test for the AWS EC2 autoscaler provider.
+
+  Submits a burst of short sleep tasks that push the 'default' pool's queue
+  depth above the scale_up_threshold, causing the autoscaler to spin up
+  t3.nano EC2 workers.  Each task sleeps 30 seconds — just long enough for the
+  autoscaler to notice and act before tasks start draining.
+
+  Prerequisites (set in nagare.yaml before running):
+    autoscaler:
+      enabled: true
+      provider: "aws"
+      aws:
+        region: "us-east-1"           # or your preferred region
+        instance_type: "t3.nano"      # cheapest burstable instance (~$0.005/hr)
+        ami_id: "ami-XXXXXXXXXX"      # Amazon Linux 2023 AMI with nagare pre-installed
+        security_group: "sg-XXXXXXXX" # must allow outbound TCP 8080 to master
+        subnet_id: "subnet-XXXXXXXX"  # public subnet with auto-assign public IP enabled
+        nagare_download_url: "https://your-bucket.s3.amazonaws.com/nagare-linux-amd64"
+
+  Trigger manually from the dashboard or via:
+    curl -X POST http://localhost:8080/api/dags/aws_autoscaler_test/trigger
+
+  Watch progress:
+    curl http://localhost:8080/api/autoscaler/status | jq .
+
+schedule: "workflow_dispatch"
+
+# Per-DAG autoscaler override: lower threshold so 4 queued tasks are enough,
+# and cap at 2 cloud workers to keep costs minimal during testing.
+autoscaler:
+  scale_up_threshold: 3
+  max_cloud_workers: 2
+
+tasks:
+  # -------------------------------------------------------------------------
+  # Fan-out: 6 short tasks submitted to the 'default' pool simultaneously.
+  # With scale_up_threshold: 3, the autoscaler will spin up workers once
+  # queued tasks exceed 3.
+  # -------------------------------------------------------------------------
+  - id: work
+    type: command
+    pool: default
+    command: |
+      echo "[$(date '+%H:%M:%S')] work item={{item}} starting on $(hostname) ($(uname -n))"
+      sleep 30
+      echo "[$(date '+%H:%M:%S')] work item={{item}} done"
+    with_items:
+      - "item_1"
+      - "item_2"
+      - "item_3"
+      - "item_4"
+      - "item_5"
+      - "item_6"
+
+  # -------------------------------------------------------------------------
+  # Aggregator: confirms all tasks ran and reports back.
+  # -------------------------------------------------------------------------
+  - id: summarise
+    type: command
+    pool: default
+    command: |
+      echo "[$(date '+%H:%M:%S')] All work items finished."
+      echo "EC2 workers will be terminated after scale_down_idle_mins."
+    depends_on:
+      - work

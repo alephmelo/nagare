@@ -65,7 +65,6 @@ autoscaler:
     master_addr: "http://host.docker.internal:8080"
 #
 #   # AWS EC2 provider — for production deployments.
-#   # Requires: go get github.com/aws/aws-sdk-go-v2/...
 #   # aws:
 #   #   region: "us-east-1"
 #   #   instance_type: "t3.medium"
@@ -76,3 +75,8 @@ autoscaler:
 #   #   iam_instance_profile: "nagare-worker-role"
 #   #   nagare_download_url: "https://releases.example.com/nagare/latest/nagare-linux-amd64"
 #   #   gpu_instance_type: "g4dn.xlarge"  # used when a task sets resources.gpus
+#   #
+#   #   # Optional: named AWS profile from ~/.aws/config.
+#   #   # When set, takes precedence over env vars (AWS_ACCESS_KEY_ID etc.).
+#   #   # Leave unset to fall back to the default credential chain.
+#   #   # profile: "staging"

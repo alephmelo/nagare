@@ -44,6 +44,14 @@ type AWSProviderConfig struct {
 	// Region is the AWS region in which to launch instances (e.g. "us-east-1").
 	Region string `yaml:"region"`
 
+	// Profile is the named AWS profile from ~/.aws/config to use for
+	// authentication.  When set, it takes precedence over the default
+	// credential chain (env vars → default profile → EC2 instance metadata).
+	// Corresponds to the AWS_PROFILE environment variable but scoped to
+	// Nagare's autoscaler only.
+	// Example: "staging", "prod-deploy"
+	Profile string `yaml:"profile"`
+
 	// InstanceType is the default EC2 instance type (e.g. "t3.medium").
 	InstanceType string `yaml:"instance_type"`
 

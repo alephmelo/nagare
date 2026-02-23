@@ -7,6 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
 	"github.com/alephmelo/nagare/internal/config"
 )
 
@@ -78,16 +83,17 @@ type ec2InstanceInfo struct {
 	State      string // "running" | "pending" | "terminated" | etc.
 }
 
-// NewAWSProvider creates an AWSProvider.
+// NewAWSProvider creates an AWSProvider backed by the real AWS SDK v2 EC2
+// client.
 //
-// This constructor validates the configuration and initialises the AWS SDK
-// client.  It returns an error when required fields (Region, InstanceType,
-// SecurityGroup, SubnetID) are missing, or when the SDK cannot be initialised.
+// It validates the required configuration fields (Region, InstanceType,
+// SecurityGroup, SubnetID) and initialises the SDK using the following
+// credential resolution order:
 //
-// NOTE: The AWS SDK v2 is not yet a direct dependency of the project.  Until
-// it is added to go.mod the real client will not compile; the interface allows
-// the rest of the code to reference AWSProvider in tests via a fake.  Run
-// `go get github.com/aws/aws-sdk-go-v2/...` to enable the real client.
+//  1. If cfg.Profile is set, the named profile from ~/.aws/config is used.
+//  2. Otherwise the standard AWS SDK credential chain applies:
+//     environment variables (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) →
+//     default profile in ~/.aws/credentials → EC2 instance metadata (IMDS).
 func NewAWSProvider(cfg config.AWSProviderConfig) (*AWSProvider, error) {
 	if cfg.Region == "" {
 		return nil, fmt.Errorf("aws provider: region is required")
@@ -102,15 +108,20 @@ func NewAWSProvider(cfg config.AWSProviderConfig) (*AWSProvider, error) {
 		return nil, fmt.Errorf("aws provider: subnet_id is required")
 	}
 
-	// TODO: initialise the real aws-sdk-go-v2 EC2 client once the dependency
-	// has been added.  For now we return an error that makes the provider
-	// unusable but allows the rest of the package to compile cleanly.
-	//
-	// To wire up the real client:
-	//   cfg, _ := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(cfg.Region))
-	//   svc := ec2.NewFromConfig(cfg)
-	//   return &AWSProvider{cfg: cfg, ec2Client: &ec2RealClient{svc: svc}}, nil
-	return nil, fmt.Errorf("aws provider: real AWS SDK client not yet wired — add github.com/aws/aws-sdk-go-v2 to go.mod and implement ec2RealClient")
+	opts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(cfg.Region),
+	}
+	if cfg.Profile != "" {
+		opts = append(opts, awsconfig.WithSharedConfigProfile(cfg.Profile))
+	}
+
+	sdkCfg, err := awsconfig.LoadDefaultConfig(context.Background(), opts...)
+	if err != nil {
+		return nil, fmt.Errorf("aws provider: load SDK config: %w", err)
+	}
+
+	svc := ec2.NewFromConfig(sdkCfg)
+	return &AWSProvider{cfg: cfg, ec2Client: &ec2RealClient{svc: svc}}, nil
 }
 
 // newAWSProviderWithClient creates an AWSProvider with an injected ec2Client.
@@ -236,4 +247,95 @@ func (a *AWSProvider) buildUserData(req SpinUpRequest) string {
 	// Run in background, redirect output to syslog.
 	fmt.Fprintf(&sb, "nohup %s >> /var/log/nagare-worker.log 2>&1 &\n", cmd)
 	return sb.String()
+}
+
+// ── Real AWS SDK v2 client ────────────────────────────────────────────────────
+
+// ec2RealClient implements ec2Client using the AWS SDK v2 EC2 service.
+type ec2RealClient struct {
+	svc *ec2.Client
+}
+
+// RunInstances starts one EC2 instance and returns its EC2 instance ID.
+func (c *ec2RealClient) RunInstances(ctx context.Context, req ec2RunRequest) (string, error) {
+	input := &ec2.RunInstancesInput{
+		MinCount:         aws.Int32(1),
+		MaxCount:         aws.Int32(1),
+		ImageId:          aws.String(req.ImageID),
+		InstanceType:     ec2types.InstanceType(req.InstanceType),
+		SubnetId:         aws.String(req.SubnetID),
+		UserData:         aws.String(req.UserData),
+		SecurityGroupIds: []string{req.SecurityGroupID},
+	}
+	if req.KeyName != "" {
+		input.KeyName = aws.String(req.KeyName)
+	}
+	if req.IAMInstanceProfile != "" {
+		input.IamInstanceProfile = &ec2types.IamInstanceProfileSpecification{
+			Name: aws.String(req.IAMInstanceProfile),
+		}
+	}
+	if len(req.Tags) > 0 {
+		tags := make([]ec2types.Tag, 0, len(req.Tags))
+		for k, v := range req.Tags {
+			tags = append(tags, ec2types.Tag{Key: aws.String(k), Value: aws.String(v)})
+		}
+		input.TagSpecifications = []ec2types.TagSpecification{
+			{ResourceType: ec2types.ResourceTypeInstance, Tags: tags},
+		}
+	}
+
+	out, err := c.svc.RunInstances(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("RunInstances: %w", err)
+	}
+	if len(out.Instances) == 0 {
+		return "", fmt.Errorf("RunInstances: no instances returned")
+	}
+	return aws.ToString(out.Instances[0].InstanceId), nil
+}
+
+// TerminateInstances terminates the given EC2 instances.
+func (c *ec2RealClient) TerminateInstances(ctx context.Context, instanceIDs []string) error {
+	_, err := c.svc.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
+		InstanceIds: instanceIDs,
+	})
+	if err != nil {
+		return fmt.Errorf("TerminateInstances: %w", err)
+	}
+	return nil
+}
+
+// DescribeInstances lists instances matching the given tag filters.
+func (c *ec2RealClient) DescribeInstances(ctx context.Context, tagFilters map[string]string) ([]ec2InstanceInfo, error) {
+	filters := make([]ec2types.Filter, 0, len(tagFilters))
+	for k, v := range tagFilters {
+		filters = append(filters, ec2types.Filter{
+			Name:   aws.String("tag:" + k),
+			Values: []string{v},
+		})
+	}
+
+	out, err := c.svc.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		Filters: filters,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("DescribeInstances: %w", err)
+	}
+
+	var result []ec2InstanceInfo
+	for _, reservation := range out.Reservations {
+		for _, inst := range reservation.Instances {
+			tags := make(map[string]string, len(inst.Tags))
+			for _, t := range inst.Tags {
+				tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+			}
+			result = append(result, ec2InstanceInfo{
+				InstanceID: aws.ToString(inst.InstanceId),
+				Tags:       tags,
+				State:      string(inst.State.Name),
+			})
+		}
+	}
+	return result, nil
 }

@@ -308,3 +308,29 @@ func TestAWSProvider_BuildUserData_IncludesDownloadWhenURLSet(t *testing.T) {
 		t.Errorf("expected download URL in user-data:\n%s", ud)
 	}
 }
+
+func TestAWSProvider_ProfileStoredInConfig(t *testing.T) {
+	// Confirm that Profile round-trips through the config into the provider.
+	// NewAWSProvider cannot be called without real AWS credentials, so we use
+	// newAWSProviderWithClient and assert the cfg field is preserved.
+	cfg := minimalAWSCfg()
+	cfg.Profile = "staging"
+	p := newAWSProviderWithClient(cfg, newFakeEC2Client())
+	if p.cfg.Profile != "staging" {
+		t.Errorf("expected cfg.Profile %q, got %q", "staging", p.cfg.Profile)
+	}
+}
+
+func TestAWSProvider_NewProvider_MissingFieldsStillFailWithProfile(t *testing.T) {
+	// A profile alone does not satisfy the required field validations.
+	cfg := config.AWSProviderConfig{
+		Profile:      "staging",
+		InstanceType: "t3.nano",
+		SubnetID:     "subnet-456",
+		// SecurityGroup intentionally omitted
+	}
+	_, err := NewAWSProvider(cfg)
+	if err == nil {
+		t.Error("expected error for missing region even when profile is set")
+	}
+}

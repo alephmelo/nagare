@@ -150,6 +150,48 @@ autoscaler:
 	}
 }
 
+func TestLoadConfig_AWSProfile(t *testing.T) {
+	path := writeYAML(t, `
+autoscaler:
+  enabled: true
+  provider: aws
+  aws:
+    region: us-east-1
+    instance_type: t3.nano
+    security_group: sg-123
+    subnet_id: subnet-456
+    profile: staging
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Autoscaler.AWS.Profile != "staging" {
+		t.Errorf("expected AWS profile %q, got %q", "staging", cfg.Autoscaler.AWS.Profile)
+	}
+}
+
+func TestLoadConfig_AWSProfileEmpty(t *testing.T) {
+	// When profile is omitted it must be empty string (fall through to default chain).
+	path := writeYAML(t, `
+autoscaler:
+  enabled: true
+  provider: aws
+  aws:
+    region: us-east-1
+    instance_type: t3.nano
+    security_group: sg-123
+    subnet_id: subnet-456
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Autoscaler.AWS.Profile != "" {
+		t.Errorf("expected empty AWS profile, got %q", cfg.Autoscaler.AWS.Profile)
+	}
+}
+
 func TestLoadConfig_AutoscalerDefaultThresholds(t *testing.T) {
 	// When autoscaler is enabled but thresholds are omitted, defaults are applied.
 	path := writeYAML(t, `
