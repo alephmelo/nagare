@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -21,7 +22,9 @@ import (
 
 func newTestStore(t *testing.T) *models.Store {
 	t.Helper()
-	store, err := models.NewStore("file::memory:?cache=shared&_busy_timeout=5000")
+	// Use a unique named in-memory DB per test so parallel tests don't share state.
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=private&_busy_timeout=5000", t.Name())
+	store, err := models.NewStore(dsn)
 	if err != nil {
 		t.Fatalf("create test store: %v", err)
 	}
