@@ -27,6 +27,9 @@ builds:
     ignore:
       - goos: windows
         goarch: arm64
+    # Running on macos-latest runner:
+    # - darwin targets use the native Clang (no override needed)
+    # - linux and windows targets use Zig for cross-compilation
     overrides:
       - goos: linux
         goarch: amd64
