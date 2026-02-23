@@ -17,12 +17,13 @@ import (
 
 // Scheduler manages the ingestion of DAGs and the scheduling of runs
 type Scheduler struct {
-	store     *models.Store
-	broker    *logbroker.Broker
-	mu        sync.RWMutex
-	dags      map[string]*models.DAGDef
-	lastExec  map[string]time.Time
-	dagErrors map[string]string
+	store      *models.Store
+	broker     *logbroker.Broker
+	mu         sync.RWMutex
+	dags       map[string]*models.DAGDef
+	lastExec   map[string]time.Time
+	dagErrors  map[string]string
+	pausedDAGs map[string]bool // dag IDs that are paused; protected by mu
 }
 
 // SetBroker attaches a log broker so the scheduler can close map task streams
@@ -33,12 +34,22 @@ func (s *Scheduler) SetBroker(b *logbroker.Broker) {
 
 // NewScheduler creates a new scheduler instance
 func NewScheduler(store *models.Store) *Scheduler {
-	return &Scheduler{
-		store:     store,
-		dags:      make(map[string]*models.DAGDef),
-		lastExec:  make(map[string]time.Time),
-		dagErrors: make(map[string]string),
+	s := &Scheduler{
+		store:      store,
+		dags:       make(map[string]*models.DAGDef),
+		lastExec:   make(map[string]time.Time),
+		dagErrors:  make(map[string]string),
+		pausedDAGs: make(map[string]bool),
 	}
+
+	// Load persisted paused states so they survive restarts.
+	if paused, err := store.GetPausedDAGs(); err == nil {
+		s.pausedDAGs = paused
+	} else {
+		log.Printf("Warning: could not load paused DAG states: %v", err)
+	}
+
+	return s
 }
 
 // GetDAGs returns the loaded DAG definitions
@@ -46,6 +57,40 @@ func (s *Scheduler) GetDAGs() map[string]*models.DAGDef {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.dags
+}
+
+// IsDAGPaused reports whether the given DAG is currently paused.
+func (s *Scheduler) IsDAGPaused(dagID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pausedDAGs[dagID]
+}
+
+// PauseDAG pauses a DAG so its cron schedule no longer fires.
+// Manual triggers are still allowed while a DAG is paused.
+func (s *Scheduler) PauseDAG(dagID string) error {
+	s.mu.Lock()
+	if _, ok := s.dags[dagID]; !ok {
+		s.mu.Unlock()
+		return fmt.Errorf("DAG %s not found", dagID)
+	}
+	s.pausedDAGs[dagID] = true
+	s.mu.Unlock()
+
+	return s.store.SetDAGPaused(dagID, true)
+}
+
+// ActivateDAG resumes a previously paused DAG.
+func (s *Scheduler) ActivateDAG(dagID string) error {
+	s.mu.Lock()
+	if _, ok := s.dags[dagID]; !ok {
+		s.mu.Unlock()
+		return fmt.Errorf("DAG %s not found", dagID)
+	}
+	delete(s.pausedDAGs, dagID)
+	s.mu.Unlock()
+
+	return s.store.SetDAGPaused(dagID, false)
 }
 
 // GetDAGErrors returns the map of file paths to validation errors
@@ -135,6 +180,10 @@ func (s *Scheduler) Tick() error {
 	for _, dag := range s.dags {
 		if dag.Schedule == "" || dag.Schedule == "workflow_dispatch" {
 			continue // Skip cron evaluation for manual DAGs
+		}
+
+		if s.pausedDAGs[dag.ID] {
+			continue // Skip scheduling for paused DAGs
 		}
 
 		sched, err := parser.Parse(dag.Schedule)

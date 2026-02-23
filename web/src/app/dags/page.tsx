@@ -23,6 +23,7 @@ import {
   List,
   Tabs,
   ScrollArea,
+  Switch,
   useMantineColorScheme,
 } from "@mantine/core";
 import {
@@ -68,6 +69,7 @@ interface Dag {
   Schedule: string;
   Description: string;
   Tasks: TaskDef[];
+  Paused: boolean;
 }
 
 interface Run {
@@ -125,6 +127,7 @@ function DagListContent() {
   const [dags, setDags] = useState<Dag[]>([]);
   const [dagErrors, setDagErrors] = useState<Record<string, string>>({});
   const [triggering, setTriggering] = useState<Record<string, boolean>>({});
+  const [pausing, setPausing] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const router = useRouter();
 
@@ -161,6 +164,41 @@ function DagListContent() {
       console.error(err);
     } finally {
       setTriggering((prev) => ({ ...prev, [dagID]: false }));
+    }
+  };
+
+  const handleTogglePause = async (dagID: string, currentlyPaused: boolean) => {
+    setPausing((prev) => ({ ...prev, [dagID]: true }));
+    // Optimistic update
+    setDags((prev) => prev.map((d) => (d.ID === dagID ? { ...d, Paused: !currentlyPaused } : d)));
+    try {
+      const action = currentlyPaused ? "activate" : "pause";
+      const res = await apiFetch(`/api/dags/${dagID}/${action}`, { method: "POST" });
+      if (!res.ok) {
+        // Revert optimistic update on failure
+        setDags((prev) =>
+          prev.map((d) => (d.ID === dagID ? { ...d, Paused: currentlyPaused } : d))
+        );
+        notifications.show({
+          title: "Action Failed",
+          message: `Could not ${action} ${dagID}.`,
+          color: "red",
+        });
+      } else {
+        notifications.show({
+          title: currentlyPaused ? "Pipeline Activated" : "Pipeline Paused",
+          message: currentlyPaused
+            ? `${dagID} is now active and will run on schedule.`
+            : `${dagID} is paused. Scheduled runs are suspended.`,
+          color: currentlyPaused ? "green" : "yellow",
+        });
+      }
+    } catch (err) {
+      console.error(err);
+      // Revert on error
+      setDags((prev) => prev.map((d) => (d.ID === dagID ? { ...d, Paused: currentlyPaused } : d)));
+    } finally {
+      setPausing((prev) => ({ ...prev, [dagID]: false }));
     }
   };
 
@@ -223,7 +261,7 @@ function DagListContent() {
                   <Table.Th
                     style={{
                       borderBottom: "2px solid var(--border-color)",
-                      width: "80px",
+                      width: "110px",
                       textAlign: "right",
                     }}
                   >
@@ -238,7 +276,7 @@ function DagListContent() {
                   <Table.Tr
                     key={dag.ID}
                     onClick={() => router.push(`/dags?id=${dag.ID}`)}
-                    style={{ cursor: "pointer" }}
+                    style={{ cursor: "pointer", opacity: dag.Paused ? 0.6 : 1 }}
                   >
                     <Table.Td>
                       <Text fw={600} size="sm">
@@ -259,9 +297,15 @@ function DagListContent() {
                       </Text>
                     </Table.Td>
                     <Table.Td>
-                      <Badge variant="light" color="blue" size="sm" radius="sm">
-                        {dag.Schedule}
-                      </Badge>
+                      {dag.Paused ? (
+                        <Badge variant="light" color="yellow" size="sm" radius="sm">
+                          Paused
+                        </Badge>
+                      ) : (
+                        <Badge variant="light" color="blue" size="sm" radius="sm">
+                          {dag.Schedule}
+                        </Badge>
+                      )}
                     </Table.Td>
                     <Table.Td>
                       <Text size="sm" c="dimmed">
@@ -269,20 +313,46 @@ function DagListContent() {
                       </Text>
                     </Table.Td>
                     <Table.Td align="right">
-                      <Tooltip label="Trigger Pipeline" position="left">
-                        <ActionIcon
-                          variant="light"
-                          color="blue"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleTrigger(dag.ID);
-                          }}
-                          loading={triggering[dag.ID]}
-                          disabled={triggering[dag.ID]}
+                      <Group gap="xs" justify="flex-end" wrap="nowrap">
+                        <Tooltip
+                          label={dag.Paused ? "Activate pipeline" : "Pause pipeline"}
+                          position="left"
                         >
-                          <IconPlayerPlay size={16} />
-                        </ActionIcon>
-                      </Tooltip>
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!pausing[dag.ID]) handleTogglePause(dag.ID, dag.Paused);
+                            }}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              cursor: "pointer",
+                            }}
+                          >
+                            <Switch
+                              checked={!dag.Paused}
+                              disabled={pausing[dag.ID]}
+                              size="sm"
+                              color="blue"
+                              readOnly
+                            />
+                          </span>
+                        </Tooltip>
+                        <Tooltip label="Trigger Pipeline" position="left">
+                          <ActionIcon
+                            variant="light"
+                            color="blue"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleTrigger(dag.ID);
+                            }}
+                            loading={triggering[dag.ID]}
+                            disabled={triggering[dag.ID]}
+                          >
+                            <IconPlayerPlay size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
                     </Table.Td>
                   </Table.Tr>
                 ))}

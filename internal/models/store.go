@@ -226,6 +226,13 @@ func (s *Store) InitSchema() error {
 		terminated_at   DATETIME
 	);`
 
+	dagStatesSchema := `
+	CREATE TABLE IF NOT EXISTS dag_states (
+		dag_id     TEXT PRIMARY KEY,
+		paused     INTEGER NOT NULL DEFAULT 0,
+		updated_at DATETIME NOT NULL
+	);`
+
 	if _, err := s.db.Exec(dagRunsSchema); err != nil {
 		return err
 	}
@@ -238,6 +245,9 @@ func (s *Store) InitSchema() error {
 	if _, err := s.db.Exec(cloudInstancesSchema); err != nil {
 		return err
 	}
+	if _, err := s.db.Exec(dagStatesSchema); err != nil {
+		return err
+	}
 
 	// Active Migrations — ignore errors if columns already exist (idempotent ALTER TABLE).
 	_, _ = s.db.Exec(`ALTER TABLE dag_runs ADD COLUMN trigger_type TEXT DEFAULT 'scheduled'`)
@@ -247,6 +257,41 @@ func (s *Store) InitSchema() error {
 	_, _ = s.db.Exec(`ALTER TABLE task_instances ADD COLUMN started_at DATETIME`)
 
 	return nil
+}
+
+// SetDAGPaused persists the paused/active state for a DAG.
+// It upserts a row in dag_states so the state survives restarts.
+func (s *Store) SetDAGPaused(dagID string, paused bool) error {
+	pausedInt := 0
+	if paused {
+		pausedInt = 1
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO dag_states (dag_id, paused, updated_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(dag_id) DO UPDATE SET paused = excluded.paused, updated_at = excluded.updated_at`,
+		dagID, pausedInt, time.Now().UTC(),
+	)
+	return err
+}
+
+// GetPausedDAGs returns the set of DAG IDs that are currently paused.
+func (s *Store) GetPausedDAGs() (map[string]bool, error) {
+	rows, err := s.db.Query(`SELECT dag_id FROM dag_states WHERE paused = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result[id] = true
+	}
+	return result, rows.Err()
 }
 
 // CreateDagRun inserts a new DagRun into the database

@@ -154,10 +154,18 @@ func (s *Server) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) handleGetDAGs(w http.ResponseWriter, r *http.Request) {
 	dagsMap := s.scheduler.GetDAGs()
 
+	type DAGResponse struct {
+		*models.DAGDef
+		Paused bool `json:"Paused"`
+	}
+
 	// Convert map to slice for frontend convenience
-	dagsList := make([]*models.DAGDef, 0, len(dagsMap))
+	dagsList := make([]DAGResponse, 0, len(dagsMap))
 	for _, dag := range dagsMap {
-		dagsList = append(dagsList, dag)
+		dagsList = append(dagsList, DAGResponse{
+			DAGDef: dag,
+			Paused: s.scheduler.IsDAGPaused(dag.ID),
+		})
 	}
 
 	sort.Slice(dagsList, func(i, j int) bool {
@@ -250,6 +258,50 @@ func (s *Server) handleTriggerDAG(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(run)
+}
+
+// handlePauseDAG handles POST /api/dags/{id}/pause
+func (s *Server) handlePauseDAG(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	dagID := parts[3]
+
+	if err := s.scheduler.PauseDAG(dagID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"dag_id": dagID, "paused": true})
+}
+
+// handleActivateDAG handles POST /api/dags/{id}/activate
+func (s *Server) handleActivateDAG(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	dagID := parts[3]
+
+	if err := s.scheduler.ActivateDAG(dagID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"dag_id": dagID, "paused": false})
 }
 
 func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
@@ -924,6 +976,14 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 		}
 		if strings.HasSuffix(r.URL.Path, "/yaml") && r.Method == http.MethodGet {
 			s.handleGetDAGYAML(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/pause") && r.Method == http.MethodPost {
+			s.handlePauseDAG(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/activate") && r.Method == http.MethodPost {
+			s.handleActivateDAG(w, r)
 			return
 		}
 		http.NotFound(w, r)
