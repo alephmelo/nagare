@@ -356,8 +356,11 @@ func (a *Autoscaler) evaluateScaleDown(ctx context.Context, poolStats map[string
 			id, inst.ProviderID, time.Since(a.idleSince[id]).Round(time.Second))
 
 		if err := a.provider.SpinDown(ctx, inst.ProviderID); err != nil {
-			log.Printf("Autoscaler: SpinDown failed for instance %s: %v", id, err)
-			continue
+			// SpinDown can fail when the container was already removed externally
+			// (e.g. manual "docker rm -f").  In that case the resource is already
+			// gone, so we still clean up our local state rather than leaving a
+			// stale entry in a.instances forever.
+			log.Printf("Autoscaler: SpinDown failed for instance %s (treating as already gone): %v", id, err)
 		}
 
 		now := time.Now()
