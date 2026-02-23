@@ -70,41 +70,41 @@ const (
 type WorkerInstance struct {
 	// ID is the Nagare-internal identifier, set at provisioning time.
 	// Format: "<provider>-<random-suffix>" (e.g. "docker-a3f1b2").
-	ID string
+	ID string `json:"id"`
 
 	// ProviderID is the cloud-specific identifier for the underlying
 	// resource (e.g. an EC2 instance ID "i-0abc123", or a Docker container
 	// ID).
-	ProviderID string
+	ProviderID string `json:"provider_id"`
 
 	// WorkerID is the nagare cluster worker ID that the remote process
 	// registers with after boot.  Empty until the worker has called
 	// POST /api/workers/register.
-	WorkerID string
+	WorkerID string `json:"worker_id"`
 
 	// Pools is the list of task queues this worker serves.
-	Pools []string
+	Pools []string `json:"pools"`
 
 	// InstanceType is the cloud provider's instance/machine type
 	// (e.g. "t3.medium", "g4dn.xlarge").  Empty for Docker workers.
-	InstanceType string
+	InstanceType string `json:"instance_type"`
 
 	// Region is the geographic region the instance was launched in.
 	// Empty for Docker workers.
-	Region string
+	Region string `json:"region"`
 
 	// Status is the current lifecycle state.
-	Status InstanceStatus
+	Status InstanceStatus `json:"status"`
 
 	// CostPerHour is the estimated hourly cost in USD for this instance
 	// type.  Zero when unknown.
-	CostPerHour float64
+	CostPerHour float64 `json:"cost_per_hour"`
 
 	// CreatedAt is when Nagare asked the provider to create this instance.
-	CreatedAt time.Time
+	CreatedAt time.Time `json:"created_at"`
 
 	// TerminatedAt is when the instance was terminated.  Zero if still alive.
-	TerminatedAt time.Time
+	TerminatedAt time.Time `json:"terminated_at"`
 }
 
 // SpinUpRequest carries everything the CloudProvider needs to create a new
