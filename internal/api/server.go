@@ -11,6 +11,8 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,7 +38,8 @@ type Server struct {
 	allowedOrigins []string
 	// apiKey is the shared secret that protects all /api/* routes except
 	// /api/webhooks/.  Empty string disables API key enforcement.
-	apiKey string
+	apiKey  string
+	dagsDir string // directory where DAG YAML files are stored
 }
 
 // NewServer creates a new API Server instance
@@ -49,6 +52,12 @@ func NewServer(store *models.Store, sched *scheduler.Scheduler, pool *worker.Poo
 		allowedOrigins: allowedOrigins,
 		apiKey:         apiKey,
 	}
+}
+
+// WithDAGsDir sets the directory path where DAG YAML files are stored.
+// This enables the /api/dags/{id}/yaml endpoint to serve raw DAG source files.
+func (s *Server) WithDAGsDir(dir string) {
+	s.dagsDir = dir
 }
 
 // WithCoordinator attaches a cluster Coordinator so that /api/workers/* routes
@@ -164,6 +173,60 @@ func (s *Server) handleGetDAGErrors(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(errorsMap)
+}
+
+// handleGetDAGYAML serves the raw YAML source of a loaded DAG.
+// Route: GET /api/dags/{id}/yaml
+func (s *Server) handleGetDAGYAML(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 5 {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	dagID := parts[3]
+
+	// Verify the DAG is actually loaded to avoid arbitrary file reads.
+	dags := s.scheduler.GetDAGs()
+	if _, ok := dags[dagID]; !ok {
+		http.Error(w, "dag not found", http.StatusNotFound)
+		return
+	}
+
+	if s.dagsDir == "" {
+		http.Error(w, "dags directory not configured", http.StatusInternalServerError)
+		return
+	}
+
+	// Walk the dags directory to find the file whose parsed DAG ID matches.
+	entries, err := os.ReadDir(s.dagsDir)
+	if err != nil {
+		http.Error(w, "failed to read dags directory", http.StatusInternalServerError)
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
+			continue
+		}
+		filePath := filepath.Join(s.dagsDir, entry.Name())
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+		// Quick check: parse just to match the ID without re-using the expanded
+		// in-memory copy, so the raw on-disk content is returned as-is.
+		dag, err := models.ParseDAG(content)
+		if err != nil {
+			continue
+		}
+		if dag.ID == dagID {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Write(content) //nolint:errcheck
+			return
+		}
+	}
+
+	http.Error(w, "yaml source file not found", http.StatusNotFound)
 }
 
 func (s *Server) handleTriggerDAG(w http.ResponseWriter, r *http.Request) {
@@ -857,6 +920,10 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	mux.HandleFunc("/api/dags/", auth(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/runs") && r.Method == http.MethodPost {
 			s.handleTriggerDAG(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/yaml") && r.Method == http.MethodGet {
+			s.handleGetDAGYAML(w, r)
 			return
 		}
 		http.NotFound(w, r)

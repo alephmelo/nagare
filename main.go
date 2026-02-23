@@ -121,6 +121,7 @@ func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 	apiServer := api.NewServer(store, sched, pool, broker, cfg.CORS.AllowedOrigins, resolvedAPIKey)
 	apiServer.WithCoordinator(coord)
 	apiServer.WithAutoscaler(as)
+	apiServer.WithDAGsDir(dagsDir)
 
 	// Context for graceful shutdown.
 	ctx, cancel := context.WithCancel(context.Background())

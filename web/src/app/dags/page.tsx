@@ -21,6 +21,9 @@ import {
   ActionIcon,
   Tooltip,
   List,
+  Tabs,
+  ScrollArea,
+  useMantineColorScheme,
 } from "@mantine/core";
 import {
   IconArrowLeft,
@@ -49,6 +52,8 @@ import {
 import "@xyflow/react/dist/style.css";
 import dagre from "dagre";
 import { notifications } from "@mantine/notifications";
+import SyntaxHighlighter from "react-syntax-highlighter";
+import { atomOneDark, atomOneLight } from "react-syntax-highlighter/dist/esm/styles/hljs";
 
 // Types
 interface TaskDef {
@@ -306,12 +311,14 @@ function DagDetailsContent() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id");
   const router = useRouter();
+  const { colorScheme } = useMantineColorScheme();
 
   const [dag, setDag] = useState<Dag | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [triggering, setTriggering] = useState(false);
+  const [dagYAML, setDagYAML] = useState<string | null>(null);
 
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState<string | null>("all");
@@ -340,6 +347,14 @@ function DagDetailsContent() {
         }
 
         setDag(targetDag);
+
+        // Fetch raw YAML source for the Definition tab
+        try {
+          const yamlRes = await apiFetch(`/api/dags/${id}/yaml`);
+          if (yamlRes.ok) setDagYAML(await yamlRes.text());
+        } catch {
+          // Non-critical — the graph still works without the YAML
+        }
 
         // Build react flow nodes off schema dynamically
         const initialNodes =
@@ -822,22 +837,52 @@ function DagDetailsContent() {
             </Card>
           </Grid.Col>
           <Grid.Col span={{ base: 12, lg: 5 }}>
-            <Title order={4} mb="md" c="dimmed">
-              Pipeline Graph
-            </Title>
-            <Card style={{ height: "600px" }} p="0">
-              <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                onNodesChange={onNodesChange}
-                onEdgesChange={onEdgesChange}
-                fitView
-                attributionPosition="bottom-right"
-              >
-                <Background color="var(--mantine-color-dark-4)" gap={16} />
-                <Controls />
-              </ReactFlow>
-            </Card>
+            <Tabs defaultValue="graph" variant="outline">
+              <Tabs.List mb="md">
+                <Tabs.Tab value="graph">Pipeline Graph</Tabs.Tab>
+                <Tabs.Tab value="definition">Definition</Tabs.Tab>
+              </Tabs.List>
+              <Tabs.Panel value="graph">
+                <Card style={{ height: "600px" }} p="0">
+                  <ReactFlow
+                    nodes={nodes}
+                    edges={edges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    fitView
+                    attributionPosition="bottom-right"
+                  >
+                    <Background color="var(--mantine-color-dark-4)" gap={16} />
+                    <Controls />
+                  </ReactFlow>
+                </Card>
+              </Tabs.Panel>
+              <Tabs.Panel value="definition">
+                <Card p="0" style={{ height: "600px", overflow: "hidden" }}>
+                  <ScrollArea h="600px">
+                    {dagYAML ? (
+                      <SyntaxHighlighter
+                        language="yaml"
+                        style={colorScheme === "dark" ? atomOneDark : atomOneLight}
+                        customStyle={{
+                          margin: 0,
+                          padding: "16px",
+                          background: "transparent",
+                          fontSize: "12px",
+                          lineHeight: 1.7,
+                        }}
+                      >
+                        {dagYAML}
+                      </SyntaxHighlighter>
+                    ) : (
+                      <Text c="dimmed" size="sm" p="md">
+                        YAML source not available.
+                      </Text>
+                    )}
+                  </ScrollArea>
+                </Card>
+              </Tabs.Panel>
+            </Tabs>
           </Grid.Col>
         </Grid>
       )}
