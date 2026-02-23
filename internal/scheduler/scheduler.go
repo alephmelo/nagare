@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/robfig/cron/v3"
 )
@@ -17,10 +18,17 @@ import (
 // Scheduler manages the ingestion of DAGs and the scheduling of runs
 type Scheduler struct {
 	store     *models.Store
+	broker    *logbroker.Broker
 	mu        sync.RWMutex
 	dags      map[string]*models.DAGDef
 	lastExec  map[string]time.Time
 	dagErrors map[string]string
+}
+
+// SetBroker attaches a log broker so the scheduler can close map task streams
+// when the parent task transitions to a terminal state.
+func (s *Scheduler) SetBroker(b *logbroker.Broker) {
+	s.broker = b
 }
 
 // NewScheduler creates a new scheduler instance
@@ -236,11 +244,19 @@ func (s *Scheduler) evaluateRunCompletions() error {
 								log.Printf("Failed to update map task %s to failed: %v", ti.ID, err)
 							}
 							tasks[k].Status = models.TaskFailed
+							if s.broker != nil {
+								s.broker.Close(ti.ID)
+								s.broker.Cleanup(ti.ID)
+							}
 						} else if allChildrenSuccess {
 							if err := s.store.UpdateTaskInstanceStatus(ti.ID, models.TaskSuccess); err != nil {
 								log.Printf("Failed to update map task %s to success: %v", ti.ID, err)
 							}
 							tasks[k].Status = models.TaskSuccess
+							if s.broker != nil {
+								s.broker.Close(ti.ID)
+								s.broker.Cleanup(ti.ID)
+							}
 						}
 					}
 				}

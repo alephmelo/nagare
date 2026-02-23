@@ -93,6 +93,7 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
 
 	// 3. Initialize log broker and local worker pool.
 	broker := logbroker.NewBroker()
+	sched.SetBroker(broker)
 	pool := worker.NewPool(store, getDAG, sched.TriggerDAG, cfg.WorkerPools, broker)
 
 	// 4. Initialize cluster coordinator (always-on; only used when remote
