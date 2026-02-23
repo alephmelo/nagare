@@ -4,10 +4,8 @@ version: 2
 # The Go embed directive (//go:embed all:web/out) requires web/out to exist at compile time.
 before:
   hooks:
-    - cmd: npm ci
-      dir: web
-    - cmd: npm run build
-      dir: web
+    - sh -c "cd web && npm ci"
+    - sh -c "cd web && npm run build"
 
 builds:
   - id: nagare
