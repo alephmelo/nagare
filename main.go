@@ -32,6 +32,7 @@ func main() {
 	poolsFlag := flag.String("pools", "default", "Comma-separated pool names this worker serves")
 	token := flag.String("token", "", "Shared secret for master-worker authentication")
 	port := flag.String("port", ":8080", "Listen address for the master API server")
+	masterAddr := flag.String("master-addr", "", "Public address of this master, passed to cloud workers via --join (e.g. http://1.2.3.4:8080). Defaults to http://localhost<port>.")
 	dbPath := flag.String("db", "nagare.db", "SQLite database path")
 	dagsDir := flag.String("dags", "dags", "Directory containing DAG definitions")
 	apiKey := flag.String("api-key", "", "API key to protect all /api/* routes (overrides nagare.yaml and NAGARE_API_KEY env var)")
@@ -42,12 +43,12 @@ func main() {
 		return
 	}
 
-	runMaster(*port, *dbPath, *dagsDir, *token, *apiKey)
+	runMaster(*port, *masterAddr, *dbPath, *dagsDir, *token, *apiKey)
 }
 
 // runMaster starts the full Nagare master node: scheduler + local worker pool +
 // optional cluster coordinator for remote workers + HTTP API.
-func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
+func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
 	log.Println("Booting up Nagare: Lean Airflow in Go")
 
 	// Ensure dags directory exists.
@@ -140,7 +141,15 @@ func runMaster(addr, dbPath, dagsDir, token, apiKeyFlag string) {
 	pool.Start(ctx)
 
 	// Start the autoscaler background loop (no-op when disabled).
-	go as.Run(ctx, 30*time.Second, fmt.Sprintf("http://localhost%s", addr), token)
+	// masterAddr is the address cloud workers will use to connect back to this
+	// master via --join.  It defaults to http://localhost<port> (works for
+	// Docker provider) but must be set to a publicly reachable address when
+	// using the AWS provider.
+	effectiveMasterAddr := masterAddr
+	if effectiveMasterAddr == "" {
+		effectiveMasterAddr = fmt.Sprintf("http://localhost%s", addr)
+	}
+	go as.Run(ctx, 30*time.Second, effectiveMasterAddr, token)
 
 	go func() {
 		fSys, err := fs.Sub(frontendEmbedFS, "web/out")

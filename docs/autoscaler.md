@@ -284,7 +284,69 @@ autoscaler:
 
 Keep `worker_pools.default: 1` in `nagare.yaml` so the local worker handles light load and the autoscaler only kicks in when the queue backs up.
 
-### 3. Build an AMI (recommended)
+### 3. Where to run the master
+
+The master can run anywhere — your laptop, a dedicated server, or an EC2 instance. The autoscaler calls the AWS EC2 API from wherever the master is running and bakes the master's address into each worker's user-data script so workers can connect back.
+
+```
+Your machine (or any server)
+┌─────────────────────────────────┐
+│  nagare master  (:8080)         │
+│  - scheduler                    │
+│  - autoscaler loop              │
+│                                 │
+│  AWS EC2 API calls ─────────────┼──► RunInstances / TerminateInstances
+└─────────────────────────────────┘
+         ▲  ▲  ▲
+         │  │  │  (each worker connects back: nagare --worker --join http://<master>:8080)
+    ┌────┘  │  └────┐
+EC2 t3.nano  EC2 t3.nano  EC2 t3.nano
+```
+
+The critical requirement is that **EC2 workers must be able to reach the master on port 8080**. How you satisfy that depends on where the master runs:
+
+#### Option A — Master on your local machine (laptop testing)
+
+Workers are EC2 instances in a VPC with internet access. Your laptop needs a publicly reachable address.
+
+| Method | How |
+|---|---|
+| **ngrok** (easiest) | `ngrok tcp 8080` → gives you `tcp://0.tcp.ngrok.io:XXXXX`. Pass that as `nagare --master-addr http://0.tcp.ngrok.io:XXXXX`. |
+| **Cloudflare Tunnel** | `cloudflared tunnel --url tcp://localhost:8080`. Similar to ngrok, free tier available. |
+| **Public IP + port forward** | Open TCP 8080 on your router to your machine's public IP. Fragile with dynamic IPs. |
+| **VPN** | If EC2 instances and your machine share a VPN, use your VPN private IP directly with `--master-addr`. |
+
+#### Option B — Master on an EC2 instance (production-like)
+
+The cleanest setup. Workers and the master are in the same VPC and communicate over private IPs — no public internet exposure needed.
+
+```
+EC2 master (t3.small, private IP 10.0.1.10)
+  security group: inbound TCP 8080 from worker security group
+
+EC2 workers (t3.nano)
+  --join http://10.0.1.10:8080
+  security group: outbound TCP 8080 to master security group
+```
+
+Workers are cheaper and start faster because there is no internet egress needed for the `--join` connection.
+
+#### The `--master-addr` flag
+
+The master address baked into each worker's user-data script is controlled by the `--master-addr` flag. It defaults to `http://localhost<port>` (correct for the Docker provider) but must be set to a publicly reachable address when using the AWS provider:
+
+```bash
+# Local machine with ngrok:
+nagare --master-addr http://0.tcp.ngrok.io:12345
+
+# EC2 master with a public IP:
+nagare --master-addr http://1.2.3.4:8080
+
+# EC2 master using private VPC IP (workers in same VPC):
+nagare --master-addr http://10.0.1.10:8080
+```
+
+### 4. Build an AMI (recommended)
 
 Downloading the binary at each boot adds ~5-10 s of cold-start latency and requires S3 access. For faster scale-up, bake a custom AMI:
 
@@ -297,7 +359,7 @@ aws ec2 create-image --instance-id <id> --name "nagare-worker-al2023" --no-reboo
 
 Set the resulting AMI ID as `aws.ami_id` in `nagare.yaml`.
 
-### 4. Test the end-to-end flow
+### 5. Test the end-to-end flow
 
 Use the provided example DAG:
 
@@ -313,7 +375,7 @@ watch -n 5 'curl -s http://localhost:8080/api/autoscaler/status | jq "{cloud_wor
 
 The `aws_autoscaler_test` DAG (`dags/aws_autoscaler_test.yaml`) submits 6 × 30-second tasks. With `scale_up_threshold: 3` in the per-DAG override, the autoscaler will spin up workers once 4 or more tasks are queued. Workers are terminated automatically after `scale_down_idle_mins` of inactivity.
 
-### 5. The user-data script
+### 6. The user-data script
 
 The autoscaler generates this user-data for each EC2 instance:
 
@@ -326,7 +388,7 @@ chmod +x /usr/local/bin/nagare
 nohup /usr/local/bin/nagare --worker --join "http://<master>:8080" --pools "default" --token "<token>" >> /var/log/nagare-worker.log 2>&1 &
 ```
 
-### 6. IAM policy (minimum)
+### 7. IAM policy (minimum)
 
 ```json
 {
