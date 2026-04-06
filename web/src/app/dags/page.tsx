@@ -15,8 +15,6 @@ import {
   Grid,
   Skeleton,
   Alert,
-  Menu,
-  UnstyledButton,
   ActionIcon,
   Tooltip,
   List,
@@ -25,7 +23,7 @@ import {
   Switch,
   useMantineColorScheme,
 } from "@mantine/core";
-import { IconArrowLeft, IconAlertCircle, IconPlayerPlay, IconRefresh } from "@tabler/icons-react";
+import { IconAlertCircle, IconPlayerPlay, IconRefresh } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { RunsTable, Run } from "../../components/blocks/RunsTable";
@@ -364,7 +362,6 @@ function DagListContent() {
 function DagDetailsContent() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id");
-  const router = useRouter();
   const { colorScheme } = useMantineColorScheme();
 
   const [dag, setDag] = useState<Dag | null>(null);
@@ -424,6 +421,7 @@ function DagDetailsContent() {
               padding: "10px 15px",
               fontSize: "12px",
               fontWeight: 600,
+              fontFamily: "var(--font-outfit)",
               width: nodeWidth,
               wordBreak: "break-word" as const,
               whiteSpace: "pre-wrap" as const,
@@ -484,6 +482,86 @@ function DagDetailsContent() {
         const runsData = await runsRes.json();
         setRuns(runsData.data || []);
         setTotalRuns(runsData.total || 0);
+
+        // --- Live Physics-Based Visualizer Sync ---
+        const rData = runsData.data || [];
+        let targetRun = rData.find((r: Run) => r.Status === "running");
+        if (!targetRun && rData.length > 0) {
+          targetRun = rData[0]; // Fall back to most recent run if nothing is running
+        }
+
+        if (targetRun) {
+          const tasksRes = await apiFetch(`/api/runs/${targetRun.ID}/tasks`);
+          if (tasksRes.ok) {
+            const tasksData = await tasksRes.json();
+
+            // Map LIVE states to React Flow nodes
+            setNodes((nds) =>
+              nds.map((n) => {
+                const taskState = tasksData.find(
+                  (t: { TaskID: string; Status: string }) => t.TaskID === n.id
+                );
+                const status = taskState?.Status; // e.g. success, failed, running, queued, etc.
+
+                let borderColor = "var(--mantine-color-blue-filled)";
+                let background = "var(--mantine-color-dark-6)";
+                let animation = "none";
+
+                if (status === "success") {
+                  borderColor = "var(--mantine-color-green-filled)";
+                  background = "rgba(43, 138, 62, 0.1)";
+                } else if (status === "failed") {
+                  borderColor = "var(--mantine-color-red-filled)";
+                  animation = "shakeRedAlert 0.15s infinite alternate";
+                } else if (status === "running") {
+                  animation = "pulseBlue 2s infinite";
+                } else if (status === "queued" || status === "pending") {
+                  borderColor = "var(--mantine-color-gray-6)";
+                }
+
+                return {
+                  ...n,
+                  style: {
+                    ...n.style,
+                    border: `1px solid ${borderColor}`,
+                    background,
+                    animation,
+                    transition: "all 0.3s ease",
+                  },
+                };
+              })
+            );
+
+            // Map LIVE states to React Flow edges
+            const isRunActive = targetRun.Status === "running";
+            setEdges((eds) =>
+              eds.map((e) => {
+                const sourceState = tasksData.find(
+                  (t: { TaskID: string; Status: string }) => t.TaskID === e.source
+                );
+                const sourceStatus = sourceState?.Status;
+
+                let strokeColor = "var(--mantine-color-blue-filled)";
+                if (sourceStatus === "success") strokeColor = "var(--mantine-color-green-filled)";
+                if (sourceStatus === "failed") strokeColor = "var(--mantine-color-red-filled)";
+                if (!sourceStatus || sourceStatus === "pending")
+                  strokeColor = "var(--mantine-color-gray-6)";
+
+                return {
+                  ...e,
+                  animated: isRunActive, // Flowing energy if the system is running!
+                  style: { stroke: strokeColor, transition: "stroke 0.3s ease" },
+                  markerEnd: {
+                    type: MarkerType.ArrowClosed,
+                    width: 20,
+                    height: 20,
+                    color: strokeColor,
+                  },
+                };
+              })
+            );
+          }
+        }
       } else {
         setRuns([]);
         setTotalRuns(0);
@@ -538,16 +616,49 @@ function DagDetailsContent() {
 
   return (
     <>
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
+        @keyframes pulseBlue {
+          0% { box-shadow: 0 0 0 0 rgba(25, 113, 194, 0.7); }
+          70% { box-shadow: 0 0 0 10px rgba(25, 113, 194, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(25, 113, 194, 0); }
+        }
+        @keyframes shakeRedAlert {
+          0%, 100% { transform: translateX(0); box-shadow: 0 0 15px 5px rgba(224, 49, 49, 0.4); }
+          25% { transform: translateX(-4px); box-shadow: 0 0 25px 8px rgba(224, 49, 49, 0.6); }
+          50% { transform: translateX(4px); box-shadow: 0 0 25px 8px rgba(224, 49, 49, 0.6); }
+          75% { transform: translateX(-4px); box-shadow: 0 0 25px 8px rgba(224, 49, 49, 0.6); }
+        }
+      `,
+        }}
+      />
       <PageHeader
         title={id as string}
         showBack
         backTo="/dags"
         badge={
-          dag ? (
-            <Badge variant="light" color="blue" size="lg">
-              {dag.Schedule}
-            </Badge>
-          ) : undefined
+          <Group gap="xs">
+            {dag && (
+              <Badge variant="light" color="blue" size="lg">
+                {dag.Schedule}
+              </Badge>
+            )}
+            {runs.some((r) => r.Status === "running") && (
+              <Badge
+                variant="filled"
+                color="red"
+                size="lg"
+                style={{
+                  animation: "pulseRedAlert 2s infinite",
+                  fontWeight: 800,
+                  letterSpacing: "1px",
+                }}
+              >
+                LIVE TELEMETRY
+              </Badge>
+            )}
+          </Group>
         }
         subtitle={dag?.Description}
         actions={
