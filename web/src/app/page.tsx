@@ -16,15 +16,21 @@ import {
   Alert,
   List,
   Switch,
+  SimpleGrid,
+  Collapse,
+  Divider,
+  ThemeIcon,
 } from "@mantine/core";
 import {
   IconRefresh,
-  IconX,
+  IconAlertTriangle,
   IconActivity,
   IconAlertCircle,
   IconPlayerPlay,
   IconTimelineEvent,
   IconSitemap,
+  IconChevronDown,
+  IconChevronUp,
 } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { notifications } from "@mantine/notifications";
@@ -56,6 +62,7 @@ export default function Dashboard() {
   const [triggering, setTriggering] = useState<Record<string, boolean>>({});
   const [pausing, setPausing] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
+  const [showErrors, setShowErrors] = useState(false);
 
   const [page, setPage] = useState(1);
   const [dagFilter, setDagFilter] = useState<string | null>("all");
@@ -164,83 +171,103 @@ export default function Dashboard() {
         <Alert
           variant="light"
           color="red"
-          title="DAG Validation Errors"
-          icon={<IconAlertCircle />}
+          title={
+            <Group justify="space-between">
+              <Group gap="xs">
+                <IconAlertCircle size={20} />
+                <Text fw={700}>DAG Validation Errors ({Object.keys(dagErrors).length})</Text>
+              </Group>
+              <ActionIcon
+                variant="transparent"
+                color="red"
+                onClick={() => setShowErrors((p) => !p)}
+              >
+                {showErrors ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
+              </ActionIcon>
+            </Group>
+          }
           mb="xl"
+          p="md"
         >
-          <Text size="sm" mb="xs">
-            Problematic DAG configurations:
-          </Text>
-          <List size="sm" spacing="xs">
-            {Object.entries(dagErrors).map(([file, err]) => (
-              <List.Item key={file}>
-                <strong>{file}</strong>:{" "}
-                <Text span c="dimmed" fs="italic">
-                  {err}
-                </Text>
-              </List.Item>
-            ))}
-          </List>
+          <Collapse in={showErrors}>
+            <Text size="sm" mb="xs" mt="xs">
+              Problematic DAG configurations:
+            </Text>
+            <List size="sm" spacing="xs">
+              {Object.entries(dagErrors).map(([file, err]) => (
+                <List.Item key={file}>
+                  <strong>{file}</strong>:{" "}
+                  <Text span c="dimmed" fs="italic">
+                    {err}
+                  </Text>
+                </List.Item>
+              ))}
+            </List>
+          </Collapse>
         </Alert>
       )}
 
       {stats && (
-        <Card padding="md" mb="xl">
-          <Group grow>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
+        <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md" mb="xl">
+          <Card shadow="sm" padding="lg" radius="md" withBorder>
+            <Group justify="space-between" align="flex-start" mb="sm">
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700} style={{ letterSpacing: "1px" }}>
                 Active Runs
               </Text>
-              <Group gap="xs" mt={4}>
-                <IconActivity size={18} color="var(--mantine-color-blue-filled)" />
-                <Text fw={700} size="xl">
-                  {stats.active_runs}
-                </Text>
-              </Group>
-            </div>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
+              <ThemeIcon variant="light" color="blue" size="md" radius="xl">
+                <IconActivity size={18} />
+              </ThemeIcon>
+            </Group>
+            <Text fw={800} size="xl" style={{ fontSize: "2rem" }}>
+              {stats.active_runs}
+            </Text>
+          </Card>
+
+          <Card shadow="sm" padding="lg" radius="md" withBorder>
+            <Group justify="space-between" align="flex-start" mb="sm">
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700} style={{ letterSpacing: "1px" }}>
                 Failed Runs (24h)
               </Text>
-              <Group gap="xs" mt={4}>
-                <IconX
-                  size={18}
-                  color={
-                    stats.failed_runs_24h > 0
-                      ? "var(--mantine-color-red-filled)"
-                      : "var(--mantine-color-gray-5)"
-                  }
-                />
-                <Text fw={700} size="xl" c={stats.failed_runs_24h > 0 ? "red" : "inherit"}>
-                  {stats.failed_runs_24h}
-                </Text>
-              </Group>
-            </div>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
+              <ThemeIcon variant="light" color="red" size="md" radius="xl">
+                <IconAlertTriangle size={18} />
+              </ThemeIcon>
+            </Group>
+            <Text fw={800} size="xl" style={{ fontSize: "2rem" }}>
+              {stats.failed_runs_24h}
+            </Text>
+          </Card>
+
+          <Card shadow="sm" padding="lg" radius="md" withBorder>
+            <Group justify="space-between" align="flex-start" mb="sm">
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700} style={{ letterSpacing: "1px" }}>
                 Total Operations
               </Text>
-              <Group gap="xs" mt={4}>
-                <IconTimelineEvent size={18} color="var(--mantine-color-teal-filled)" />
-                <Text fw={700} size="xl">
-                  {stats.total_runs}
-                </Text>
-              </Group>
-            </div>
-            <div>
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
+              <ThemeIcon variant="light" color="teal" size="md" radius="xl">
+                <IconTimelineEvent size={18} />
+              </ThemeIcon>
+            </Group>
+            <Text fw={800} size="xl" style={{ fontSize: "2rem" }}>
+              {stats.total_runs}
+            </Text>
+          </Card>
+
+          <Card shadow="sm" padding="lg" radius="md" withBorder>
+            <Group justify="space-between" align="flex-start" mb="sm">
+              <Text c="dimmed" size="xs" tt="uppercase" fw={700} style={{ letterSpacing: "1px" }}>
                 Loaded DAGs
               </Text>
-              <Group gap="xs" mt={4}>
-                <IconSitemap size={18} color="var(--mantine-color-violet-filled)" />
-                <Text fw={700} size="xl">
-                  {stats.loaded_dags}
-                </Text>
-              </Group>
-            </div>
-          </Group>
-        </Card>
+              <ThemeIcon variant="light" color="violet" size="md" radius="xl">
+                <IconSitemap size={18} />
+              </ThemeIcon>
+            </Group>
+            <Text fw={800} size="xl" style={{ fontSize: "2rem" }}>
+              {stats.loaded_dags}
+            </Text>
+          </Card>
+        </SimpleGrid>
       )}
+
+      <Divider mb="xl" opacity={0.5} />
 
       <Title order={4} mb="md" c="dimmed">
         Loaded Workflows
@@ -248,18 +275,30 @@ export default function Dashboard() {
       {loading && dags.length === 0 ? (
         <Skeleton height={200} mb="xl" radius="md" />
       ) : (
-        <Card padding="0" mb="xl" style={{ overflow: "hidden" }}>
+        <Card padding="0" mb="xl" shadow="sm" radius="md" withBorder style={{ overflow: "hidden" }}>
           <Table.ScrollContainer minWidth={600}>
             <Table verticalSpacing="sm" horizontalSpacing="md" striped highlightOnHover>
               <Table.Thead>
                 <Table.Tr>
                   <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
-                    <Text size="sm" fw={700}>
+                    <Text
+                      size="xs"
+                      fw={600}
+                      tt="uppercase"
+                      c="dimmed"
+                      style={{ letterSpacing: "1px" }}
+                    >
                       Pipeline
                     </Text>
                   </Table.Th>
                   <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
-                    <Text size="sm" fw={700}>
+                    <Text
+                      size="xs"
+                      fw={600}
+                      tt="uppercase"
+                      c="dimmed"
+                      style={{ letterSpacing: "1px" }}
+                    >
                       Schedule
                     </Text>
                   </Table.Th>
@@ -270,7 +309,13 @@ export default function Dashboard() {
                       textAlign: "right",
                     }}
                   >
-                    <Text size="sm" fw={700}>
+                    <Text
+                      size="xs"
+                      fw={600}
+                      tt="uppercase"
+                      c="dimmed"
+                      style={{ letterSpacing: "1px" }}
+                    >
                       Actions
                     </Text>
                   </Table.Th>
@@ -281,7 +326,17 @@ export default function Dashboard() {
                   <Table.Tr
                     key={dag.ID}
                     onClick={() => router.push(`/dags?id=${dag.ID}`)}
-                    style={{ cursor: "pointer", opacity: dag.Paused ? 0.6 : 1 }}
+                    style={{
+                      cursor: "pointer",
+                      opacity: dag.Paused ? 0.6 : 1,
+                      transition: "transform 0.2s ease, opacity 0.2s ease",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.transform = "translateY(-1.5px)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.transform = "translateY(0)";
+                    }}
                   >
                     <Table.Td>
                       <Text fw={600} size="sm">
