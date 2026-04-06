@@ -151,6 +151,20 @@ func (s *Server) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// writeJSON writes v as JSON to the response body.
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v) //nolint:errcheck
+}
+
+// enrichedTask extends a TaskInstance with its command from the DAG definition
+// and optional resource metrics.
+type enrichedTask struct {
+	models.TaskInstance
+	Command string              `json:"Command"`
+	Metrics *models.TaskMetrics `json:"Metrics,omitempty"`
+}
+
 func (s *Server) handleGetDAGs(w http.ResponseWriter, r *http.Request) {
 	dagsMap := s.scheduler.GetDAGs()
 
@@ -172,15 +186,13 @@ func (s *Server) handleGetDAGs(w http.ResponseWriter, r *http.Request) {
 		return dagsList[i].ID < dagsList[j].ID
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(dagsList)
+	writeJSON(w, dagsList)
 }
 
 func (s *Server) handleGetDAGErrors(w http.ResponseWriter, r *http.Request) {
 	errorsMap := s.scheduler.GetDAGErrors()
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(errorsMap)
+	writeJSON(w, errorsMap)
 }
 
 // handleGetDAGYAML serves the raw YAML source of a loaded DAG.
@@ -262,10 +274,6 @@ func (s *Server) handleTriggerDAG(w http.ResponseWriter, r *http.Request) {
 
 // handlePauseDAG handles POST /api/dags/{id}/pause
 func (s *Server) handlePauseDAG(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 4 {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
@@ -278,16 +286,11 @@ func (s *Server) handlePauseDAG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"dag_id": dagID, "paused": true})
+	writeJSON(w, map[string]interface{}{"dag_id": dagID, "paused": true})
 }
 
 // handleActivateDAG handles POST /api/dags/{id}/activate
 func (s *Server) handleActivateDAG(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 4 {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
@@ -300,8 +303,7 @@ func (s *Server) handleActivateDAG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"dag_id": dagID, "paused": false})
+	writeJSON(w, map[string]interface{}{"dag_id": dagID, "paused": false})
 }
 
 func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
@@ -355,8 +357,7 @@ func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
 		"total": total,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, response)
 }
 
 func (s *Server) handleGetStats(w http.ResponseWriter, r *http.Request) {
@@ -375,8 +376,7 @@ func (s *Server) handleGetStats(w http.ResponseWriter, r *http.Request) {
 		"loaded_dags":     len(dagsMap),
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, response)
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
@@ -394,8 +394,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(run)
+	writeJSON(w, run)
 }
 
 func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
@@ -413,14 +412,6 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// We enrich the TaskInstance with the Command from the DAG definition for the UI
-	// and with resource metrics if available.
-	type EnrichedTask struct {
-		models.TaskInstance
-		Command string              `json:"Command"`
-		Metrics *models.TaskMetrics `json:"Metrics,omitempty"`
-	}
-
 	run, err := s.store.GetDagRun(runID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -429,28 +420,19 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 
 	dags := s.scheduler.GetDAGs()
 	dag, ok := dags[run.DAGID]
-	var enriched []EnrichedTask
 
+	var enriched []enrichedTask
 	for _, t := range tasks {
-		cmd := ""
-		if ok {
-			for _, def := range dag.Tasks {
-				if def.ID == t.TaskID {
-					cmd = def.Command
-					break
-				}
-			}
-		}
+		cmd := s.resolveTaskCommand(dag, ok, t.TaskID)
 		m, _ := s.store.GetTaskMetrics(t.ID)
-		enriched = append(enriched, EnrichedTask{
+		enriched = append(enriched, enrichedTask{
 			TaskInstance: t,
 			Command:      cmd,
 			Metrics:      m,
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(enriched)
+	writeJSON(w, enriched)
 }
 
 func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
@@ -469,12 +451,6 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// We enrich the TaskInstance with the Command from the DAG definition for the UI
-	type EnrichedTask struct {
-		models.TaskInstance
-		Command string `json:"Command"`
-	}
-
 	run, err := s.store.GetDagRun(runID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -483,34 +459,30 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 
 	dags := s.scheduler.GetDAGs()
 	dag, ok := dags[run.DAGID]
-	var enriched []EnrichedTask
 
+	var enriched []enrichedTask
 	for _, t := range attempts {
-		cmd := ""
-		if ok {
-			for _, def := range dag.Tasks {
-				if def.ID == t.TaskID {
-					cmd = def.Command
-					break
-				}
-			}
-		}
-		enriched = append(enriched, EnrichedTask{
+		enriched = append(enriched, enrichedTask{
 			TaskInstance: t,
-			Command:      cmd,
+			Command:      s.resolveTaskCommand(dag, ok, t.TaskID),
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(enriched)
+	writeJSON(w, enriched)
+}
+
+// resolveTaskCommand looks up the command string for a task ID in a DAG definition.
+func (s *Server) resolveTaskCommand(dag *models.DAGDef, dagFound bool, taskID string) string {
+	if !dagFound || dag == nil {
+		return ""
+	}
+	if td := dag.FindTask(taskID); td != nil {
+		return td.Command
+	}
+	return ""
 }
 
 func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Route mapping: /api/runs/{run_id}/tasks/{task_id}/retry
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 7 {
@@ -526,16 +498,10 @@ func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Task queued for retry successfully"})
+	writeJSON(w, map[string]string{"message": "Task queued for retry successfully"})
 }
 
 func (s *Server) handleKillRun(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 4 {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
@@ -549,16 +515,10 @@ func (s *Server) handleKillRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Run killed successfully"})
+	writeJSON(w, map[string]string{"message": "Run killed successfully"})
 }
 
 func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 7 {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
@@ -574,8 +534,7 @@ func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Task killed successfully"})
+	writeJSON(w, map[string]string{"message": "Task killed successfully"})
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -693,7 +652,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{
+	writeJSON(w, map[string]string{
 		"message": "Webhook received, DAG triggered",
 		"run_id":  run.ID,
 	})
@@ -784,8 +743,7 @@ func (s *Server) handleGetTaskMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Metrics not found", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(m)
+	writeJSON(w, m)
 }
 
 // handleGetRunMetrics returns all task metrics for a specific run.
@@ -804,8 +762,7 @@ func (s *Server) handleGetRunMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(metrics)
+	writeJSON(w, metrics)
 }
 
 // handleGetDAGMetrics returns recent task metrics and aggregate stats for a DAG.
@@ -837,8 +794,7 @@ func (s *Server) handleGetDAGMetrics(w http.ResponseWriter, r *http.Request) {
 		"aggregate":   agg,
 		"time_series": series,
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, response)
 }
 
 // handleGetMetricsOverview returns system-wide metrics for the Metrics dashboard.
@@ -851,8 +807,7 @@ func (s *Server) handleGetMetricsOverview(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(overview)
+	writeJSON(w, overview)
 }
 
 // handleGetMetricsTimeSeries returns global time-series data for charting.
@@ -866,8 +821,7 @@ func (s *Server) handleGetMetricsTimeSeries(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(series)
+	writeJSON(w, series)
 }
 
 // handleAutoscalerStatus returns a snapshot of the autoscaler's current state.
@@ -878,8 +832,7 @@ func (s *Server) handleAutoscalerStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	snap := s.as.Status()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(snap)
+	writeJSON(w, snap)
 }
 
 // handleAutoscalerCosts returns aggregate cost metrics for all cloud instances.
@@ -890,8 +843,7 @@ func (s *Server) handleAutoscalerCosts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(summary)
+	writeJSON(w, summary)
 }
 
 // handleAutoscalerEnable enables the autoscaler at runtime.
@@ -901,17 +853,12 @@ func (s *Server) handleAutoscalerCosts(w http.ResponseWriter, r *http.Request) {
 // without restarting the master.  It is a no-op when the autoscaler is
 // already enabled.
 func (s *Server) handleAutoscalerEnable(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if s.as == nil {
 		http.Error(w, "autoscaler not configured", http.StatusServiceUnavailable)
 		return
 	}
 	snap := s.as.Status()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"enabled": snap.Enabled,
 		"message": "use the autoscaler.enabled flag in nagare.yaml to permanently enable autoscaling",
 	})
@@ -958,7 +905,7 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 		log.Println("WARNING: api_key is not configured — all API routes are unauthenticated. Set api_key in nagare.yaml or use --api-key for production use.")
 	}
 
-	// auth is a convenience alias that composes apiKeyMiddleware + corsMiddleware.
+	// auth composes apiKeyMiddleware + corsMiddleware.
 	// Applied to every /api/* route except /api/webhooks/ (which uses HMAC).
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return s.apiKeyMiddleware(s.corsMiddleware(h))
@@ -966,77 +913,39 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/stats", auth(s.handleGetStats))
-	mux.HandleFunc("/api/dags", auth(s.handleGetDAGs))
-	mux.HandleFunc("/api/dags/errors", auth(s.handleGetDAGErrors))
-	mux.HandleFunc("/api/dags/", auth(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/runs") && r.Method == http.MethodPost {
-			s.handleTriggerDAG(w, r)
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/yaml") && r.Method == http.MethodGet {
-			s.handleGetDAGYAML(w, r)
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/pause") && r.Method == http.MethodPost {
-			s.handlePauseDAG(w, r)
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/activate") && r.Method == http.MethodPost {
-			s.handleActivateDAG(w, r)
-			return
-		}
-		http.NotFound(w, r)
-	}))
+	// DAG endpoints
+	mux.HandleFunc("GET /api/stats", auth(s.handleGetStats))
+	mux.HandleFunc("GET /api/dags", auth(s.handleGetDAGs))
+	mux.HandleFunc("GET /api/dags/errors", auth(s.handleGetDAGErrors))
+	mux.HandleFunc("POST /api/dags/{id}/runs", auth(s.handleTriggerDAG))
+	mux.HandleFunc("GET /api/dags/{id}/yaml", auth(s.handleGetDAGYAML))
+	mux.HandleFunc("POST /api/dags/{id}/pause", auth(s.handlePauseDAG))
+	mux.HandleFunc("POST /api/dags/{id}/activate", auth(s.handleActivateDAG))
+
 	// Webhooks are exempt from API key auth — they use per-DAG HMAC-SHA256.
 	mux.HandleFunc("/api/webhooks/", s.handleWebhook)
 
-	mux.HandleFunc("/api/runs", auth(s.handleGetRuns))
-	// Generic handler for anything starting with /api/runs/ to catch /api/runs/{id}/tasks and retries
-	mux.HandleFunc("/api/runs/", auth(func(w http.ResponseWriter, r *http.Request) {
-		if (strings.HasSuffix(r.URL.Path, "/logs") || strings.HasSuffix(r.URL.Path, "/logs/")) && r.Method == http.MethodGet {
-			s.handleTaskLogs(w, r)
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/retry") && r.Method == http.MethodPost {
-			s.handleRetryTask(w, r)
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/kill") && r.Method == http.MethodPost {
-			if strings.Contains(r.URL.Path, "/tasks/") {
-				s.handleKillTask(w, r)
-			} else {
-				s.handleKillRun(w, r)
-			}
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/attempts") {
-			s.handleGetTaskAttempts(w, r)
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/tasks") {
-			s.handleGetRunTasks(w, r)
-			return
-		}
-		// GET /api/runs/{id} — exactly 4 path segments: ["", "api", "runs", "{id}"]
-		if r.Method == http.MethodGet && len(strings.Split(strings.TrimSuffix(r.URL.Path, "/"), "/")) == 4 {
-			s.handleGetRun(w, r)
-			return
-		}
-		http.NotFound(w, r)
-	}))
+	// Run endpoints
+	mux.HandleFunc("GET /api/runs", auth(s.handleGetRuns))
+	mux.HandleFunc("GET /api/runs/{id}", auth(s.handleGetRun))
+	mux.HandleFunc("GET /api/runs/{runID}/tasks", auth(s.handleGetRunTasks))
+	mux.HandleFunc("GET /api/runs/{runID}/tasks/{taskID}/logs", auth(s.handleTaskLogs))
+	mux.HandleFunc("GET /api/runs/{runID}/tasks/{taskID}/attempts", auth(s.handleGetTaskAttempts))
+	mux.HandleFunc("POST /api/runs/{runID}/tasks/{taskID}/retry", auth(s.handleRetryTask))
+	mux.HandleFunc("POST /api/runs/{runID}/tasks/{taskID}/kill", auth(s.handleKillTask))
+	mux.HandleFunc("POST /api/runs/{id}/kill", auth(s.handleKillRun))
 
 	// Metrics endpoints
-	mux.HandleFunc("/api/metrics/overview", auth(s.handleGetMetricsOverview))
-	mux.HandleFunc("/api/metrics/timeseries", auth(s.handleGetMetricsTimeSeries))
-	mux.HandleFunc("/api/metrics/tasks/", auth(s.handleGetTaskMetrics))
-	mux.HandleFunc("/api/metrics/runs/", auth(s.handleGetRunMetrics))
-	mux.HandleFunc("/api/metrics/dags/", auth(s.handleGetDAGMetrics))
+	mux.HandleFunc("GET /api/metrics/overview", auth(s.handleGetMetricsOverview))
+	mux.HandleFunc("GET /api/metrics/timeseries", auth(s.handleGetMetricsTimeSeries))
+	mux.HandleFunc("GET /api/metrics/tasks/{id}", auth(s.handleGetTaskMetrics))
+	mux.HandleFunc("GET /api/metrics/runs/{id}", auth(s.handleGetRunMetrics))
+	mux.HandleFunc("GET /api/metrics/dags/{id}", auth(s.handleGetDAGMetrics))
 
 	// Autoscaler endpoints
-	mux.HandleFunc("/api/autoscaler/status", auth(s.handleAutoscalerStatus))
-	mux.HandleFunc("/api/autoscaler/costs", auth(s.handleAutoscalerCosts))
-	mux.HandleFunc("/api/autoscaler/enable", auth(s.handleAutoscalerEnable))
+	mux.HandleFunc("GET /api/autoscaler/status", auth(s.handleAutoscalerStatus))
+	mux.HandleFunc("GET /api/autoscaler/costs", auth(s.handleAutoscalerCosts))
+	mux.HandleFunc("POST /api/autoscaler/enable", auth(s.handleAutoscalerEnable))
 
 	if frontendFS != nil {
 		mux.Handle("/", http.FileServer(http.FS(frontendFS)))

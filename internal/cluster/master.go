@@ -76,25 +76,14 @@ func (c *Coordinator) PoolStats() map[string]autoscaler.PoolStats {
 		queued = nil
 	}
 
-	// Count queued tasks per pool by walking the task instances.
-	// We use task_id pool assignment via getDAG.  Tasks without a pool go to "default".
+	// Count queued tasks per pool by resolving the task's pool from the DAG definition.
 	queuedByPool := make(map[string]int)
 	for _, ti := range queued {
 		pool := "default"
-		// Resolve pool from DAG definition if available.
 		if c.getDAG != nil {
 			if run, err := c.store.GetDagRun(ti.RunID); err == nil {
 				if dag, ok := c.getDAG(run.DAGID); ok {
-					baseTaskID := ti.TaskID
-					if idx := strings.Index(baseTaskID, "["); idx != -1 {
-						baseTaskID = baseTaskID[:idx]
-					}
-					for _, t := range dag.Tasks {
-						if t.ID == baseTaskID && t.Pool != "" {
-							pool = t.Pool
-							break
-						}
-					}
+					pool = dag.TaskPool(ti.TaskID)
 				}
 			}
 		}
@@ -262,28 +251,23 @@ func (c *Coordinator) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 // ----- HTTP handlers ---------------------------------------------------------
 
 func (c *Coordinator) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	var reg WorkerRegistration
-	if err := json.NewDecoder(r.Body).Decode(&reg); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+	if !decodeJSON(w, r, &reg) {
 		return
 	}
 	c.Register(reg)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (c *Coordinator) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	var reg WorkerRegistration
-	if err := json.NewDecoder(r.Body).Decode(&reg); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+	if !decodeJSON(w, r, &reg) {
 		return
 	}
 	c.mu.Lock()
@@ -292,21 +276,18 @@ func (c *Coordinator) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		w2.Status = "online"
 	}
 	c.mu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 // handlePoll is the hot path: a worker asks for a queued task matching its pools.
 // The coordinator atomically claims the task (marks it running) and returns the
 // full TaskAssignmentDTO. Returns 204 when there is no matching work.
 func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	var req PollRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if c.getDAG == nil {
@@ -330,7 +311,6 @@ func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
 	c.mu.RUnlock()
 
 	if workerKnown && maxTasks > 0 && activeTasks >= maxTasks {
-		// Worker is at capacity — tell it to come back later.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -356,22 +336,7 @@ func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Determine the task's pool.
-		taskPool := "default"
-		baseTaskID := ti.TaskID
-		if idx := strings.Index(baseTaskID, "["); idx != -1 {
-			baseTaskID = baseTaskID[:idx]
-		}
-		for i := range dag.Tasks {
-			if dag.Tasks[i].ID == baseTaskID {
-				if dag.Tasks[i].Pool != "" {
-					taskPool = dag.Tasks[i].Pool
-				}
-				break
-			}
-		}
-
-		if !poolSet[taskPool] {
+		if !poolSet[dag.TaskPool(ti.TaskID)] {
 			continue
 		}
 
@@ -387,25 +352,9 @@ func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
 		}
 		c.mu.Unlock()
 
-		// Record the dispatch time as the task's started_at so metrics have a
-		// valid start timestamp even when the worker reports them later.
 		c.store.SetTaskStartedAt(ti.ID, time.Now())
 
-		dto := TaskAssignmentDTO{
-			TaskInstanceID: assignment.TaskInstanceID,
-			RunID:          assignment.RunID,
-			Command:        assignment.Command,
-			Env:            assignment.Env,
-			TimeoutSecs:    assignment.TimeoutSecs,
-			Retries:        assignment.Retries,
-			Attempt:        assignment.Attempt,
-			Image:          assignment.Image,
-			Workdir:        assignment.Workdir,
-			Volumes:        assignment.Volumes,
-			Resources:      assignment.Resources,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(dto)
+		writeJSON(w, assignment.ToDTO())
 		return
 	}
 
@@ -413,13 +362,11 @@ func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Coordinator) handleResult(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	var res TaskResult
-	if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+	if !decodeJSON(w, r, &res) {
 		return
 	}
 
@@ -453,8 +400,6 @@ func (c *Coordinator) handleResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Persist resource metrics reported by the remote worker.
-	// We look up the task instance to get dag_id / task_id which the worker
-	// does not carry in its result payload.
 	if res.DurationMs > 0 || res.PeakMemoryBytes > 0 {
 		if ti, err := c.store.GetTaskInstance(res.TaskInstanceID); err == nil {
 			run, runErr := c.store.GetDagRun(ti.RunID)
@@ -481,25 +426,21 @@ func (c *Coordinator) handleResult(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Close the broker entry so SSE subscribers receive EOF.
 	if c.broker != nil {
 		c.broker.Close(res.TaskInstanceID)
 		c.broker.Cleanup(res.TaskInstanceID)
 	}
 
 	log.Printf("Cluster: task %s reported %s by remote worker", res.TaskInstanceID, res.Status)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (c *Coordinator) handleLog(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	var batch LogBatch
-	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+	if !decodeJSON(w, r, &batch) {
 		return
 	}
 
@@ -509,15 +450,13 @@ func (c *Coordinator) handleLog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 // handleTaskCancel handles GET /api/workers/tasks/{id}/cancel.
 // Workers call this periodically to check whether the master has cancelled them.
 func (c *Coordinator) handleTaskCancel(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	// Path: /api/workers/tasks/{id}/cancel
@@ -534,19 +473,39 @@ func (c *Coordinator) handleTaskCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(CancelCheck{Cancel: inst.Status == models.TaskCancelled})
+	writeJSON(w, CancelCheck{Cancel: inst.Status == models.TaskCancelled})
 }
 
 func (c *Coordinator) handleListWorkers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	workers := c.ListWorkers()
 	if workers == nil {
 		workers = []WorkerInfo{}
 	}
+	writeJSON(w, workers)
+}
+
+// ----- HTTP response helpers -------------------------------------------------
+
+func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method != method {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	return true
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(workers)
+	json.NewEncoder(w).Encode(v) //nolint:errcheck
 }

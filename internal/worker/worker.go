@@ -88,18 +88,7 @@ func (p *Pool) Dispatch() error {
 			continue
 		}
 
-		var taskDef *models.TaskDef
-		baseTaskID := ti.TaskID
-		if idx := strings.Index(baseTaskID, "["); idx != -1 {
-			baseTaskID = baseTaskID[:idx]
-		}
-		for i := range dag.Tasks {
-			if dag.Tasks[i].ID == baseTaskID {
-				taskDef = &dag.Tasks[i]
-				break
-			}
-		}
-
+		taskDef := dag.FindTask(models.BaseTaskID(ti.TaskID))
 		if taskDef == nil {
 			p.store.UpdateTaskInstanceStatus(ti.ID, models.TaskFailed)
 			continue
@@ -167,25 +156,18 @@ func (p *Pool) executeTask(ctx context.Context, ti models.TaskInstance, workerID
 	}
 
 	// Handle trigger_dag type tasks before building a full assignment.
-	baseTaskID := ti.TaskID
-	if idx := strings.Index(baseTaskID, "["); idx != -1 {
-		baseTaskID = baseTaskID[:idx]
-	}
-	for i := range dag.Tasks {
-		if dag.Tasks[i].ID == baseTaskID && dag.Tasks[i].Type == "trigger_dag" {
-			taskDef := &dag.Tasks[i]
-			triggeredRun, err := p.triggerDAG(taskDef.DagID, "triggered", nil)
-			if err != nil {
-				output := fmt.Sprintf("Failed to trigger DAG %s: %v", taskDef.DagID, err)
-				log.Printf("Worker %d: Task %s FAILED: %s", workerID, ti.ID, output)
-				p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, output)
-			} else {
-				output := fmt.Sprintf("Successfully triggered DAG run: %s", triggeredRun.ID)
-				log.Printf("Worker %d: Task %s SUCCESS\nOutput: %s", workerID, ti.ID, output)
-				p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, output)
-			}
-			return
+	if taskDef := dag.FindTask(models.BaseTaskID(ti.TaskID)); taskDef != nil && taskDef.Type == "trigger_dag" {
+		triggeredRun, err := p.triggerDAG(taskDef.DagID, "triggered", nil)
+		if err != nil {
+			output := fmt.Sprintf("Failed to trigger DAG %s: %v", taskDef.DagID, err)
+			log.Printf("Worker %d: Task %s FAILED: %s", workerID, ti.ID, output)
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskFailed, output)
+		} else {
+			output := fmt.Sprintf("Successfully triggered DAG run: %s", triggeredRun.ID)
+			log.Printf("Worker %d: Task %s SUCCESS\nOutput: %s", workerID, ti.ID, output)
+			p.store.UpdateTaskInstanceStatusAndOutput(ti.ID, models.TaskSuccess, output)
 		}
+		return
 	}
 
 	// Resolve command, env, timeout via shared helper.

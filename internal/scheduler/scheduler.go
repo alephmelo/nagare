@@ -257,17 +257,8 @@ func (s *Scheduler) evaluateRunCompletions() error {
 
 		// Pre-evaluate map meta-tasks
 		for k, ti := range tasks {
-			var taskDef *models.TaskDef
-			baseTaskID := ti.TaskID
-			if idx := strings.Index(baseTaskID, "["); idx != -1 {
-				baseTaskID = baseTaskID[:idx]
-			}
-			for i := range dag.Tasks {
-				if dag.Tasks[i].ID == baseTaskID {
-					taskDef = &dag.Tasks[i]
-					break
-				}
-			}
+			baseTaskID := models.BaseTaskID(ti.TaskID)
+			taskDef := dag.FindTask(baseTaskID)
 
 			if taskDef != nil && taskDef.Type == "map" && ti.TaskID == baseTaskID {
 				if ti.Status == models.TaskRunning {
@@ -318,17 +309,7 @@ func (s *Scheduler) evaluateRunCompletions() error {
 		for _, ti := range tasks {
 			if ti.Status == models.TaskUpForRetry {
 				allSuccess = false
-				var taskDef *models.TaskDef
-				baseTaskID := ti.TaskID
-				if idx := strings.Index(baseTaskID, "["); idx != -1 {
-					baseTaskID = baseTaskID[:idx]
-				}
-				for i := range dag.Tasks {
-					if dag.Tasks[i].ID == baseTaskID {
-						taskDef = &dag.Tasks[i]
-						break
-					}
-				}
+				taskDef := dag.FindTask(models.BaseTaskID(ti.TaskID))
 
 				if taskDef != nil {
 					delay := time.Duration(taskDef.RetryDelaySeconds) * time.Second
@@ -387,13 +368,7 @@ func (s *Scheduler) PromotePendingTasks() error {
 		}
 
 		// Find the task definition
-		var taskDef *models.TaskDef
-		for _, t := range dag.Tasks {
-			if t.ID == ti.TaskID {
-				taskDef = &t
-				break
-			}
-		}
+		taskDef := dag.FindTask(ti.TaskID)
 		s.mu.RUnlock()
 
 		if taskDef == nil {

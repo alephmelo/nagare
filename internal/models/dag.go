@@ -81,6 +81,33 @@ type DAGDef struct {
 	Tasks       []TaskDef            `yaml:"tasks"`
 }
 
+// BaseTaskID strips the "[item]" suffix from a map-expanded task ID,
+// returning the original task definition ID.
+func BaseTaskID(taskID string) string {
+	if idx := strings.Index(taskID, "["); idx != -1 {
+		return taskID[:idx]
+	}
+	return taskID
+}
+
+// FindTask returns the TaskDef matching the given base ID, or nil.
+func (d *DAGDef) FindTask(baseID string) *TaskDef {
+	for i := range d.Tasks {
+		if d.Tasks[i].ID == baseID {
+			return &d.Tasks[i]
+		}
+	}
+	return nil
+}
+
+// TaskPool returns the pool name for a given task ID, defaulting to "default".
+func (d *DAGDef) TaskPool(taskID string) string {
+	if td := d.FindTask(BaseTaskID(taskID)); td != nil && td.Pool != "" {
+		return td.Pool
+	}
+	return "default"
+}
+
 func ParseDAG(data []byte) (*DAGDef, error) {
 	var dag DAGDef
 	err := yaml.Unmarshal(data, &dag)

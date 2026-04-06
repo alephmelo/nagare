@@ -17,19 +17,19 @@ import (
 // TaskAssignment holds everything a worker needs to execute a task, whether
 // it runs locally or on a remote node.
 type TaskAssignment struct {
-	TaskInstanceID string
-	RunID          string
-	Command        string
-	Env            []string
-	TimeoutSecs    int
-	Retries        int
-	Attempt        int
+	TaskInstanceID string   `json:"task_instance_id"`
+	RunID          string   `json:"run_id"`
+	Command        string   `json:"command"`
+	Env            []string `json:"env"`
+	TimeoutSecs    int      `json:"timeout_secs"`
+	Retries        int      `json:"retries"`
+	Attempt        int      `json:"attempt"`
 
 	// Container executor fields — only populated when the task specifies an image.
-	Image     string
-	Workdir   string
-	Volumes   []string
-	Resources *models.ResourcesDef
+	Image     string               `json:"image,omitempty"`
+	Workdir   string               `json:"workdir,omitempty"`
+	Volumes   []string             `json:"volumes,omitempty"`
+	Resources *models.ResourcesDef `json:"resources,omitempty"`
 }
 
 // PrepareTaskAssignment resolves a TaskInstance + DagRun into a TaskAssignment
@@ -38,18 +38,7 @@ type TaskAssignment struct {
 //
 // Returns an error if the task definition cannot be found in the DAG.
 func PrepareTaskAssignment(run *models.DagRun, ti models.TaskInstance, dag *models.DAGDef) (*TaskAssignment, error) {
-	baseTaskID := ti.TaskID
-	if idx := strings.Index(baseTaskID, "["); idx != -1 {
-		baseTaskID = baseTaskID[:idx]
-	}
-
-	var taskDef *models.TaskDef
-	for i := range dag.Tasks {
-		if dag.Tasks[i].ID == baseTaskID {
-			taskDef = &dag.Tasks[i]
-			break
-		}
-	}
+	taskDef := dag.FindTask(models.BaseTaskID(ti.TaskID))
 	if taskDef == nil {
 		return nil, fmt.Errorf("task definition %q not found in DAG %q", ti.TaskID, dag.ID)
 	}
@@ -88,6 +77,11 @@ func PrepareTaskAssignment(run *models.DagRun, ti models.TaskInstance, dag *mode
 		Volumes:        taskDef.Volumes,
 		Resources:      taskDef.Resources,
 	}, nil
+}
+
+// ToDTO returns a copy suitable for JSON serialization over the wire.
+func (a *TaskAssignment) ToDTO() TaskAssignment {
+	return *a
 }
 
 // RunResult is returned by RunCommand after a command finishes.

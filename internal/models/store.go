@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -325,100 +326,50 @@ func (s *Store) UpdateDagRunStatus(runID string, status RunStatus) error {
 	return err
 }
 
-// GetDagRuns retrieves recent DAG runs, optionally filtered by dagID, status, and triggerType, with pagination
-func (s *Store) GetDagRuns(limit int, offset int, dagID string, status string, triggerType string) ([]DagRun, error) {
-	var query string
-	var rows *sql.Rows
-	var err error
-
-	where := ""
-	params := []interface{}{}
-
+// buildDagRunsWhere builds a shared WHERE clause for dag_runs queries.
+func buildDagRunsWhere(dagID, status, triggerType string) (string, []interface{}) {
+	var clauses []string
+	var params []interface{}
 	if dagID != "" && dagID != "all" {
-		where = "WHERE dag_id = ?"
+		clauses = append(clauses, "dag_id = ?")
 		params = append(params, dagID)
 	}
-
 	if status != "" && status != "all" {
-		if where == "" {
-			where = "WHERE status = ?"
-		} else {
-			where += " AND status = ?"
-		}
+		clauses = append(clauses, "status = ?")
 		params = append(params, status)
 	}
-
 	if triggerType != "" && triggerType != "all" {
-		if where == "" {
-			where = "WHERE trigger_type = ?"
-		} else {
-			where += " AND trigger_type = ?"
-		}
+		clauses = append(clauses, "trigger_type = ?")
 		params = append(params, triggerType)
 	}
+	where := ""
+	if len(clauses) > 0 {
+		where = "WHERE " + strings.Join(clauses, " AND ")
+	}
+	return where, params
+}
 
-	query = fmt.Sprintf(`SELECT id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at FROM dag_runs %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, where)
+// GetDagRuns retrieves recent DAG runs, optionally filtered by dagID, status, and triggerType, with pagination
+func (s *Store) GetDagRuns(limit int, offset int, dagID string, status string, triggerType string) ([]DagRun, error) {
+	where, params := buildDagRunsWhere(dagID, status, triggerType)
+	query := fmt.Sprintf(`SELECT id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at FROM dag_runs %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, where) //nolint:gosec // where contains only static column clauses with ? placeholders
 	params = append(params, limit, offset)
 
-	rows, err = s.db.Query(query, params...)
-
+	rows, err := s.db.Query(query, params...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	var runs []DagRun
-	for rows.Next() {
-		var r DagRun
-		var confStr sql.NullString
-		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &confStr, &r.CreatedAt, &r.CompletedAt); err != nil {
-			return nil, err
-		}
-		if confStr.Valid && confStr.String != "" {
-			var conf map[string]string
-			if err := json.Unmarshal([]byte(confStr.String), &conf); err == nil {
-				r.Conf = conf
-			}
-		}
-		runs = append(runs, r)
-	}
-	return runs, nil
+	return s.scanDagRuns(rows)
 }
 
 // GetDagRunsCount gets the total number of runs, optionally filtered by dagID, status, and triggerType
 func (s *Store) GetDagRunsCount(dagID string, status string, triggerType string) (int, error) {
-	var query string
-	where := ""
-	params := []interface{}{}
-
-	if dagID != "" && dagID != "all" {
-		where = "WHERE dag_id = ?"
-		params = append(params, dagID)
-	}
-
-	if status != "" && status != "all" {
-		if where == "" {
-			where = "WHERE status = ?"
-		} else {
-			where += " AND status = ?"
-		}
-		params = append(params, status)
-	}
-
-	if triggerType != "" && triggerType != "all" {
-		if where == "" {
-			where = "WHERE trigger_type = ?"
-		} else {
-			where += " AND trigger_type = ?"
-		}
-		params = append(params, triggerType)
-	}
-
-	query = fmt.Sprintf(`SELECT COUNT(*) FROM dag_runs %s`, where)
-	row := s.db.QueryRow(query, params...)
+	where, params := buildDagRunsWhere(dagID, status, triggerType)
+	query := fmt.Sprintf(`SELECT COUNT(*) FROM dag_runs %s`, where) //nolint:gosec // where contains only static column clauses with ? placeholders
 
 	var count int
-	err := row.Scan(&count)
+	err := s.db.QueryRow(query, params...).Scan(&count)
 	return count, err
 }
 
@@ -462,23 +413,7 @@ func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
 		return nil, err
 	}
 	defer rows.Close()
-
-	var runs []DagRun
-	for rows.Next() {
-		var r DagRun
-		var confStr sql.NullString
-		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &confStr, &r.CreatedAt, &r.CompletedAt); err != nil {
-			return nil, err
-		}
-		if confStr.Valid && confStr.String != "" {
-			var conf map[string]string
-			if err := json.Unmarshal([]byte(confStr.String), &conf); err == nil {
-				r.Conf = conf
-			}
-		}
-		runs = append(runs, r)
-	}
-	return runs, nil
+	return s.scanDagRuns(rows)
 }
 
 // GetTaskInstancesByRun retrieves all task instances for a specific run.
@@ -549,6 +484,26 @@ func (s *Store) CreateNewTaskAttempt(runID, taskID string) (string, error) {
 	return newID, nil
 }
 
+// scanDagRuns is a shared helper to scan rows into []DagRun.
+func (s *Store) scanDagRuns(rows *sql.Rows) ([]DagRun, error) {
+	var runs []DagRun
+	for rows.Next() {
+		var r DagRun
+		var confStr sql.NullString
+		if err := rows.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &confStr, &r.CreatedAt, &r.CompletedAt); err != nil {
+			return nil, err
+		}
+		if confStr.Valid && confStr.String != "" {
+			var conf map[string]string
+			if err := json.Unmarshal([]byte(confStr.String), &conf); err == nil {
+				r.Conf = conf
+			}
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
 // scanTaskInstances is a shared helper to scan rows into []TaskInstance.
 func (s *Store) scanTaskInstances(rows *sql.Rows) ([]TaskInstance, error) {
 	var tasks []TaskInstance
@@ -574,26 +529,13 @@ func (s *Store) CreateTaskInstance(ti *TaskInstance) error {
 
 // GetTasksByStatus retrieves all TaskInstances with a specific status
 func (s *Store) GetTasksByStatus(status TaskStatus) ([]TaskInstance, error) {
-	query := `SELECT id, run_id, task_id, status, output, item_value, attempt, created_at, updated_at, started_at FROM task_instances WHERE status = ?`
+	query := `SELECT id, run_id, task_id, status, COALESCE(output,''), item_value, attempt, created_at, updated_at, started_at FROM task_instances WHERE status = ?`
 	rows, err := s.db.Query(query, status)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	var tasks []TaskInstance
-	for rows.Next() {
-		var ti TaskInstance
-		var output sql.NullString
-		if err := rows.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &output, &ti.ItemValue, &ti.Attempt, &ti.CreatedAt, &ti.UpdatedAt, &ti.StartedAt); err != nil {
-			return nil, err
-		}
-		if output.Valid {
-			ti.Output = output.String
-		}
-		tasks = append(tasks, ti)
-	}
-	return tasks, nil
+	return s.scanTaskInstances(rows)
 }
 
 // GetQueuedTasks retrieves all TaskInstances with 'queued' status
@@ -645,20 +587,19 @@ func (s *Store) GetTaskInstance(id string) (*TaskInstance, error) {
 // GetDagRun retrieves a DagRun by ID
 func (s *Store) GetDagRun(runID string) (*DagRun, error) {
 	query := `SELECT id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at FROM dag_runs WHERE id = ?`
-	row := s.db.QueryRow(query, runID)
-
-	var r DagRun
-	var confStr sql.NullString
-	if err := row.Scan(&r.ID, &r.DAGID, &r.Status, &r.ExecDate, &r.TriggerType, &confStr, &r.CreatedAt, &r.CompletedAt); err != nil {
+	rows, err := s.db.Query(query, runID)
+	if err != nil {
 		return nil, err
 	}
-	if confStr.Valid && confStr.String != "" {
-		var conf map[string]string
-		if err := json.Unmarshal([]byte(confStr.String), &conf); err == nil {
-			r.Conf = conf
-		}
+	defer rows.Close()
+	results, err := s.scanDagRuns(rows)
+	if err != nil {
+		return nil, err
 	}
-	return &r, nil
+	if len(results) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return &results[0], nil
 }
 
 // GetTaskStatus retrieves the status of the latest attempt for a specific task within a run

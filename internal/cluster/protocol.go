@@ -3,7 +3,7 @@ package cluster
 import (
 	"time"
 
-	"github.com/alephmelo/nagare/internal/models"
+	"github.com/alephmelo/nagare/internal/worker"
 )
 
 // WorkerRegistration is sent by remote workers on startup and as a heartbeat.
@@ -45,23 +45,8 @@ type PollRequest struct {
 }
 
 // TaskAssignmentDTO is returned to a worker when the master has a matching queued task.
-// It carries everything the remote worker needs to execute the task without
-// access to the local DAG files or the master's SQLite database.
-type TaskAssignmentDTO struct {
-	TaskInstanceID string   `json:"task_instance_id"`
-	RunID          string   `json:"run_id"`
-	Command        string   `json:"command"`
-	Env            []string `json:"env"`
-	TimeoutSecs    int      `json:"timeout_secs"`
-	Retries        int      `json:"retries"`
-	Attempt        int      `json:"attempt"`
-
-	// Container executor fields — only populated when the task specifies an image.
-	Image     string               `json:"image,omitempty"`
-	Workdir   string               `json:"workdir,omitempty"`
-	Volumes   []string             `json:"volumes,omitempty"`
-	Resources *models.ResourcesDef `json:"resources,omitempty"`
-}
+// It is a type alias for worker.TaskAssignment — both share identical JSON tags.
+type TaskAssignmentDTO = worker.TaskAssignment
 
 // TaskResult is posted by a worker after a task finishes (success, failure, or cancel).
 type TaskResult struct {
