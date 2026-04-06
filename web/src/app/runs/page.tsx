@@ -7,45 +7,41 @@ import { useVisibilityPoll } from "../../lib/useVisibilityPoll";
 import {
   Title,
   Card,
-  Code,
-  Badge,
-  Button,
-  Group,
-  Text,
-  Loader,
-  Center,
-  ActionIcon,
-  Collapse,
-  Stack,
-  Divider,
-  Skeleton,
-  ThemeIcon,
   Tooltip,
   Box,
   Tabs,
-  Table,
   Menu,
-  UnstyledButton,
   Pagination,
+  Group,
+  Badge,
+  ActionIcon,
+  Collapse,
+  Divider,
+  Loader,
+  Skeleton,
+  Center,
+  Button,
+  Text,
+  Stack,
 } from "@mantine/core";
 import {
   IconArrowLeft,
   IconRefresh,
-  IconCheck,
-  IconX,
   IconClock,
   IconChevronDown,
   IconChevronRight,
   IconTerminal2,
-  IconAlertCircle,
   IconPlayerStop,
   IconPlayerPlay,
   IconFilter,
-  IconUser,
-  IconRobot,
-  IconActivity,
+  IconCheck,
 } from "@tabler/icons-react";
 import { notifications } from "@mantine/notifications";
+import { PageHeader } from "../../components/ui/PageHeader";
+import { StatusIcon } from "../../components/ui/StatusIcon";
+import { getStatusColor } from "../../components/ui/StatusBadge";
+import { LogTerminal } from "../../components/blocks/LogTerminal";
+import { RunsTable, Run } from "../../components/blocks/RunsTable";
 
 interface RunTask {
   ID: string;
@@ -66,62 +62,8 @@ interface RunTask {
   };
 }
 
-interface Run {
-  ID: string;
-  DAGID: string;
-  Status: string;
-  ExecDate: string;
-  TriggerType: string;
-  CreatedAt: string;
-  CompletedAt?: string;
-}
-
-function StatusIcon({ status }: { status: string }) {
-  switch (status) {
-    case "success":
-      return (
-        <ThemeIcon color="green" variant="light" size="md" radius="xl">
-          <IconCheck size={14} />
-        </ThemeIcon>
-      );
-    case "failed":
-      return (
-        <ThemeIcon color="red" variant="light" size="md" radius="xl">
-          <IconX size={14} />
-        </ThemeIcon>
-      );
-    case "running":
-      return (
-        <ThemeIcon color="blue" variant="light" size="md" radius="xl">
-          <Loader size={12} color="blue" />
-        </ThemeIcon>
-      );
-    case "queued":
-      return (
-        <ThemeIcon color="yellow" variant="light" size="md" radius="xl">
-          <IconClock size={14} />
-        </ThemeIcon>
-      );
-    case "up_for_retry":
-      return (
-        <ThemeIcon color="orange" variant="light" size="md" radius="xl">
-          <IconClock size={14} />
-        </ThemeIcon>
-      );
-    case "cancelled":
-      return (
-        <ThemeIcon color="gray" variant="light" size="md" radius="xl">
-          <IconPlayerStop size={14} />
-        </ThemeIcon>
-      );
-    default:
-      return (
-        <ThemeIcon color="gray" variant="light" size="md" radius="xl">
-          <IconAlertCircle size={14} />
-        </ThemeIcon>
-      );
-  }
-}
+// StatusIcon imported from ui/StatusIcon
+// Run interface imported from blocks/RunsTable
 
 // useSSELogs subscribes to the SSE log stream for a task while it is running.
 // Returns the accumulated live log string (empty string when not streaming).
@@ -230,24 +172,7 @@ function TaskRow({
     }
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "success":
-        return "green";
-      case "failed":
-        return "red";
-      case "running":
-        return "blue";
-      case "queued":
-        return "yellow";
-      case "up_for_retry":
-        return "orange";
-      case "cancelled":
-        return "gray";
-      default:
-        return "gray";
-    }
-  };
+  // Use getStatusColor from imported utility
 
   return (
     <Card
@@ -377,90 +302,29 @@ function TaskRow({
                   {new Date(a.UpdatedAt).toLocaleString()}
                 </Text>
 
-                {a.Command && (
-                  <Box mb="md">
-                    <Group gap="xs" mb="xs">
-                      <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-                      <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-                        Command
-                      </Text>
-                    </Group>
-                    <Code block>{a.Command}</Code>
-                  </Box>
-                )}
+                {a.Command && <LogTerminal label="Command" content={a.Command} />}
 
-                <Group gap="xs" mb="xs">
-                  <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-                  <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-                    Output Log
-                  </Text>
-                </Group>
-
-                <Code
-                  block
-                  style={{
-                    whiteSpace: "pre-wrap",
-                    maxHeight: "280px",
-                    overflowY: "auto",
-                    fontSize: "12px",
-                    lineHeight: 1.7,
-                    backgroundColor: "transparent",
-                    border: "none",
-                    color:
-                      a.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-default)",
-                  }}
-                >
-                  {a.Output || "No output for this attempt."}
-                </Code>
+                <LogTerminal
+                  label="Output Log"
+                  content={a.Output || "No output for this attempt."}
+                  isFailed={a.Status === "failed"}
+                />
               </Tabs.Panel>
             ))}
           </Tabs>
         ) : (
           <Box p="md" style={{ backgroundColor: "var(--log-bg)" }}>
-            {task.Command && (
-              <Box mb="md">
-                <Group gap="xs" mb="xs">
-                  <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-                  <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-                    Command
-                  </Text>
-                </Group>
-                <Code block>{task.Command}</Code>
-              </Box>
-            )}
+            {task.Command && <LogTerminal label="Command" content={task.Command} />}
 
-            <Group gap="xs" mb="xs">
-              <IconTerminal2 size={14} color="var(--mantine-color-dimmed)" />
-              <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-                Output Log
-                {isLive && (
-                  <>
-                    {" "}
-                    &mdash;{" "}
-                    <Text span size="xs" c="blue" fw={400}>
-                      streaming live
-                    </Text>
-                  </>
-                )}
-              </Text>
-            </Group>
-            <Code
+            <LogTerminal
               ref={logRef}
-              block
-              style={{
-                whiteSpace: "pre-wrap",
-                maxHeight: "300px",
-                overflowY: "auto",
-                fontSize: "12px",
-                lineHeight: 1.7,
-                backgroundColor: "transparent",
-                border: "none",
-                color:
-                  task.Status === "failed" ? "var(--log-text-failed)" : "var(--log-text-default)",
-              }}
-            >
-              {displayOutput || (isLive ? "Waiting for output..." : "No output generated yet.")}
-            </Code>
+              label="Output Log"
+              isLive={isLive}
+              content={
+                displayOutput || (isLive ? "Waiting for output..." : "No output generated yet.")
+              }
+              isFailed={task.Status === "failed"}
+            />
           </Box>
         )}
       </Collapse>
@@ -641,16 +505,14 @@ function RunDetailsContent() {
 
   return (
     <>
+      <PageHeader
+        title={id as string}
+        showBack
+        backTo="/runs"
+        subtitle={run ? `Started at ${new Date(run.CreatedAt).toLocaleString()}` : undefined}
+      />
       <Group justify="space-between" mb="xl">
         <Group>
-          <Button
-            variant="subtle"
-            color="gray"
-            leftSection={<IconArrowLeft size={16} />}
-            onClick={() => router.push("/runs")}
-          >
-            Back
-          </Button>
           <div>
             <Group gap="xs" align="center">
               <Title order={3}>Run Details</Title>
@@ -827,22 +689,7 @@ function RunListContent() {
   const limit = 20;
   const router = useRouter();
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "success":
-        return "green";
-      case "failed":
-        return "red";
-      case "running":
-        return "blue";
-      case "queued":
-        return "yellow";
-      case "cancelled":
-        return "gray";
-      default:
-        return "gray";
-    }
-  };
+  // Removed duplicated getStatusColor
 
   const fetchData = useCallback(async () => {
     try {
@@ -887,313 +734,31 @@ function RunListContent() {
 
   return (
     <>
-      <Group justify="space-between" mb="xl">
-        <Title order={2}>Runs</Title>
-        <Button leftSection={<IconRefresh size={16} />} variant="light" onClick={fetchData}>
-          Refresh
-        </Button>
-      </Group>
+      <PageHeader
+        title="Runs"
+        actions={
+          <Button leftSection={<IconRefresh size={16} />} variant="light" onClick={fetchData}>
+            Refresh
+          </Button>
+        }
+      />
 
-      <Card padding="0">
-        <Table.ScrollContainer minWidth={800}>
-          <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Text size="sm" fw={700}>
-                    Run ID
-                  </Text>
-                </Table.Th>
-                <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Menu shadow="md" width={200}>
-                    <Menu.Target>
-                      <UnstyledButton>
-                        <Group gap={4}>
-                          <Text size="sm" fw={700} c={dagFilter !== "all" ? "blue" : undefined}>
-                            DAG
-                          </Text>
-                          <IconFilter
-                            size={14}
-                            color={
-                              dagFilter !== "all"
-                                ? "var(--mantine-color-blue-filled)"
-                                : "var(--mantine-color-gray-5)"
-                            }
-                          />
-                        </Group>
-                      </UnstyledButton>
-                    </Menu.Target>
-                    <Menu.Dropdown>
-                      <Menu.Label>Filter by DAG</Menu.Label>
-                      <Menu.Item
-                        onClick={() => {
-                          setDagFilter("all");
-                          setPage(1);
-                        }}
-                        leftSection={
-                          dagFilter === "all" ? (
-                            <IconCheck size={14} />
-                          ) : (
-                            <div style={{ width: 14 }} />
-                          )
-                        }
-                      >
-                        All DAGs
-                      </Menu.Item>
-                      {dags.map((d) => (
-                        <Menu.Item
-                          key={d.ID}
-                          onClick={() => {
-                            setDagFilter(d.ID);
-                            setPage(1);
-                          }}
-                          leftSection={
-                            dagFilter === d.ID ? (
-                              <IconCheck size={14} />
-                            ) : (
-                              <div style={{ width: 14 }} />
-                            )
-                          }
-                        >
-                          {d.ID}
-                        </Menu.Item>
-                      ))}
-                    </Menu.Dropdown>
-                  </Menu>
-                </Table.Th>
-                <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Menu shadow="md" width={150}>
-                    <Menu.Target>
-                      <UnstyledButton>
-                        <Group gap={4}>
-                          <Text size="sm" fw={700} c={statusFilter !== "all" ? "blue" : undefined}>
-                            Status
-                          </Text>
-                          <IconFilter
-                            size={14}
-                            color={
-                              statusFilter !== "all"
-                                ? "var(--mantine-color-blue-filled)"
-                                : "var(--mantine-color-gray-5)"
-                            }
-                          />
-                        </Group>
-                      </UnstyledButton>
-                    </Menu.Target>
-                    <Menu.Dropdown>
-                      <Menu.Label>Filter by Status</Menu.Label>
-                      {[
-                        { value: "all", label: "All Statuses" },
-                        { value: "success", label: "Success" },
-                        { value: "failed", label: "Failed" },
-                        { value: "cancelled", label: "Cancelled" },
-                        { value: "running", label: "Running" },
-                      ].map((opt) => (
-                        <Menu.Item
-                          key={opt.value}
-                          onClick={() => {
-                            setStatusFilter(opt.value);
-                            setPage(1);
-                          }}
-                          leftSection={
-                            statusFilter === opt.value ? (
-                              <IconCheck size={14} />
-                            ) : (
-                              <div style={{ width: 14 }} />
-                            )
-                          }
-                        >
-                          {opt.label}
-                        </Menu.Item>
-                      ))}
-                    </Menu.Dropdown>
-                  </Menu>
-                </Table.Th>
-                <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Text size="sm" fw={700}>
-                    Execution Date
-                  </Text>
-                </Table.Th>
-                <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Menu shadow="md" width={150}>
-                    <Menu.Target>
-                      <UnstyledButton>
-                        <Group gap={4}>
-                          <Text size="sm" fw={700} c={triggerFilter !== "all" ? "blue" : undefined}>
-                            Trigger
-                          </Text>
-                          <IconFilter
-                            size={14}
-                            color={
-                              triggerFilter !== "all"
-                                ? "var(--mantine-color-blue-filled)"
-                                : "var(--mantine-color-gray-5)"
-                            }
-                          />
-                        </Group>
-                      </UnstyledButton>
-                    </Menu.Target>
-                    <Menu.Dropdown>
-                      <Menu.Label>Filter by Trigger</Menu.Label>
-                      {[
-                        { value: "all", label: "All Triggers" },
-                        { value: "manual", label: "Manual" },
-                        { value: "scheduled", label: "Scheduled" },
-                        { value: "triggered", label: "Triggered" },
-                      ].map((opt) => (
-                        <Menu.Item
-                          key={opt.value}
-                          onClick={() => {
-                            setTriggerFilter(opt.value);
-                            setPage(1);
-                          }}
-                          leftSection={
-                            triggerFilter === opt.value ? (
-                              <IconCheck size={14} />
-                            ) : (
-                              <div style={{ width: 14 }} />
-                            )
-                          }
-                        >
-                          {opt.label}
-                        </Menu.Item>
-                      ))}
-                    </Menu.Dropdown>
-                  </Menu>
-                </Table.Th>
-                <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Text size="sm" fw={700}>
-                    Elapsed
-                  </Text>
-                </Table.Th>
-                <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                  <Text size="sm" fw={700}>
-                    Actions
-                  </Text>
-                </Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {runs.map((run) => (
-                <Table.Tr
-                  key={run.ID}
-                  onClick={() => router.push(`/runs?id=${run.ID}`)}
-                  style={{ cursor: "pointer" }}
-                >
-                  <Table.Td>
-                    <Text size="sm" fw={500}>
-                      {run.ID}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge variant="outline" color="gray">
-                      {run.DAGID}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge color={getStatusColor(run.Status)} variant="light" size="sm" radius="sm">
-                      {run.Status.toUpperCase()}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{new Date(run.ExecDate).toLocaleString()}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    {run.TriggerType === "manual" ? (
-                      <Badge
-                        variant="light"
-                        color="blue"
-                        size="sm"
-                        leftSection={
-                          <IconUser
-                            size={12}
-                            style={{ display: "flex", alignItems: "center", marginTop: "2px" }}
-                          />
-                        }
-                      >
-                        Manual
-                      </Badge>
-                    ) : run.TriggerType === "scheduled" ? (
-                      <Badge
-                        variant="light"
-                        color="teal"
-                        size="sm"
-                        leftSection={
-                          <IconRobot
-                            size={12}
-                            style={{ display: "flex", alignItems: "center", marginTop: "2px" }}
-                          />
-                        }
-                      >
-                        Scheduled
-                      </Badge>
-                    ) : (
-                      <Badge
-                        variant="light"
-                        color="violet"
-                        size="sm"
-                        leftSection={
-                          <IconActivity
-                            size={12}
-                            style={{ display: "flex", alignItems: "center", marginTop: "2px" }}
-                          />
-                        }
-                      >
-                        Triggered
-                      </Badge>
-                    )}
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm" c="dimmed">
-                      {run.CompletedAt
-                        ? `${Math.max(1, Math.floor((new Date(run.CompletedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
-                        : run.Status === "running"
-                          ? `${Math.max(1, Math.floor((new Date().getTime() - new Date(run.CreatedAt).getTime()) / 1000))}s`
-                          : "—"}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    {run.Status === "running" && (
-                      <Tooltip label="Kill Run">
-                        <ActionIcon
-                          variant="light"
-                          color="red"
-                          onClick={(e) => handleKillRun(e, run.ID)}
-                          size="sm"
-                        >
-                          <IconPlayerStop size={14} />
-                        </ActionIcon>
-                      </Tooltip>
-                    )}
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-              {runs.length === 0 && !loading && (
-                <Table.Tr>
-                  <Table.Td colSpan={7} align="center" py="xl">
-                    <Text c="dimmed">No runs found for this configuration.</Text>
-                  </Table.Td>
-                </Table.Tr>
-              )}
-            </Table.Tbody>
-          </Table>
-        </Table.ScrollContainer>
-        {totalRuns > limit && (
-          <Group
-            justify="center"
-            p="md"
-            style={{ borderTop: "1px solid var(--mantine-color-default-border)" }}
-          >
-            <Pagination
-              total={Math.ceil(totalRuns / limit)}
-              value={page}
-              onChange={setPage}
-              color="cyan"
-              withEdges
-            />
-          </Group>
-        )}
-      </Card>
+      <RunsTable
+        runs={runs}
+        loading={loading}
+        dags={dags}
+        totalRuns={totalRuns}
+        limit={limit}
+        page={page}
+        onPageChange={setPage}
+        dagFilter={dagFilter}
+        onDagFilterChange={setDagFilter}
+        statusFilter={statusFilter}
+        onStatusFilterChange={setStatusFilter}
+        triggerFilter={triggerFilter}
+        onTriggerFilterChange={setTriggerFilter}
+        onRunKilled={fetchData}
+      />
     </>
   );
 }
