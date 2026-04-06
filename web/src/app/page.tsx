@@ -20,6 +20,7 @@ import {
   Collapse,
   Divider,
   ThemeIcon,
+  Select,
 } from "@mantine/core";
 import {
   IconRefresh,
@@ -36,6 +37,7 @@ import { useRouter } from "next/navigation";
 import { notifications } from "@mantine/notifications";
 import { apiFetch } from "../lib/apiFetch";
 import { PageHeader } from "../components/ui/PageHeader";
+import { EmptyState } from "../components/ui/EmptyState";
 import { RunsTable, Run } from "../components/blocks/RunsTable";
 
 // Run interface imported from RunsTable
@@ -274,6 +276,13 @@ export default function Dashboard() {
       </Title>
       {loading && dags.length === 0 ? (
         <Skeleton height={200} mb="xl" radius="md" />
+      ) : !dags || dags.length === 0 ? (
+        <Card padding="md" mb="xl" shadow="sm" radius="md" withBorder>
+          <EmptyState
+            title="No Workflows Loaded"
+            description="Your workflow orchestrator is empty. Place a new DAG definition in your server to get started."
+          />
+        </Card>
       ) : (
         <Card padding="0" mb="xl" shadow="sm" radius="md" withBorder style={{ overflow: "hidden" }}>
           <Table.ScrollContainer minWidth={600}>
@@ -342,19 +351,27 @@ export default function Dashboard() {
                       <Text fw={600} size="sm">
                         {dag.ID}
                       </Text>
-                      <Text
-                        size="xs"
-                        c="dimmed"
-                        mt={2}
-                        style={{
-                          maxWidth: "400px",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
+                      <Tooltip
+                        label={dag.Description}
+                        openDelay={600}
+                        position="bottom-start"
+                        multiline
+                        w={300}
                       >
-                        {dag.Description}
-                      </Text>
+                        <Text
+                          size="xs"
+                          c="dimmed"
+                          mt={2}
+                          style={{
+                            maxWidth: "400px",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          }}
+                        >
+                          {dag.Description}
+                        </Text>
+                      </Tooltip>
                     </Table.Td>
                     <Table.Td>
                       {dag.Paused ? (
@@ -411,24 +428,49 @@ export default function Dashboard() {
                     </Table.Td>
                   </Table.Tr>
                 ))}
-                {(!dags || dags.length === 0) && (
-                  <Table.Tr>
-                    <Table.Td colSpan={3}>
-                      <Text c="dimmed" ta="center" py="md">
-                        No pipelines loaded.
-                      </Text>
-                    </Table.Td>
-                  </Table.Tr>
-                )}
               </Table.Tbody>
             </Table>
           </Table.ScrollContainer>
         </Card>
       )}
 
-      <Title order={4} mb="md" c="dimmed">
-        Recent Runs
-      </Title>
+      <Group justify="space-between" align="center" mb="md">
+        <Title order={4} c="dimmed">
+          Recent Runs
+        </Title>
+        <Group gap="xs">
+          <Select
+            placeholder="Filter Workflow"
+            data={[
+              { value: "all", label: "All Workflows" },
+              ...(dags?.map((d) => ({ value: d.ID, label: d.ID })) || []),
+            ]}
+            value={dagFilter || "all"}
+            onChange={(val) => {
+              setDagFilter(val === "all" ? null : val);
+              setPage(1);
+            }}
+            size="xs"
+            w={160}
+          />
+          <Select
+            placeholder="Status"
+            data={[
+              { value: "all", label: "All Statuses" },
+              { value: "running", label: "Running" },
+              { value: "success", label: "Success" },
+              { value: "failed", label: "Failed" },
+            ]}
+            value={statusFilter || "all"}
+            onChange={(val) => {
+              setStatusFilter(val === "all" ? null : val);
+              setPage(1);
+            }}
+            size="xs"
+            w={120}
+          />
+        </Group>
+      </Group>
 
       <RunsTable
         runs={runs}
