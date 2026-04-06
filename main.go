@@ -14,6 +14,7 @@ import (
 
 	"github.com/alephmelo/nagare/internal/api"
 	"github.com/alephmelo/nagare/internal/autoscaler"
+	"github.com/alephmelo/nagare/internal/cli"
 	"github.com/alephmelo/nagare/internal/cluster"
 	"github.com/alephmelo/nagare/internal/config"
 	"github.com/alephmelo/nagare/internal/logbroker"
@@ -26,6 +27,14 @@ import (
 // frontend_stub.go (nofrontend tag — worker-only Docker image builds).
 
 func main() {
+	// Dispatch CLI subcommands (e.g. "nagare dags", "nagare trigger ...") before
+	// falling through to the server flag parsing. This keeps the existing
+	// --worker / default-master interface completely untouched.
+	if len(os.Args) > 1 && cli.IsCommand(os.Args[1]) {
+		cli.Run(os.Args[1:])
+		return
+	}
+
 	// ----- CLI flags ---------------------------------------------------------
 	workerMode := flag.Bool("worker", false, "Run in worker-only mode (connect to a master)")
 	joinAddr := flag.String("join", "", "Master address for worker mode (e.g. http://host:8080)")
