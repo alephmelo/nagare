@@ -89,13 +89,13 @@ export function RunsTable({
   };
 
   return (
-    <Card padding="0">
+    <Card padding="0" shadow="sm" radius="md" withBorder>
       <Table.ScrollContainer minWidth={800}>
         <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
           <Table.Thead>
             <Table.Tr>
               <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                <Text size="sm" fw={700}>
+                <Text size="xs" fw={600} tt="uppercase" c="dimmed" style={{ letterSpacing: "1px" }}>
                   Run ID
                 </Text>
               </Table.Th>
@@ -136,7 +136,7 @@ export function RunsTable({
                 />
               </Table.Th>
               <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                <Text size="sm" fw={700}>
+                <Text size="xs" fw={600} tt="uppercase" c="dimmed" style={{ letterSpacing: "1px" }}>
                   Execution Date
                 </Text>
               </Table.Th>
@@ -158,12 +158,12 @@ export function RunsTable({
                 />
               </Table.Th>
               <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                <Text size="sm" fw={700}>
+                <Text size="xs" fw={600} tt="uppercase" c="dimmed" style={{ letterSpacing: "1px" }}>
                   Elapsed Time
                 </Text>
               </Table.Th>
               <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
-                <Text size="sm" fw={700}>
+                <Text size="xs" fw={600} tt="uppercase" c="dimmed" style={{ letterSpacing: "1px" }}>
                   Actions
                 </Text>
               </Table.Th>
@@ -175,7 +175,13 @@ export function RunsTable({
               <Table.Tr
                 key={run.ID}
                 onClick={() => router.push(`/runs/?id=${run.ID}`)}
-                style={{ cursor: "pointer" }}
+                style={{ cursor: "pointer", transition: "transform 0.2s ease" }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = "translateY(-1.5px)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = "translateY(0)";
+                }}
               >
                 <Table.Td>
                   <Text size="sm" fw={500}>

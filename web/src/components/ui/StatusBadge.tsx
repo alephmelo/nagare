@@ -27,17 +27,18 @@ interface StatusBadgeProps {
 }
 
 export function StatusBadge({ status, size = "sm", className, animated = true }: StatusBadgeProps) {
+  const isRunning = status.toLowerCase() === "running";
   return (
     <Badge
       color={getStatusColor(status)}
-      variant="light"
+      variant={isRunning ? "light" : "dot"}
       size={size}
       className={className}
-      radius="sm"
+      radius="md"
       style={
         animated
           ? {
-              transition: "transform 0.2s ease, filter 0.2s ease",
+              transition: "transform 0.15s ease, opacity 0.15s ease",
               cursor: "default",
             }
           : undefined
@@ -45,8 +46,8 @@ export function StatusBadge({ status, size = "sm", className, animated = true }:
       onMouseEnter={
         animated
           ? (e) => {
-              e.currentTarget.style.transform = "scale(1.05)";
-              e.currentTarget.style.filter = "brightness(1.1)";
+              e.currentTarget.style.transform = "scale(1.02)";
+              e.currentTarget.style.opacity = "0.9";
             }
           : undefined
       }
@@ -54,7 +55,7 @@ export function StatusBadge({ status, size = "sm", className, animated = true }:
         animated
           ? (e) => {
               e.currentTarget.style.transform = "scale(1)";
-              e.currentTarget.style.filter = "brightness(1)";
+              e.currentTarget.style.opacity = "1";
             }
           : undefined
       }

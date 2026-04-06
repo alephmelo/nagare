@@ -12,9 +12,10 @@ export function TriggerBadge({ trigger, size = "sm" }: TriggerBadgeProps) {
   if (t === "manual") {
     return (
       <Badge
-        variant="light"
+        variant="outline"
         color="blue"
         size={size}
+        radius="xl"
         leftSection={
           <IconUser size={12} style={{ display: "flex", alignItems: "center", marginTop: "2px" }} />
         }
@@ -27,9 +28,10 @@ export function TriggerBadge({ trigger, size = "sm" }: TriggerBadgeProps) {
   if (t === "scheduled") {
     return (
       <Badge
-        variant="light"
+        variant="outline"
         color="teal"
         size={size}
+        radius="xl"
         leftSection={
           <IconRobot
             size={12}
@@ -44,9 +46,10 @@ export function TriggerBadge({ trigger, size = "sm" }: TriggerBadgeProps) {
 
   return (
     <Badge
-      variant="light"
+      variant="outline"
       color="violet"
       size={size}
+      radius="xl"
       leftSection={
         <IconActivity
           size={12}

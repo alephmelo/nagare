@@ -57,10 +57,18 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
         <Group h="100%" px="md" justify="space-between">
           <Group>
             <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" />
-            <IconActivity size={28} color="cyan" />
-            <Title order={3} fw={700} c="cyan">
-              Nagare
-            </Title>
+            <Group gap="xs" style={{ cursor: "pointer" }} onClick={() => router.push("/")}>
+              <Text
+                fw={900}
+                c="blue.5"
+                style={{ fontSize: "36px", lineHeight: 1, letterSpacing: "-1px" }}
+              >
+                流れ
+              </Text>
+              <Title order={3} fw={800} style={{ letterSpacing: "-0.5px" }}>
+                NAGARE
+              </Title>
+            </Group>
           </Group>
           <Group gap="xs">
             <ActionIcon

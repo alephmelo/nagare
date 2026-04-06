@@ -12,11 +12,21 @@ export function EmptyState({ title = "No data found", description }: EmptyStateP
       <Center style={{ flexDirection: "column" }} py="xl">
         <IconDatabaseOff
           size={48}
-          color="var(--mantine-color-gray-4)"
+          color="var(--mantine-color-gray-5)"
           stroke={1.5}
-          style={{ marginBottom: 16 }}
+          style={{
+            marginBottom: 16,
+            animation: "float 4s ease-in-out infinite",
+          }}
         />
-        <Text c="dimmed" fw={500} size="lg">
+        <style>{`
+          @keyframes float {
+            0% { transform: translateY(0px); }
+            50% { transform: translateY(-8px); }
+            100% { transform: translateY(0px); }
+          }
+        `}</style>
+        <Text c="dimmed" fw={600} size="lg">
           {title}
         </Text>
         {description && (

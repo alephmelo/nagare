@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Plus_Jakarta_Sans, Outfit } from "next/font/google";
 import { ColorSchemeScript, MantineProvider, createTheme } from "@mantine/core";
 
 import "./globals.css";
@@ -9,7 +9,8 @@ import MainLayout from "../components/MainLayout";
 import { AuthProvider } from "../components/AuthProvider";
 import { Notifications } from "@mantine/notifications";
 
-const inter = Inter({ subsets: ["latin"] });
+const jakarta = Plus_Jakarta_Sans({ subsets: ["latin"] });
+const outfit = Outfit({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Nagare | Dashboard",
@@ -18,10 +19,10 @@ export const metadata: Metadata = {
 
 const theme = createTheme({
   primaryColor: "blue",
-  fontFamily: inter.style.fontFamily,
+  fontFamily: jakarta.style.fontFamily,
   defaultRadius: "md",
   headings: {
-    fontFamily: inter.style.fontFamily,
+    fontFamily: outfit.style.fontFamily,
     fontWeight: "700",
     sizes: {
       h1: { fontSize: "2.5rem" },

@@ -30,6 +30,15 @@ export function PageHeader({
             color="gray"
             leftSection={<IconArrowLeft size={16} />}
             onClick={() => router.push(backTo)}
+            style={{
+              transition: "transform 0.2s ease, background-color 0.2s ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = "translateX(-2px)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = "translateX(0)";
+            }}
           >
             Back
           </Button>

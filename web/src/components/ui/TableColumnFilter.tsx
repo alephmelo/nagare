@@ -31,10 +31,11 @@ export function TableColumnFilter({
         <UnstyledButton>
           <Group gap={4}>
             <Text
-              size="sm"
-              fw={700}
-              c={isActive ? "blue" : undefined}
-              style={{ transition: "color 0.2s" }}
+              size="xs"
+              fw={600}
+              tt="uppercase"
+              c={isActive ? "blue" : "dimmed"}
+              style={{ letterSpacing: "1px", transition: "color 0.2s" }}
             >
               {label}
             </Text>
