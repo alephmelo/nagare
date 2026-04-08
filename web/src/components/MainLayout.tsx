@@ -13,10 +13,10 @@ import {
   Box,
   NavLink,
   Tooltip,
+  Divider,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import {
-  IconActivity,
   IconSun,
   IconMoon,
   IconDashboard,
@@ -30,6 +30,43 @@ import {
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAuthContext } from "./AuthProvider";
+import { type Icon } from "@tabler/icons-react";
+
+interface NavItem {
+  href: string;
+  label: string;
+  icon: Icon;
+}
+
+interface NavSection {
+  label: string;
+  items: NavItem[];
+}
+
+const NAV_SECTIONS: NavSection[] = [
+  {
+    label: "General",
+    items: [{ href: "/", label: "Dashboard", icon: IconDashboard }],
+  },
+  {
+    label: "Workflows",
+    items: [
+      { href: "/dags", label: "DAGs", icon: IconSitemap },
+      { href: "/runs", label: "Runs", icon: IconHistory },
+    ],
+  },
+  {
+    label: "Cluster",
+    items: [
+      { href: "/workers", label: "Workers", icon: IconServer },
+      { href: "/autoscaler", label: "Autoscaler", icon: IconCloudComputing },
+    ],
+  },
+  {
+    label: "Observability",
+    items: [{ href: "/metrics", label: "Metrics", icon: IconChartBar }],
+  },
+];
 
 export default function MainLayout({ children }: { children: React.ReactNode }) {
   const [opened, { toggle }] = useDisclosure();
@@ -42,6 +79,8 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   const router = useRouter();
   const pathname = usePathname();
   const { apiKey, clearApiKey } = useAuthContext();
+
+  const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
 
   return (
     <AppShell
@@ -92,92 +131,28 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
       </AppShell.Header>
 
       <AppShell.Navbar p="md">
-        <Box mb="md">
-          <Text size="xs" fw={500} c="dimmed" mb="sm" tt="uppercase">
-            General
-          </Text>
-          <NavLink
-            href="/"
-            label="Dashboard"
-            leftSection={<IconDashboard size="1rem" stroke={1.5} />}
-            active={pathname === "/"}
-            onClick={(e) => {
-              e.preventDefault();
-              router.push("/");
-            }}
-            variant="filled"
-          />
-        </Box>
-        <Box mb="md">
-          <Text size="xs" fw={500} c="dimmed" mb="sm" tt="uppercase">
-            Workflows
-          </Text>
-          <NavLink
-            href="/dags"
-            label="DAGs"
-            leftSection={<IconSitemap size="1rem" stroke={1.5} />}
-            active={pathname === "/dags"}
-            onClick={(e) => {
-              e.preventDefault();
-              router.push("/dags");
-            }}
-            variant="filled"
-          />
-          <NavLink
-            href="/runs"
-            label="Runs"
-            leftSection={<IconHistory size="1rem" stroke={1.5} />}
-            active={pathname === "/runs"}
-            onClick={(e) => {
-              e.preventDefault();
-              router.push("/runs");
-            }}
-            variant="filled"
-          />
-        </Box>
-        <Box mb="md">
-          <Text size="xs" fw={500} c="dimmed" mb="sm" tt="uppercase">
-            Cluster
-          </Text>
-          <NavLink
-            href="/workers"
-            label="Workers"
-            leftSection={<IconServer size="1rem" stroke={1.5} />}
-            active={pathname === "/workers"}
-            onClick={(e) => {
-              e.preventDefault();
-              router.push("/workers");
-            }}
-            variant="filled"
-          />
-          <NavLink
-            href="/autoscaler"
-            label="Autoscaler"
-            leftSection={<IconCloudComputing size="1rem" stroke={1.5} />}
-            active={pathname === "/autoscaler"}
-            onClick={(e) => {
-              e.preventDefault();
-              router.push("/autoscaler");
-            }}
-            variant="filled"
-          />
-        </Box>
-        <Box mb="md">
-          <Text size="xs" fw={500} c="dimmed" mb="sm" tt="uppercase">
-            Observability
-          </Text>
-          <NavLink
-            href="/metrics"
-            label="Metrics"
-            leftSection={<IconChartBar size="1rem" stroke={1.5} />}
-            active={pathname === "/metrics"}
-            onClick={(e) => {
-              e.preventDefault();
-              router.push("/metrics");
-            }}
-            variant="filled"
-          />
-        </Box>
+        {NAV_SECTIONS.map((section, idx) => (
+          <Box key={section.label} mb="md">
+            {idx > 0 && <Divider opacity={0.3} mb="md" />}
+            <Text size="xs" fw={500} c="dimmed" mb="sm" tt="uppercase">
+              {section.label}
+            </Text>
+            {section.items.map((item) => (
+              <NavLink
+                key={item.href}
+                href={item.href}
+                label={item.label}
+                leftSection={<item.icon size="1rem" stroke={1.5} />}
+                active={isActive(item.href)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  router.push(item.href);
+                }}
+                variant="filled"
+              />
+            ))}
+          </Box>
+        ))}
 
         {/* Only show disconnect when a key is actively stored */}
         {apiKey && (

@@ -20,7 +20,7 @@ import {
   Collapse,
   Divider,
   ThemeIcon,
-  Select,
+  Progress,
 } from "@mantine/core";
 import {
   IconRefresh,
@@ -56,6 +56,48 @@ interface SystemStats {
   loaded_dags: number;
 }
 
+function StatCard({
+  label,
+  value,
+  icon,
+  color,
+  alert,
+}: {
+  label: string;
+  value: number;
+  icon: React.ReactNode;
+  color: string;
+  alert?: boolean;
+}) {
+  return (
+    <Card
+      shadow="sm"
+      padding="lg"
+      radius="md"
+      withBorder
+      style={
+        alert
+          ? {
+              borderLeft: `3px solid var(--mantine-color-${color}-filled)`,
+            }
+          : undefined
+      }
+    >
+      <Group justify="space-between" align="flex-start" mb="sm">
+        <Text c="dimmed" size="xs" tt="uppercase" fw={700} style={{ letterSpacing: "1px" }}>
+          {label}
+        </Text>
+        <ThemeIcon variant="light" color={color} size="md" radius="xl">
+          {icon}
+        </ThemeIcon>
+      </Group>
+      <Text fw={800} size="xl" style={{ fontSize: "2rem" }}>
+        {value}
+      </Text>
+    </Card>
+  );
+}
+
 export default function Dashboard() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [dags, setDags] = useState<Dag[]>([]);
@@ -64,12 +106,13 @@ export default function Dashboard() {
   const [triggering, setTriggering] = useState<Record<string, boolean>>({});
   const [pausing, setPausing] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [showErrors, setShowErrors] = useState(false);
 
   const [page, setPage] = useState(1);
-  const [dagFilter, setDagFilter] = useState<string | null>("all");
-  const [statusFilter, setStatusFilter] = useState<string | null>("all");
-  const [triggerFilter, setTriggerFilter] = useState<string | null>("all");
+  const [dagFilter, setDagFilter] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [triggerFilter, setTriggerFilter] = useState<string | null>(null);
   const [totalRuns, setTotalRuns] = useState(0);
   const limit = 10;
 
@@ -77,7 +120,10 @@ export default function Dashboard() {
 
   const fetchData = async () => {
     try {
-      setLoading(true);
+      const isInitial = !stats && dags.length === 0;
+      if (isInitial) setLoading(true);
+      else setRefreshing(true);
+
       const [runsRes, dagsRes, errorsRes, statsRes] = await Promise.all([
         apiFetch(
           `/api/runs?page=${page}&limit=${limit}&dag_id=${dagFilter || "all"}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`
@@ -100,6 +146,7 @@ export default function Dashboard() {
       console.error("Failed to fetch data", err);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -110,12 +157,8 @@ export default function Dashboard() {
     try {
       const res = await apiFetch(`/api/dags/${dagID}/runs`, { method: "POST" });
       if (res.ok) {
-        notifications.show({
-          title: "Pipeline Triggered",
-          message: `Successfully enqueued a fresh manual run for ${dagID}.`,
-          color: "green",
-        });
-        fetchData();
+        const run = await res.json();
+        router.push(`/runs/?id=${run.ID}`);
       }
     } catch (err) {
       console.error(err);
@@ -156,8 +199,6 @@ export default function Dashboard() {
     }
   };
 
-  // Table actions and statuses moved to RunsTable
-
   return (
     <>
       <PageHeader
@@ -168,6 +209,17 @@ export default function Dashboard() {
           </Button>
         }
       />
+
+      {/* Subtle refetch indicator — absolute so it never shifts layout */}
+      {refreshing && (
+        <Progress
+          value={100}
+          size={2}
+          color="blue"
+          animated
+          style={{ position: "absolute", top: 0, left: 0, right: 0, opacity: 0.5, zIndex: 10 }}
+        />
+      )}
 
       {Object.keys(dagErrors).length > 0 && (
         <Alert
@@ -211,61 +263,31 @@ export default function Dashboard() {
 
       {stats && (
         <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md" mb="xl">
-          <Card shadow="sm" padding="lg" radius="md" withBorder>
-            <Group justify="space-between" align="flex-start" mb="sm">
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700} style={{ letterSpacing: "1px" }}>
-                Active Runs
-              </Text>
-              <ThemeIcon variant="light" color="blue" size="md" radius="xl">
-                <IconActivity size={18} />
-              </ThemeIcon>
-            </Group>
-            <Text fw={800} size="xl" style={{ fontSize: "2rem" }}>
-              {stats.active_runs}
-            </Text>
-          </Card>
-
-          <Card shadow="sm" padding="lg" radius="md" withBorder>
-            <Group justify="space-between" align="flex-start" mb="sm">
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700} style={{ letterSpacing: "1px" }}>
-                Failed Runs (24h)
-              </Text>
-              <ThemeIcon variant="light" color="red" size="md" radius="xl">
-                <IconAlertTriangle size={18} />
-              </ThemeIcon>
-            </Group>
-            <Text fw={800} size="xl" style={{ fontSize: "2rem" }}>
-              {stats.failed_runs_24h}
-            </Text>
-          </Card>
-
-          <Card shadow="sm" padding="lg" radius="md" withBorder>
-            <Group justify="space-between" align="flex-start" mb="sm">
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700} style={{ letterSpacing: "1px" }}>
-                Total Operations
-              </Text>
-              <ThemeIcon variant="light" color="teal" size="md" radius="xl">
-                <IconTimelineEvent size={18} />
-              </ThemeIcon>
-            </Group>
-            <Text fw={800} size="xl" style={{ fontSize: "2rem" }}>
-              {stats.total_runs}
-            </Text>
-          </Card>
-
-          <Card shadow="sm" padding="lg" radius="md" withBorder>
-            <Group justify="space-between" align="flex-start" mb="sm">
-              <Text c="dimmed" size="xs" tt="uppercase" fw={700} style={{ letterSpacing: "1px" }}>
-                Loaded DAGs
-              </Text>
-              <ThemeIcon variant="light" color="violet" size="md" radius="xl">
-                <IconSitemap size={18} />
-              </ThemeIcon>
-            </Group>
-            <Text fw={800} size="xl" style={{ fontSize: "2rem" }}>
-              {stats.loaded_dags}
-            </Text>
-          </Card>
+          <StatCard
+            label="Active Runs"
+            value={stats.active_runs}
+            icon={<IconActivity size={18} />}
+            color="blue"
+          />
+          <StatCard
+            label="Failed Runs (24h)"
+            value={stats.failed_runs_24h}
+            icon={<IconAlertTriangle size={18} />}
+            color="red"
+            alert={stats.failed_runs_24h > 0}
+          />
+          <StatCard
+            label="Total Operations"
+            value={stats.total_runs}
+            icon={<IconTimelineEvent size={18} />}
+            color="teal"
+          />
+          <StatCard
+            label="Loaded DAGs"
+            value={stats.loaded_dags}
+            icon={<IconSitemap size={18} />}
+            color="violet"
+          />
         </SimpleGrid>
       )}
 
@@ -289,7 +311,9 @@ export default function Dashboard() {
             <Table verticalSpacing="sm" horizontalSpacing="md" striped highlightOnHover>
               <Table.Thead>
                 <Table.Tr>
-                  <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
+                  <Table.Th
+                    style={{ borderBottom: "2px solid var(--mantine-color-default-border)" }}
+                  >
                     <Text
                       size="xs"
                       fw={600}
@@ -300,7 +324,9 @@ export default function Dashboard() {
                       Pipeline
                     </Text>
                   </Table.Th>
-                  <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
+                  <Table.Th
+                    style={{ borderBottom: "2px solid var(--mantine-color-default-border)" }}
+                  >
                     <Text
                       size="xs"
                       fw={600}
@@ -313,7 +339,7 @@ export default function Dashboard() {
                   </Table.Th>
                   <Table.Th
                     style={{
-                      borderBottom: "2px solid var(--border-color)",
+                      borderBottom: "2px solid var(--mantine-color-default-border)",
                       width: "110px",
                       textAlign: "right",
                     }}
@@ -335,16 +361,10 @@ export default function Dashboard() {
                   <Table.Tr
                     key={dag.ID}
                     onClick={() => router.push(`/dags?id=${dag.ID}`)}
+                    className="row-hover"
                     style={{
                       cursor: "pointer",
                       opacity: dag.Paused ? 0.6 : 1,
-                      transition: "transform 0.2s ease, opacity 0.2s ease",
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.transform = "translateY(-1.5px)";
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.transform = "translateY(0)";
                     }}
                   >
                     <Table.Td>
@@ -375,11 +395,11 @@ export default function Dashboard() {
                     </Table.Td>
                     <Table.Td>
                       {dag.Paused ? (
-                        <Badge variant="light" color="yellow" size="sm" radius="sm">
+                        <Badge variant="light" color="yellow" size="sm" radius="xl">
                           Paused
                         </Badge>
                       ) : (
-                        <Badge variant="light" color="blue" size="sm" radius="sm">
+                        <Badge variant="light" color="blue" size="sm" radius="xl">
                           {dag.Schedule}
                         </Badge>
                       )}
@@ -434,43 +454,9 @@ export default function Dashboard() {
         </Card>
       )}
 
-      <Group justify="space-between" align="center" mb="md">
-        <Title order={4} c="dimmed">
-          Recent Runs
-        </Title>
-        <Group gap="xs">
-          <Select
-            placeholder="Filter Workflow"
-            data={[
-              { value: "all", label: "All Workflows" },
-              ...(dags?.map((d) => ({ value: d.ID, label: d.ID })) || []),
-            ]}
-            value={dagFilter || "all"}
-            onChange={(val) => {
-              setDagFilter(val === "all" ? null : val);
-              setPage(1);
-            }}
-            size="xs"
-            w={160}
-          />
-          <Select
-            placeholder="Status"
-            data={[
-              { value: "all", label: "All Statuses" },
-              { value: "running", label: "Running" },
-              { value: "success", label: "Success" },
-              { value: "failed", label: "Failed" },
-            ]}
-            value={statusFilter || "all"}
-            onChange={(val) => {
-              setStatusFilter(val === "all" ? null : val);
-              setPage(1);
-            }}
-            size="xs"
-            w={120}
-          />
-        </Group>
-      </Group>
+      <Title order={4} mb="md" c="dimmed">
+        Recent Runs
+      </Title>
 
       <RunsTable
         runs={runs}

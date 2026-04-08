@@ -19,13 +19,7 @@ export function EmptyState({ title = "No data found", description }: EmptyStateP
             animation: "float 4s ease-in-out infinite",
           }}
         />
-        <style>{`
-          @keyframes float {
-            0% { transform: translateY(0px); }
-            50% { transform: translateY(-8px); }
-            100% { transform: translateY(0px); }
-          }
-        `}</style>
+
         <Text c="dimmed" fw={600} size="lg">
           {title}
         </Text>

@@ -7,6 +7,10 @@
   --log-text-success: var(--mantine-color-green-4);
   --log-text-failed: var(--mantine-color-red-4);
   --log-text-default: #d1d5db;
+  --log-border: var(--mantine-color-dark-4);
+  --node-bg: var(--mantine-color-dark-6);
+  --node-text: #ffffff;
+  --graph-grid: var(--mantine-color-dark-4);
 }
 
 :root[data-mantine-color-scheme="light"] {
@@ -18,6 +22,10 @@
   --log-text-success: var(--mantine-color-green-8);
   --log-text-failed: var(--mantine-color-red-8);
   --log-text-default: #1f2937;
+  --log-border: var(--mantine-color-gray-3);
+  --node-bg: #ffffff;
+  --node-text: var(--mantine-color-dark-7);
+  --graph-grid: var(--mantine-color-gray-3);
 }
 
 body {
@@ -25,7 +33,9 @@ body {
   background-color: var(--mantine-color-body);
 }
 
-/* Base styles for scrollbars to look cleaner */
+/* ------------------------------------------------------------------ */
+/* Scrollbar styling                                                   */
+/* ------------------------------------------------------------------ */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -36,4 +46,109 @@ body {
 ::-webkit-scrollbar-thumb {
   background: var(--border-color);
   border-radius: 4px;
+}
+
+/* Firefox scrollbar support */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+/* ------------------------------------------------------------------ */
+/* Keyframe animations                                                 */
+/* ------------------------------------------------------------------ */
+@keyframes float {
+  0% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+  100% {
+    transform: translateY(0px);
+  }
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(34, 139, 230, 0.7);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px rgba(34, 139, 230, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(34, 139, 230, 0);
+  }
+}
+
+@keyframes pulseBlue {
+  0% {
+    box-shadow: 0 0 0 0 rgba(25, 113, 194, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(25, 113, 194, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(25, 113, 194, 0);
+  }
+}
+
+@keyframes pulseRedAlert {
+  0% {
+    box-shadow: 0 0 0 0 rgba(224, 49, 49, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(224, 49, 49, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(224, 49, 49, 0);
+  }
+}
+
+@keyframes shakeRedAlert {
+  0%,
+  100% {
+    transform: translateX(0);
+    box-shadow: 0 0 12px 3px rgba(224, 49, 49, 0.35);
+  }
+  25% {
+    transform: translateX(-2px);
+  }
+  75% {
+    transform: translateX(2px);
+  }
+}
+
+@keyframes liveTick {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Hover utility classes                                               */
+/* ------------------------------------------------------------------ */
+.row-hover {
+  transition:
+    transform 0.2s ease,
+    background-color 0.15s ease;
+}
+.row-hover:hover {
+  transform: translateY(-1.5px);
+}
+
+.back-btn-hover {
+  transition:
+    transform 0.2s ease,
+    background-color 0.2s ease;
+}
+.back-btn-hover:hover {
+  transform: translateX(-2px);
 }

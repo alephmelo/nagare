@@ -94,13 +94,23 @@ export function RunsTable({
         <Table verticalSpacing="md" horizontalSpacing="md" striped highlightOnHover>
           <Table.Thead>
             <Table.Tr>
-              <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
+              <Table.Th
+                style={{
+                  borderBottom: "2px solid var(--mantine-color-default-border)",
+                  height: "45px",
+                }}
+              >
                 <Text size="xs" fw={600} tt="uppercase" c="dimmed" style={{ letterSpacing: "1px" }}>
                   Run ID
                 </Text>
               </Table.Th>
               {showDagColumn && (
-                <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
+                <Table.Th
+                  style={{
+                    borderBottom: "2px solid var(--mantine-color-default-border)",
+                    height: "45px",
+                  }}
+                >
                   <TableColumnFilter
                     label="DAG"
                     menuLabel="Filter by DAG"
@@ -117,7 +127,12 @@ export function RunsTable({
                   />
                 </Table.Th>
               )}
-              <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
+              <Table.Th
+                style={{
+                  borderBottom: "2px solid var(--mantine-color-default-border)",
+                  height: "45px",
+                }}
+              >
                 <TableColumnFilter
                   label="Status"
                   menuLabel="Filter by Status"
@@ -135,12 +150,22 @@ export function RunsTable({
                   ]}
                 />
               </Table.Th>
-              <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
+              <Table.Th
+                style={{
+                  borderBottom: "2px solid var(--mantine-color-default-border)",
+                  height: "45px",
+                }}
+              >
                 <Text size="xs" fw={600} tt="uppercase" c="dimmed" style={{ letterSpacing: "1px" }}>
                   Execution Date
                 </Text>
               </Table.Th>
-              <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
+              <Table.Th
+                style={{
+                  borderBottom: "2px solid var(--mantine-color-default-border)",
+                  height: "45px",
+                }}
+              >
                 <TableColumnFilter
                   label="Trigger"
                   menuLabel="Filter by Trigger"
@@ -157,12 +182,22 @@ export function RunsTable({
                   ]}
                 />
               </Table.Th>
-              <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
+              <Table.Th
+                style={{
+                  borderBottom: "2px solid var(--mantine-color-default-border)",
+                  height: "45px",
+                }}
+              >
                 <Text size="xs" fw={600} tt="uppercase" c="dimmed" style={{ letterSpacing: "1px" }}>
                   Elapsed Time
                 </Text>
               </Table.Th>
-              <Table.Th style={{ borderBottom: "2px solid var(--border-color)", height: "45px" }}>
+              <Table.Th
+                style={{
+                  borderBottom: "2px solid var(--mantine-color-default-border)",
+                  height: "45px",
+                }}
+              >
                 <Text size="xs" fw={600} tt="uppercase" c="dimmed" style={{ letterSpacing: "1px" }}>
                   Actions
                 </Text>
@@ -175,13 +210,8 @@ export function RunsTable({
               <Table.Tr
                 key={run.ID}
                 onClick={() => router.push(`/runs/?id=${run.ID}`)}
-                style={{ cursor: "pointer", transition: "transform 0.2s ease" }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.transform = "translateY(-1.5px)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.transform = "translateY(0)";
-                }}
+                className="row-hover"
+                style={{ cursor: "pointer" }}
               >
                 <Table.Td>
                   <Text size="sm" fw={500}>
@@ -250,7 +280,7 @@ export function RunsTable({
             total={Math.ceil(totalRuns / limit)}
             value={page}
             onChange={onPageChange}
-            color="cyan"
+            color="blue"
             withEdges
           />
         </Group>

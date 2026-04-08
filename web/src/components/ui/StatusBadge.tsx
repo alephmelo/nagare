@@ -1,5 +1,14 @@
 import { Badge, MantineSize } from "@mantine/core";
 
+const STATUS_LABELS: Record<string, string> = {
+  success: "Success",
+  failed: "Failed",
+  running: "Running",
+  queued: "Queued",
+  up_for_retry: "Retrying",
+  cancelled: "Cancelled",
+};
+
 export function getStatusColor(status: string) {
   switch (status.toLowerCase()) {
     case "success":
@@ -19,14 +28,17 @@ export function getStatusColor(status: string) {
   }
 }
 
+export function getStatusLabel(status: string) {
+  return STATUS_LABELS[status.toLowerCase()] || status;
+}
+
 interface StatusBadgeProps {
   status: string;
   size?: MantineSize;
   className?: string;
-  animated?: boolean;
 }
 
-export function StatusBadge({ status, size = "sm", className, animated = true }: StatusBadgeProps) {
+export function StatusBadge({ status, size = "sm", className }: StatusBadgeProps) {
   const isRunning = status.toLowerCase() === "running";
   return (
     <Badge
@@ -34,33 +46,9 @@ export function StatusBadge({ status, size = "sm", className, animated = true }:
       variant={isRunning ? "light" : "dot"}
       size={size}
       className={className}
-      radius="md"
-      style={
-        animated
-          ? {
-              transition: "transform 0.15s ease, opacity 0.15s ease",
-              cursor: "default",
-            }
-          : undefined
-      }
-      onMouseEnter={
-        animated
-          ? (e) => {
-              e.currentTarget.style.transform = "scale(1.02)";
-              e.currentTarget.style.opacity = "0.9";
-            }
-          : undefined
-      }
-      onMouseLeave={
-        animated
-          ? (e) => {
-              e.currentTarget.style.transform = "scale(1)";
-              e.currentTarget.style.opacity = "1";
-            }
-          : undefined
-      }
+      radius="xl"
     >
-      {status.toUpperCase()}
+      {getStatusLabel(status)}
     </Badge>
   );
 }

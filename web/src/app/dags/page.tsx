@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { apiFetch } from "../../lib/apiFetch";
 import { useVisibilityPoll } from "../../lib/useVisibilityPoll";
@@ -37,6 +37,7 @@ import {
   MarkerType,
   Node,
   Edge,
+  Handle,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import dagre from "dagre";
@@ -62,29 +63,27 @@ interface Dag {
 
 // Run interface imported from RunsTable
 
-// Dagre Layout config
-const dagreGraph = new dagre.graphlib.Graph();
-dagreGraph.setDefaultEdgeLabel(() => ({}));
-
 const nodeWidth = 280;
 const nodeHeight = 60;
 
 const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = "TB") => {
+  const g = new dagre.graphlib.Graph();
+  g.setDefaultEdgeLabel(() => ({}));
   const isHorizontal = direction === "LR";
-  dagreGraph.setGraph({ rankdir: direction });
+  g.setGraph({ rankdir: direction });
 
   nodes.forEach((node) => {
-    dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
+    g.setNode(node.id, { width: nodeWidth, height: nodeHeight });
   });
 
   edges.forEach((edge) => {
-    dagreGraph.setEdge(edge.source, edge.target);
+    g.setEdge(edge.source, edge.target);
   });
 
-  dagre.layout(dagreGraph);
+  dagre.layout(g);
 
   nodes.forEach((node) => {
-    const nodeWithPosition = dagreGraph.node(node.id);
+    const nodeWithPosition = g.node(node.id);
     node.targetPosition = isHorizontal ? Position.Left : Position.Top;
     node.sourcePosition = isHorizontal ? Position.Right : Position.Bottom;
 
@@ -99,6 +98,60 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = "TB") => 
 
   return { nodes, edges };
 };
+
+// Custom node with tooltip
+function DagNodeComponent({
+  data,
+}: {
+  data: { label: string; taskType?: string; command?: string; status?: string };
+}) {
+  return (
+    <Tooltip
+      label={
+        <div>
+          <Text size="xs" fw={600}>
+            {data.label}
+          </Text>
+          {data.taskType && (
+            <Text size="xs" c="dimmed">
+              Type: {data.taskType}
+            </Text>
+          )}
+          {data.command && (
+            <Text size="xs" c="dimmed" lineClamp={2}>
+              Cmd: {data.command}
+            </Text>
+          )}
+          {data.status && (
+            <Text size="xs" c="dimmed">
+              Status: {data.status}
+            </Text>
+          )}
+        </div>
+      }
+      multiline
+      w={250}
+      position="top"
+      openDelay={300}
+    >
+      <div style={{ width: "100%", textAlign: "center", padding: "10px 15px" }}>
+        <Handle
+          type="target"
+          position={Position.Top}
+          style={{ visibility: "hidden", pointerEvents: "none" }}
+        />
+        {data.label}
+        <Handle
+          type="source"
+          position={Position.Bottom}
+          style={{ visibility: "hidden", pointerEvents: "none" }}
+        />
+      </div>
+    </Tooltip>
+  );
+}
+
+const nodeTypes = { dagNode: DagNodeComponent };
 
 // ---------------------------------------------------------------------------
 // DAG List View (no ?id param)
@@ -134,11 +187,8 @@ function DagListContent() {
     try {
       const res = await apiFetch(`/api/dags/${dagID}/runs`, { method: "POST" });
       if (res.ok) {
-        notifications.show({
-          title: "Pipeline Triggered",
-          message: `Successfully enqueued a fresh manual run for ${dagID}.`,
-          color: "green",
-        });
+        const run = await res.json();
+        router.push(`/runs/?id=${run.ID}`);
       }
     } catch (err) {
       console.error(err);
@@ -225,24 +275,30 @@ function DagListContent() {
             <Table verticalSpacing="sm" horizontalSpacing="md" striped highlightOnHover>
               <Table.Thead>
                 <Table.Tr>
-                  <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
+                  <Table.Th
+                    style={{ borderBottom: "2px solid var(--mantine-color-default-border)" }}
+                  >
                     <Text size="sm" fw={700}>
                       Pipeline
                     </Text>
                   </Table.Th>
-                  <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
+                  <Table.Th
+                    style={{ borderBottom: "2px solid var(--mantine-color-default-border)" }}
+                  >
                     <Text size="sm" fw={700}>
                       Schedule
                     </Text>
                   </Table.Th>
-                  <Table.Th style={{ borderBottom: "2px solid var(--border-color)" }}>
+                  <Table.Th
+                    style={{ borderBottom: "2px solid var(--mantine-color-default-border)" }}
+                  >
                     <Text size="sm" fw={700}>
                       Tasks
                     </Text>
                   </Table.Th>
                   <Table.Th
                     style={{
-                      borderBottom: "2px solid var(--border-color)",
+                      borderBottom: "2px solid var(--mantine-color-default-border)",
                       width: "110px",
                       textAlign: "right",
                     }}
@@ -258,6 +314,7 @@ function DagListContent() {
                   <Table.Tr
                     key={dag.ID}
                     onClick={() => router.push(`/dags?id=${dag.ID}`)}
+                    className="row-hover"
                     style={{ cursor: "pointer", opacity: dag.Paused ? 0.6 : 1 }}
                   >
                     <Table.Td>
@@ -280,11 +337,11 @@ function DagListContent() {
                     </Table.Td>
                     <Table.Td>
                       {dag.Paused ? (
-                        <Badge variant="light" color="yellow" size="sm" radius="sm">
+                        <Badge variant="light" color="yellow" size="sm" radius="xl">
                           Paused
                         </Badge>
                       ) : (
-                        <Badge variant="light" color="blue" size="sm" radius="sm">
+                        <Badge variant="light" color="blue" size="sm" radius="xl">
                           {dag.Schedule}
                         </Badge>
                       )}
@@ -362,6 +419,7 @@ function DagListContent() {
 function DagDetailsContent() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id");
+  const router = useRouter();
   const { colorScheme } = useMantineColorScheme();
 
   const [dag, setDag] = useState<Dag | null>(null);
@@ -380,6 +438,9 @@ function DagDetailsContent() {
   // React Flow strict local states
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+
+  // Responsive graph height based on task count
+  const graphHeight = Math.max(400, Math.min(800, (dag?.Tasks?.length || 5) * 100));
 
   useEffect(() => {
     if (!id) return;
@@ -411,14 +472,14 @@ function DagDetailsContent() {
         const initialNodes =
           targetDag.Tasks?.map((task) => ({
             id: task.ID,
-            data: { label: task.ID },
+            type: "dagNode",
+            data: { label: task.ID, taskType: task.Type, command: task.Command },
             position: { x: 0, y: 0 },
             style: {
-              background: "var(--mantine-color-dark-6)",
-              color: "white",
+              background: "var(--node-bg)",
+              color: "var(--node-text)",
               border: "1px solid var(--mantine-color-blue-filled)",
               borderRadius: "8px",
-              padding: "10px 15px",
               fontSize: "12px",
               fontWeight: 600,
               fontFamily: "var(--font-outfit)",
@@ -473,7 +534,7 @@ function DagDetailsContent() {
   }, [id, setNodes, setEdges]);
 
   // Periodic fetching runs list to sync paginated data
-  const fetchRuns = async () => {
+  const fetchRuns = useCallback(async () => {
     if (!id) return;
     try {
       const url = `/api/runs?page=${page}&limit=${limit}&dag_id=${id}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`;
@@ -501,10 +562,10 @@ function DagDetailsContent() {
                 const taskState = tasksData.find(
                   (t: { TaskID: string; Status: string }) => t.TaskID === n.id
                 );
-                const status = taskState?.Status; // e.g. success, failed, running, queued, etc.
+                const status = taskState?.Status;
 
                 let borderColor = "var(--mantine-color-blue-filled)";
-                let background = "var(--mantine-color-dark-6)";
+                let background = "var(--node-bg)";
                 let animation = "none";
 
                 if (status === "success") {
@@ -512,7 +573,7 @@ function DagDetailsContent() {
                   background = "rgba(43, 138, 62, 0.1)";
                 } else if (status === "failed") {
                   borderColor = "var(--mantine-color-red-filled)";
-                  animation = "shakeRedAlert 0.15s infinite alternate";
+                  background = "rgba(224, 49, 49, 0.08)";
                 } else if (status === "running") {
                   animation = "pulseBlue 2s infinite";
                 } else if (status === "queued" || status === "pending") {
@@ -521,6 +582,7 @@ function DagDetailsContent() {
 
                 return {
                   ...n,
+                  data: { ...n.data, status },
                   style: {
                     ...n.style,
                     border: `1px solid ${borderColor}`,
@@ -549,7 +611,7 @@ function DagDetailsContent() {
 
                 return {
                   ...e,
-                  animated: isRunActive, // Flowing energy if the system is running!
+                  animated: isRunActive,
                   style: { stroke: strokeColor, transition: "stroke 0.3s ease" },
                   markerEnd: {
                     type: MarkerType.ArrowClosed,
@@ -569,9 +631,9 @@ function DagDetailsContent() {
     } catch (err) {
       console.error("Failed to query runs", err);
     }
-  };
+  }, [id, page, statusFilter, triggerFilter, setNodes, setEdges]);
 
-  useVisibilityPoll(fetchRuns, 5000, [id, page, statusFilter, triggerFilter]);
+  useVisibilityPoll(fetchRuns, 5000, [fetchRuns]);
 
   const handleTrigger = async () => {
     if (!id) return;
@@ -579,12 +641,8 @@ function DagDetailsContent() {
     try {
       const res = await apiFetch(`/api/dags/${id}/runs`, { method: "POST" });
       if (res.ok) {
-        setPage(1); // Reset to first page so they see it
-        notifications.show({
-          title: "Pipeline Triggered",
-          message: `Successfully enqueued a fresh manual run for ${id}`,
-          color: "green",
-        });
+        const run = await res.json();
+        router.push(`/runs/?id=${run.ID}`);
       } else {
         notifications.show({
           title: "Trigger Failed",
@@ -604,8 +662,6 @@ function DagDetailsContent() {
     }
   };
 
-  // Moved getStatusColor, handleKillRun to RunsTable
-
   if (!id) {
     return (
       <Alert color="red" title="Error">
@@ -616,23 +672,6 @@ function DagDetailsContent() {
 
   return (
     <>
-      <style
-        dangerouslySetInnerHTML={{
-          __html: `
-        @keyframes pulseBlue {
-          0% { box-shadow: 0 0 0 0 rgba(25, 113, 194, 0.7); }
-          70% { box-shadow: 0 0 0 10px rgba(25, 113, 194, 0); }
-          100% { box-shadow: 0 0 0 0 rgba(25, 113, 194, 0); }
-        }
-        @keyframes shakeRedAlert {
-          0%, 100% { transform: translateX(0); box-shadow: 0 0 15px 5px rgba(224, 49, 49, 0.4); }
-          25% { transform: translateX(-4px); box-shadow: 0 0 25px 8px rgba(224, 49, 49, 0.6); }
-          50% { transform: translateX(4px); box-shadow: 0 0 25px 8px rgba(224, 49, 49, 0.6); }
-          75% { transform: translateX(-4px); box-shadow: 0 0 25px 8px rgba(224, 49, 49, 0.6); }
-        }
-      `,
-        }}
-      />
       <PageHeader
         title={id as string}
         showBack
@@ -707,23 +746,58 @@ function DagDetailsContent() {
                 <Tabs.Tab value="definition">Definition</Tabs.Tab>
               </Tabs.List>
               <Tabs.Panel value="graph">
-                <Card style={{ height: "600px" }} p="0">
+                <Card style={{ height: `${graphHeight}px`, position: "relative" }} p="0">
                   <ReactFlow
                     nodes={nodes}
                     edges={edges}
                     onNodesChange={onNodesChange}
                     onEdgesChange={onEdgesChange}
+                    nodeTypes={nodeTypes}
                     fitView
                     attributionPosition="bottom-right"
                   >
-                    <Background color="var(--mantine-color-dark-4)" gap={16} />
+                    <Background color="var(--graph-grid)" gap={16} />
                     <Controls />
                   </ReactFlow>
+                  {/* Graph Legend */}
+                  <Group
+                    gap={4}
+                    style={{
+                      position: "absolute",
+                      top: 6,
+                      left: 6,
+                      zIndex: 5,
+                      backgroundColor: "var(--panel-bg)",
+                      border: "1px solid var(--mantine-color-default-border)",
+                      borderRadius: "var(--mantine-radius-sm)",
+                      padding: "3px 8px",
+                      opacity: 0.85,
+                    }}
+                  >
+                    <Text size="10px" fw={600} c="dimmed">
+                      Legend
+                    </Text>
+                    <Badge size="xs" color="blue" variant="light" style={{ fontSize: 9 }}>
+                      Default
+                    </Badge>
+                    <Badge size="xs" color="green" variant="light" style={{ fontSize: 9 }}>
+                      Success
+                    </Badge>
+                    <Badge size="xs" color="red" variant="light" style={{ fontSize: 9 }}>
+                      Failed
+                    </Badge>
+                    <Badge size="xs" color="blue" variant="filled" style={{ fontSize: 9 }}>
+                      Running
+                    </Badge>
+                    <Badge size="xs" color="gray" variant="light" style={{ fontSize: 9 }}>
+                      Pending
+                    </Badge>
+                  </Group>
                 </Card>
               </Tabs.Panel>
               <Tabs.Panel value="definition">
-                <Card p="0" style={{ height: "600px", overflow: "hidden" }}>
-                  <ScrollArea h="600px">
+                <Card p="0" style={{ height: `${graphHeight}px`, overflow: "hidden" }}>
+                  <ScrollArea h={`${graphHeight}px`}>
                     {dagYAML ? (
                       <SyntaxHighlighter
                         language="yaml"

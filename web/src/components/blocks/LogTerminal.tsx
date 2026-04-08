@@ -1,6 +1,12 @@
-import { Box, Group, Text, Code } from "@mantine/core";
-import { IconTerminal2 } from "@tabler/icons-react";
-import { forwardRef } from "react";
+import { Box, Group, Text, Code, ActionIcon, Tooltip } from "@mantine/core";
+import {
+  IconTerminal2,
+  IconCopy,
+  IconCheck,
+  IconMaximize,
+  IconMinimize,
+} from "@tabler/icons-react";
+import { forwardRef, useState } from "react";
 
 interface LogTerminalProps {
   label?: string;
@@ -11,15 +17,17 @@ interface LogTerminalProps {
 
 export const LogTerminal = forwardRef<HTMLElement, LogTerminalProps>(
   ({ label = "Output Log", isLive, content, isFailed }, ref) => {
+    const [copied, setCopied] = useState(false);
+    const [isExpanded, setExpanded] = useState(false);
+
+    const handleCopy = async () => {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    };
+
     return (
       <Box mb="md">
-        <style>{`
-          @keyframes pulse {
-            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 139, 230, 0.7); }
-            70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(34, 139, 230, 0); }
-            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 139, 230, 0); }
-          }
-        `}</style>
         <Group justify="space-between" mb="xs">
           <Group gap="xs">
             <Group gap={6} mr="sm">
@@ -44,23 +52,45 @@ export const LogTerminal = forwardRef<HTMLElement, LogTerminalProps>(
               {label}
             </Text>
           </Group>
-          {isLive && (
-            <Group gap={6}>
-              <Box
-                w={8}
-                h={8}
-                style={{
-                  borderRadius: "50%",
-                  backgroundColor: "var(--mantine-color-blue-5)",
-                  animation: "pulse 1.5s infinite",
-                  boxShadow: "0 0 8px var(--mantine-color-blue-filled)",
-                }}
-              />
-              <Text span size="xs" c="blue" fw={500}>
-                Live
-              </Text>
-            </Group>
-          )}
+          <Group gap={6}>
+            {isLive && (
+              <Group gap={6} mr="xs">
+                <Box
+                  w={8}
+                  h={8}
+                  style={{
+                    borderRadius: "50%",
+                    backgroundColor: "var(--mantine-color-blue-5)",
+                    animation: "pulse 1.5s infinite",
+                    boxShadow: "0 0 8px var(--mantine-color-blue-filled)",
+                  }}
+                />
+                <Text span size="xs" c="blue" fw={500}>
+                  Live
+                </Text>
+              </Group>
+            )}
+            <Tooltip label={copied ? "Copied!" : "Copy to clipboard"}>
+              <ActionIcon
+                variant="subtle"
+                size="xs"
+                color={copied ? "green" : "gray"}
+                onClick={handleCopy}
+              >
+                {copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
+              </ActionIcon>
+            </Tooltip>
+            <Tooltip label={isExpanded ? "Collapse" : "Expand"}>
+              <ActionIcon
+                variant="subtle"
+                size="xs"
+                color="gray"
+                onClick={() => setExpanded((e) => !e)}
+              >
+                {isExpanded ? <IconMinimize size={12} /> : <IconMaximize size={12} />}
+              </ActionIcon>
+            </Tooltip>
+          </Group>
         </Group>
 
         <Code
@@ -68,16 +98,16 @@ export const LogTerminal = forwardRef<HTMLElement, LogTerminalProps>(
           block
           style={{
             whiteSpace: "pre-wrap",
-            maxHeight: "300px",
+            maxHeight: isExpanded ? "none" : "300px",
             overflowY: "auto",
             fontSize: "12px",
             lineHeight: 1.7,
-            backgroundColor: "var(--mantine-color-dark-8)",
-            border: "1px solid var(--mantine-color-dark-4)",
-            color: isFailed ? "var(--mantine-color-red-4)" : "var(--mantine-color-gray-4)",
+            backgroundColor: "var(--log-bg)",
+            border: "1px solid var(--log-border)",
+            color: isFailed ? "var(--log-text-failed)" : "var(--log-text-default)",
             borderRadius: "var(--mantine-radius-md)",
             padding: "var(--mantine-spacing-md)",
-            boxShadow: "inset 0 2px 10px rgba(0,0,0,0.2)",
+            boxShadow: "inset 0 2px 10px rgba(0,0,0,0.08)",
           }}
         >
           {content}
