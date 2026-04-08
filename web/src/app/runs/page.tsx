@@ -386,6 +386,7 @@ function TaskRow({
   onRetry,
   onKill,
   taskRef,
+  borderless,
 }: {
   task: RunTask;
   runID: string;
@@ -394,6 +395,7 @@ function TaskRow({
   onRetry: (taskID: string) => void;
   onKill: (taskID: string) => void;
   taskRef?: React.Ref<HTMLDivElement>;
+  borderless?: boolean;
 }) {
   // Only open an SSE stream for tasks that are actively running — queued tasks
   // produce no output yet and each open stream costs a server connection.
@@ -439,10 +441,12 @@ function TaskRow({
     <Card
       ref={taskRef}
       padding="0"
-      mb="xs"
+      mb={borderless ? 0 : "xs"}
+      shadow={borderless ? "0" : undefined}
       style={{
-        border:
-          task.Status === "failed"
+        border: borderless
+          ? "none"
+          : task.Status === "failed"
             ? "1px solid var(--mantine-color-red-3)"
             : task.Status === "up_for_retry"
               ? "1px solid var(--mantine-color-orange-3)"
@@ -868,6 +872,90 @@ function RunDetailsContent() {
     [tasks, expandedMap, toggleTask]
   );
 
+  // Collapsed state for map groups (keyed by parent taskID)
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+
+  // Build structured task segments: groups tasks by DAG definition order,
+  // nests map children under their parent, and computes dependency depth
+  // for stage dividers.
+  type TaskSegment =
+    | { kind: "single"; task: RunTask; depth: number }
+    | { kind: "map-group"; parent: RunTask; children: RunTask[]; depth: number };
+
+  const taskSegments = useMemo((): TaskSegment[] => {
+    if (dagDef.length === 0) {
+      return tasks.map((t) => ({ kind: "single" as const, task: t, depth: 0 }));
+    }
+    // Build a position map from the DAG definition order.
+    const defOrder = new Map<string, number>();
+    dagDef.forEach((d, i) => defOrder.set(d.ID, i));
+
+    // Compute dependency depth per definition task (longest path from root).
+    const dagMap = new Map<string, DagTaskDef>();
+    dagDef.forEach((d) => dagMap.set(d.ID, d));
+    const depthCache = new Map<string, number>();
+    function getDepth(taskId: string): number {
+      if (depthCache.has(taskId)) return depthCache.get(taskId)!;
+      const def = dagMap.get(taskId);
+      if (!def || !def.DependsOn || def.DependsOn.length === 0) {
+        depthCache.set(taskId, 0);
+        return 0;
+      }
+      const d = 1 + Math.max(...def.DependsOn.map(getDepth));
+      depthCache.set(taskId, d);
+      return d;
+    }
+    dagDef.forEach((d) => getDepth(d.ID));
+
+    // Sort tasks by definition order, parent before children, children by index
+    const sorted = [...tasks].sort((a, b) => {
+      const baseA = baseTaskID(a.TaskID);
+      const baseB = baseTaskID(b.TaskID);
+      const posA = defOrder.get(baseA) ?? 999;
+      const posB = defOrder.get(baseB) ?? 999;
+      if (posA !== posB) return posA - posB;
+      const isChildA = baseA !== a.TaskID;
+      const isChildB = baseB !== b.TaskID;
+      if (!isChildA && isChildB) return -1;
+      if (isChildA && !isChildB) return 1;
+      const idxA = parseInt(a.TaskID.match(/\[(\d+)\]/)?.[1] ?? "0", 10);
+      const idxB = parseInt(b.TaskID.match(/\[(\d+)\]/)?.[1] ?? "0", 10);
+      return idxA - idxB;
+    });
+
+    // Group into segments
+    const segments: TaskSegment[] = [];
+    let i = 0;
+    while (i < sorted.length) {
+      const task = sorted[i];
+      const base = baseTaskID(task.TaskID);
+      const depth = depthCache.get(base) ?? 0;
+      const isParent = base === task.TaskID;
+
+      // Check if this is a map parent with children following
+      if (isParent) {
+        const children: RunTask[] = [];
+        let j = i + 1;
+        while (
+          j < sorted.length &&
+          baseTaskID(sorted[j].TaskID) === base &&
+          sorted[j].TaskID !== base
+        ) {
+          children.push(sorted[j]);
+          j++;
+        }
+        if (children.length > 0) {
+          segments.push({ kind: "map-group", parent: task, children, depth });
+          i = j;
+          continue;
+        }
+      }
+      segments.push({ kind: "single", task, depth });
+      i++;
+    }
+    return segments;
+  }, [tasks, dagDef]);
+
   const successCount = tasks.filter((t) => t.Status === "success").length;
   const failedCount = tasks.filter((t) => t.Status === "failed").length;
   const runningCount = tasks.filter((t) => t.Status === "running").length;
@@ -1093,21 +1181,154 @@ function RunDetailsContent() {
           </Center>
         </Card>
       ) : (
-        <Stack gap="xs">
-          {tasks.map((task) => (
-            <TaskRow
-              key={task.ID}
-              task={task}
-              runID={id}
-              expanded={!!expandedMap[task.ID]}
-              onToggleExpand={() => toggleTask(task)}
-              onRetry={handleRetry}
-              onKill={handleKillTask}
-              taskRef={(el) => {
-                taskRefs.current[task.ID] = el;
-              }}
-            />
-          ))}
+        <Stack gap={0}>
+          {taskSegments.map((seg, idx) => {
+            // Stage divider: insert when depth changes from previous segment
+            const prevDepth = idx > 0 ? taskSegments[idx - 1].depth : seg.depth;
+            const showDivider = idx > 0 && seg.depth !== prevDepth;
+
+            if (seg.kind === "single") {
+              return (
+                <Box key={seg.task.ID}>
+                  {showDivider && (
+                    <Divider
+                      my="sm"
+                      color="var(--mantine-color-default-border)"
+                      style={{ opacity: 0.5 }}
+                    />
+                  )}
+                  <Box mb="xs">
+                    <TaskRow
+                      task={seg.task}
+                      runID={id}
+                      expanded={!!expandedMap[seg.task.ID]}
+                      onToggleExpand={() => toggleTask(seg.task)}
+                      onRetry={handleRetry}
+                      onKill={handleKillTask}
+                      taskRef={(el) => {
+                        taskRefs.current[seg.task.ID] = el;
+                      }}
+                    />
+                  </Box>
+                </Box>
+              );
+            }
+
+            // Map group: parent with collapsible children
+            const { parent, children } = seg;
+            const isGroupCollapsed = collapsedGroups[parent.TaskID] ?? true;
+            const childSuccess = children.filter((c) => c.Status === "success").length;
+            const childFailed = children.filter((c) => c.Status === "failed").length;
+            const childRunning = children.filter((c) => c.Status === "running").length;
+
+            return (
+              <Box key={parent.ID}>
+                {showDivider && (
+                  <Divider
+                    my="sm"
+                    color="var(--mantine-color-default-border)"
+                    style={{ opacity: 0.5 }}
+                  />
+                )}
+                {/* Map group: parent + children toggle + collapsible children
+                    wrapped in a single bordered container */}
+                <Card
+                  padding="0"
+                  mb="xs"
+                  style={{
+                    border: "1px solid var(--mantine-color-default-border)",
+                    overflow: "hidden",
+                  }}
+                >
+                  {/* Parent task row (rendered without its own Card border) */}
+                  <TaskRow
+                    task={parent}
+                    runID={id}
+                    expanded={!!expandedMap[parent.ID]}
+                    onToggleExpand={() => toggleTask(parent)}
+                    onRetry={handleRetry}
+                    onKill={handleKillTask}
+                    taskRef={(el) => {
+                      taskRefs.current[parent.ID] = el;
+                    }}
+                    borderless
+                  />
+                  {/* Children toggle footer */}
+                  <Group
+                    gap="xs"
+                    px="md"
+                    py={6}
+                    style={{
+                      cursor: "pointer",
+                      borderTop: "1px solid var(--mantine-color-default-border)",
+                      background: "var(--mantine-color-dark-7, var(--mantine-color-gray-0))",
+                      userSelect: "none",
+                    }}
+                    onClick={() =>
+                      setCollapsedGroups((prev) => ({
+                        ...prev,
+                        [parent.TaskID]: !isGroupCollapsed,
+                      }))
+                    }
+                  >
+                    <ActionIcon variant="transparent" size="xs" color="dimmed">
+                      {isGroupCollapsed ? (
+                        <IconChevronRight size={14} />
+                      ) : (
+                        <IconChevronDown size={14} />
+                      )}
+                    </ActionIcon>
+                    <Text size="xs" c="dimmed" fw={500}>
+                      {children.length} map {children.length === 1 ? "child" : "children"}
+                    </Text>
+                    {childSuccess > 0 && (
+                      <Badge size="xs" variant="dot" color="green">
+                        {childSuccess}
+                      </Badge>
+                    )}
+                    {childFailed > 0 && (
+                      <Badge size="xs" variant="dot" color="red">
+                        {childFailed}
+                      </Badge>
+                    )}
+                    {childRunning > 0 && (
+                      <Badge size="xs" variant="dot" color="blue">
+                        {childRunning}
+                      </Badge>
+                    )}
+                  </Group>
+                  {/* Collapsible children list */}
+                  <Collapse in={!isGroupCollapsed}>
+                    <Box
+                      px="sm"
+                      pb="sm"
+                      pt={4}
+                      style={{
+                        borderTop: "1px solid var(--mantine-color-default-border)",
+                      }}
+                    >
+                      <Stack gap={4}>
+                        {children.map((child) => (
+                          <TaskRow
+                            key={child.ID}
+                            task={child}
+                            runID={id}
+                            expanded={!!expandedMap[child.ID]}
+                            onToggleExpand={() => toggleTask(child)}
+                            onRetry={handleRetry}
+                            onKill={handleKillTask}
+                            taskRef={(el) => {
+                              taskRefs.current[child.ID] = el;
+                            }}
+                          />
+                        ))}
+                      </Stack>
+                    </Box>
+                  </Collapse>
+                </Card>
+              </Box>
+            );
+          })}
         </Stack>
       )}
     </>

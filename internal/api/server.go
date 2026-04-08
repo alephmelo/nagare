@@ -423,7 +423,7 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 
 	var enriched []enrichedTask
 	for _, t := range tasks {
-		cmd := s.resolveTaskCommand(dag, ok, t.TaskID)
+		cmd := s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue)
 		m, _ := s.store.GetTaskMetrics(t.ID)
 		enriched = append(enriched, enrichedTask{
 			TaskInstance: t,
@@ -464,7 +464,7 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 	for _, t := range attempts {
 		enriched = append(enriched, enrichedTask{
 			TaskInstance: t,
-			Command:      s.resolveTaskCommand(dag, ok, t.TaskID),
+			Command:      s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue),
 		})
 	}
 
@@ -472,12 +472,19 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveTaskCommand looks up the command string for a task ID in a DAG definition.
-func (s *Server) resolveTaskCommand(dag *models.DAGDef, dagFound bool, taskID string) string {
+// For map children (e.g. "process_file[0]"), it strips the [N] suffix to find the
+// parent definition, then substitutes {{item}} with the child's ItemValue if present.
+func (s *Server) resolveTaskCommand(dag *models.DAGDef, dagFound bool, taskID string, itemValue *string) string {
 	if !dagFound || dag == nil {
 		return ""
 	}
-	if td := dag.FindTask(taskID); td != nil {
-		return td.Command
+	baseID := models.BaseTaskID(taskID)
+	if td := dag.FindTask(baseID); td != nil {
+		cmd := td.Command
+		if itemValue != nil {
+			cmd = strings.ReplaceAll(cmd, "{{item}}", *itemValue)
+		}
+		return cmd
 	}
 	return ""
 }

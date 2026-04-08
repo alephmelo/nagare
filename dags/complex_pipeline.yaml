@@ -1,0 +1,162 @@
+id: complex_pipeline
+description: >
+  Complex data pipeline demonstrating with_items (static fan-out),
+  map_over (dynamic fan-out), shell conditionals, retries, env vars,
+  and cross-DAG triggering.
+schedule: "workflow_dispatch"
+
+tasks:
+  # ──────────────────────────────────────────────
+  # Stage 1: Static fan-out — discover data per region
+  # with_items expands at parse time into 3 separate tasks:
+  #   discover_sources_us_east, discover_sources_eu_west, discover_sources_ap_south
+  # ──────────────────────────────────────────────
+  - id: discover_sources
+    type: command
+    command: |
+      echo "Scanning region {{item}} for data sources..."
+      sleep 1
+      echo "Found 3 data sources in {{item}}"
+    with_items:
+      - "us-east"
+      - "eu-west"
+      - "ap-south"
+    env:
+      PIPELINE_STAGE: "discovery"
+
+  # ──────────────────────────────────────────────
+  # Stage 2: Build a file manifest (produces JSON array for map)
+  # Waits for ALL region scans to complete, then emits a JSON
+  # array of filenames to stdout for the downstream map task.
+  # ──────────────────────────────────────────────
+  - id: build_manifest
+    type: command
+    command: echo '["orders_2024.csv", "returns_2024.csv", "inventory_2024.csv", "customers_2024.csv", "shipments_2024.csv"]'
+    depends_on:
+      - discover_sources
+    env:
+      PIPELINE_STAGE: "manifest"
+
+  # ──────────────────────────────────────────────
+  # Stage 3: Dynamic fan-out — process each file
+  # map_over reads build_manifest's stdout JSON array and creates
+  # one child task per file: process_file[0], process_file[1], ...
+  # ──────────────────────────────────────────────
+  - id: process_file
+    type: map
+    map_over: build_manifest
+    command: |
+      echo "Processing: {{item}}"
+      ROW_COUNT=$((RANDOM % 9000 + 1000))
+      echo "Parsed $ROW_COUNT rows from {{item}}"
+      sleep 2
+      echo "Finished processing {{item}} ($ROW_COUNT rows)"
+    retries: 1
+    retry_delay_seconds: 3
+    env:
+      PIPELINE_STAGE: "processing"
+
+  # ──────────────────────────────────────────────
+  # Stage 4: Validate — conditional logic via shell
+  # Simulates a quality check. Uses if/else to conditionally
+  # pass or fail based on a random threshold. Has retries so
+  # a transient failure can self-heal.
+  # ──────────────────────────────────────────────
+  - id: validate_results
+    type: command
+    command: |
+      echo "Running data validation checks..."
+      sleep 1
+
+      QUALITY_SCORE=$((RANDOM % 100))
+      THRESHOLD=${QUALITY_THRESHOLD:-70}
+      echo "Quality score: $QUALITY_SCORE / 100 (threshold: $THRESHOLD)"
+
+      if [ "$QUALITY_SCORE" -ge "$THRESHOLD" ]; then
+        echo "PASS: Quality score meets threshold"
+        echo "Validation summary: $QUALITY_SCORE% quality, all checks green"
+      else
+        echo "WARN: Quality score below threshold, triggering retry..."
+        exit 1
+      fi
+    depends_on:
+      - process_file
+    retries: 3
+    retry_delay_seconds: 5
+    env:
+      PIPELINE_STAGE: "validation"
+      QUALITY_THRESHOLD: "40"
+    timeout_seconds: 60
+
+  # ──────────────────────────────────────────────
+  # Stage 5: Static fan-out — export to multiple formats
+  # Uses with_items to generate outputs in parallel.
+  # Expands into: export_results_parquet, export_results_json, export_results_csv
+  # ──────────────────────────────────────────────
+  - id: export_results
+    type: command
+    command: |
+      echo "Exporting aggregated results to {{item}} format..."
+      sleep 2
+      case "{{item}}" in
+        parquet)
+          echo "Compressed 5 files into output.parquet (2.3 MB)"
+          ;;
+        json)
+          echo "Serialised 5 files into output.json (8.1 MB)"
+          ;;
+        csv)
+          echo "Flattened 5 files into output.csv (12.7 MB)"
+          ;;
+        *)
+          echo "ERROR: Unknown format {{item}}" && exit 1
+          ;;
+      esac
+      echo "Export to {{item}} complete"
+    depends_on:
+      - validate_results
+    with_items:
+      - "parquet"
+      - "json"
+      - "csv"
+    env:
+      PIPELINE_STAGE: "export"
+
+  # ──────────────────────────────────────────────
+  # Stage 6: Aggregate — final summary with conditional reporting
+  # Depends on all export tasks. Demonstrates multi-step shell
+  # logic with conditional paths.
+  # ──────────────────────────────────────────────
+  - id: aggregate_report
+    type: command
+    command: |
+      echo "=== Pipeline Aggregate Report ==="
+      TOTAL_FILES=5
+      TOTAL_FORMATS=3
+      echo "Files processed: $TOTAL_FILES"
+      echo "Export formats: $TOTAL_FORMATS"
+      echo "Total outputs: $((TOTAL_FILES * TOTAL_FORMATS))"
+
+      # Conditional: check if we should notify
+      if [ "${SEND_NOTIFICATION}" = "true" ]; then
+        echo "Notification flag is ON — will trigger downstream DAG"
+      else
+        echo "Notification flag is OFF — skipping notification"
+      fi
+
+      echo "=== Report Complete ==="
+    depends_on:
+      - export_results
+    env:
+      PIPELINE_STAGE: "aggregation"
+      SEND_NOTIFICATION: "true"
+
+  # ──────────────────────────────────────────────
+  # Stage 7: Trigger downstream DAG
+  # Fires off sample_dag as a downstream pipeline.
+  # ──────────────────────────────────────────────
+  - id: notify_downstream
+    type: trigger_dag
+    dag_id: "sample_dag"
+    depends_on:
+      - aggregate_report
