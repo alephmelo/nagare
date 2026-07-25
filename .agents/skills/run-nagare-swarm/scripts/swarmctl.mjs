@@ -752,15 +752,24 @@ function initializeRun() {
 }
 
 function changedPaths(cwd) {
-  const output = gitText(
-    ["status", "--porcelain=v1", "--untracked-files=all"],
+  const output = git(
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     cwd,
-  );
+  ).stdout;
   if (!output) return [];
-  return output.split("\n").map((line) => {
-    const raw = line.slice(3);
-    return raw.includes(" -> ") ? raw.split(" -> ").at(-1) : raw;
-  });
+  const records = output.split("\0");
+  const paths = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record) continue;
+    if (record.length < 4 || record[2] !== " ") {
+      fail(`Could not parse git porcelain record ${JSON.stringify(record)}`);
+    }
+    const status = record.slice(0, 2);
+    paths.push(record.slice(3));
+    if (status.includes("R") || status.includes("C")) index += 1;
+  }
+  return paths;
 }
 
 function trackedPaths(cwd) {
@@ -866,14 +875,31 @@ async function runCodex({
 }) {
   const artifactDir = dirname(artifact);
   mkdirSync(artifactDir, { recursive: true });
-  const shellHome = join(artifactDir, "agent-shell-home");
-  const shellTemp = join(artifactDir, "agent-shell-tmp");
-  mkdirSync(shellHome, { recursive: true });
-  mkdirSync(shellTemp, { recursive: true });
+  const shellRoot = mkdtempSync("/private/tmp/nagare-swarm-agent-");
+  const shellHome = join(shellRoot, "home");
+  const shellTemp = join(shellRoot, "tmp");
+  const shellGoCache = join(shellRoot, "go-cache");
+  const shellGoPath = join(shellRoot, "go-path");
+  const shellNpmCache = join(shellRoot, "npm-cache");
+  for (const path of [
+    shellHome,
+    shellTemp,
+    shellGoCache,
+    shellGoPath,
+    shellNpmCache,
+  ]) {
+    mkdirSync(path, { recursive: true });
+  }
+  const { goModCache, goRoot } = toolchainReadablePaths(cwd);
   const shellEnvironment = tomlInlineTable({
     PATH: safeCommandPath,
     HOME: shellHome,
     TMPDIR: shellTemp,
+    GOCACHE: shellGoCache,
+    GOMODCACHE: goModCache,
+    GOPATH: shellGoPath,
+    GOROOT: goRoot,
+    npm_config_cache: shellNpmCache,
     USER: "nagare-swarm",
     LOGNAME: "nagare-swarm",
     SHELL: "/bin/sh",
@@ -912,47 +938,51 @@ async function runCodex({
     "-",
   ];
   log(`${task.id}: starting ${role} Codex session`);
-  const exitCode = await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(codexBin, args, {
-      cwd,
-      env: cleanAgentEnvironment(task, frozenTests),
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: process.platform !== "win32",
-    });
-    child.stdout.on("data", (chunk) => process.stdout.write(chunk));
-    child.stderr.on("data", (chunk) => process.stderr.write(chunk));
-    let settled = false;
-    child.on("error", async (error) => {
-      if (settled) return;
-      settled = true;
-      try {
-        await terminateProcessGroup(child.pid);
-      } catch (cleanupError) {
-        error.cause = cleanupError;
-      }
-      rejectPromise(error);
-    });
-    child.on("exit", async (code) => {
-      if (settled) return;
-      settled = true;
-      try {
-        await terminateProcessGroup(child.pid);
-        resolvePromise(code);
-      } catch (error) {
+  try {
+    const exitCode = await new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn(codexBin, args, {
+        cwd,
+        env: cleanAgentEnvironment(task, frozenTests),
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      });
+      child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+      child.stderr.on("data", (chunk) => process.stderr.write(chunk));
+      let settled = false;
+      child.on("error", async (error) => {
+        if (settled) return;
+        settled = true;
+        try {
+          await terminateProcessGroup(child.pid);
+        } catch (cleanupError) {
+          error.cause = cleanupError;
+        }
         rejectPromise(error);
-      }
+      });
+      child.on("exit", async (code) => {
+        if (settled) return;
+        settled = true;
+        try {
+          await terminateProcessGroup(child.pid);
+          resolvePromise(code);
+        } catch (error) {
+          rejectPromise(error);
+        }
+      });
+      child.stdin.end(prompt);
     });
-    child.stdin.end(prompt);
-  });
-  if (exitCode !== 0) {
-    fail(`${task.id}: ${role} Codex session exited ${exitCode}`);
+    if (exitCode !== 0) {
+      fail(`${task.id}: ${role} Codex session exited ${exitCode}`);
+    }
+    if (!existsSync(artifact)) {
+      fail(`${task.id}: ${role} did not produce ${artifact}`);
+    }
+    const result = readJSON(artifact);
+    log(`${task.id}: ${role} session completed`);
+    return result;
+  } finally {
+    rmSync(shellRoot, { recursive: true, force: true });
   }
-  if (!existsSync(artifact)) {
-    fail(`${task.id}: ${role} did not produce ${artifact}`);
-  }
-  const result = readJSON(artifact);
-  log(`${task.id}: ${role} session completed`);
-  return result;
 }
 
 function seatbeltString(value) {
@@ -1698,6 +1728,21 @@ async function main() {
         );
         try {
           git(["worktree", "add", "--detach", nestedWorktree, "HEAD"], repo);
+          const trackedPath = "web/src/app/dags/page.tsx";
+          const trackedAbsolute = join(nestedWorktree, trackedPath);
+          writeFileSync(
+            trackedAbsolute,
+            `${readFileSync(trackedAbsolute, "utf8")}\n`,
+          );
+          const observedPaths = changedPaths(nestedWorktree);
+          if (
+            observedPaths.length !== 1 ||
+            observedPaths[0] !== trackedPath
+          ) {
+            fail(
+              `Git scope parser returned ${JSON.stringify(observedPaths)} instead of ${trackedPath}`,
+            );
+          }
           await runCheck(
             "cd web && test -r ../package.json",
             nestedWorktree,
