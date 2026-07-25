@@ -1,5 +1,6 @@
 nagare
 nagare.db
+.DS_Store
 
 # Node / npm
 node_modules/
