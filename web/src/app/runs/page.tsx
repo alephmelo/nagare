@@ -43,8 +43,9 @@ import {
   Handle,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import dagre from "dagre";
 import { PageHeader } from "../../components/ui/PageHeader";
+import { layoutTopologyStages } from "../../components/executionTopologyLayout";
+import { projectExecutionTopology } from "../../lib/executionTopology";
 import { StatusIcon } from "../../components/ui/StatusIcon";
 import { getStatusColor, getStatusLabel } from "../../components/ui/StatusBadge";
 import { LogTerminal } from "../../components/blocks/LogTerminal";
@@ -195,135 +196,9 @@ function RunNodeComponent({
 
 const runNodeTypes = { runNode: RunNodeComponent };
 
-/** Strip [N] suffix to get the base task ID */
 function baseTaskID(taskID: string): string {
   const idx = taskID.indexOf("[");
   return idx !== -1 ? taskID.substring(0, idx) : taskID;
-}
-
-/** Build React Flow nodes + edges from DAG definition + runtime task instances */
-function buildRunGraph(
-  dagTasks: DagTaskDef[],
-  runTasks: RunTask[]
-): { nodes: Node[]; edges: Edge[] } {
-  const dagMap = new Map<string, DagTaskDef>();
-  dagTasks.forEach((t) => dagMap.set(t.ID, t));
-
-  // Identify map parents that have ACTUAL children in the runtime list.
-  // A parent without children yet (still pending/running before fan-out)
-  // should be shown as a regular node.
-  const childrenOf = new Map<string, RunTask[]>();
-
-  runTasks.forEach((t) => {
-    const base = baseTaskID(t.TaskID);
-    if (base !== t.TaskID) {
-      if (!childrenOf.has(base)) childrenOf.set(base, []);
-      childrenOf.get(base)!.push(t);
-    }
-  });
-
-  // Only consider a parent "expanded" (hidden in favour of children) if
-  // children actually exist in the task list.
-  const expandedParents = new Set<string>(childrenOf.keys());
-
-  // Build a lookup: taskID -> RunTask (latest attempt only)
-  const instanceOf = new Map<string, RunTask>();
-  runTasks.forEach((t) => instanceOf.set(t.TaskID, t));
-
-  // --- Nodes ---
-  const nodes: Node[] = [];
-  runTasks.forEach((t) => {
-    if (expandedParents.has(t.TaskID)) return; // hide parent — children shown instead
-    nodes.push({
-      id: t.TaskID,
-      type: "runNode",
-      data: {
-        label: t.TaskID,
-        status: t.Status,
-        duration: t.Metrics?.DurationMs,
-      },
-      position: { x: 0, y: 0 },
-    });
-  });
-
-  // --- Edges ---
-  const edges: Edge[] = [];
-  const edgeSet = new Set<string>(); // dedup
-  const addEdge = (src: string, tgt: string) => {
-    const key = `${src}->${tgt}`;
-    if (edgeSet.has(key)) return;
-    edgeSet.add(key);
-    const srcTask = instanceOf.get(src);
-    const color =
-      srcTask?.Status === "success"
-        ? "var(--mantine-color-green-filled)"
-        : srcTask?.Status === "failed"
-          ? "var(--mantine-color-red-filled)"
-          : srcTask?.Status === "running"
-            ? "var(--mantine-color-blue-filled)"
-            : "var(--mantine-color-dimmed)";
-    edges.push({
-      id: `e-${src}-${tgt}`,
-      source: src,
-      target: tgt,
-      animated: srcTask?.Status === "running",
-      style: { stroke: color, strokeWidth: 1.5 },
-      markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
-    });
-  };
-
-  runTasks.forEach((t) => {
-    if (expandedParents.has(t.TaskID)) return;
-
-    const base = baseTaskID(t.TaskID);
-    const isChild = base !== t.TaskID;
-    const dagTask = dagMap.get(base);
-    if (!dagTask) return;
-
-    if (isChild) {
-      // Map child — connect from each dependency of the parent definition
-      dagTask.DependsOn?.forEach((dep) => {
-        if (!expandedParents.has(dep) && instanceOf.has(dep)) {
-          addEdge(dep, t.TaskID);
-        }
-      });
-    } else {
-      // Regular task (or map parent whose children haven't appeared yet)
-      dagTask.DependsOn?.forEach((dep) => {
-        if (expandedParents.has(dep)) {
-          // Dependency is a map parent with children — fan-in from each child
-          childrenOf.get(dep)?.forEach((child) => addEdge(child.TaskID, t.TaskID));
-        } else if (instanceOf.has(dep)) {
-          addEdge(dep, t.TaskID);
-        }
-      });
-    }
-  });
-
-  return { nodes, edges };
-}
-
-/** Dagre auto-layout for run graph */
-function layoutRunGraph(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: Edge[] } {
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: "TB", ranksep: 40, nodesep: 20 });
-
-  nodes.forEach((n) => g.setNode(n.id, { width: RUN_NODE_W, height: RUN_NODE_H }));
-  edges.forEach((e) => g.setEdge(e.source, e.target));
-  dagre.layout(g);
-
-  const layouted = nodes.map((n) => {
-    const pos = g.node(n.id);
-    return {
-      ...n,
-      position: { x: pos.x - RUN_NODE_W / 2, y: pos.y - RUN_NODE_H / 2 },
-      targetPosition: Position.Top,
-      sourcePosition: Position.Bottom,
-    };
-  });
-
-  return { nodes: layouted, edges };
 }
 
 // useSSELogs subscribes to the SSE log stream for a task while it is running.
@@ -635,11 +510,13 @@ function RunDetailsContent() {
   const prevNodeIdsRef = useRef<string>("");
   // Use a ref for dagDef loading guard so it doesn't destabilize fetchTasks
   const dagDefRef = useRef<DagTaskDef[]>([]);
+  const activeRunIDRef = useRef<string | null>(id);
 
   const TERMINAL = new Set(["success", "failed", "cancelled"]);
 
   const fetchTasks = useCallback(async () => {
     if (!id) return;
+    const requestedID = id;
     try {
       const needDagDef = dagDefRef.current.length === 0;
       const [tasksRes, runRes, dagsRes] = await Promise.all([
@@ -647,8 +524,10 @@ function RunDetailsContent() {
         apiFetch(`/api/runs/${id}`),
         needDagDef ? apiFetch("/api/dags") : Promise.resolve(null),
       ]);
+      if (activeRunIDRef.current !== requestedID) return;
       if (tasksRes.ok) {
         const newTasks: RunTask[] = await tasksRes.json();
+        if (activeRunIDRef.current !== requestedID) return;
         setTasks(newTasks);
         // Auto-expand running/failed/retry tasks on first load (only when not
         // already tracked in the map so we don't clobber user-toggled state).
@@ -676,11 +555,13 @@ function RunDetailsContent() {
       let fetchedRun: Run | null = null;
       if (runRes.ok) {
         fetchedRun = await runRes.json();
+        if (activeRunIDRef.current !== requestedID) return;
         setRun(fetchedRun);
       }
       // Fetch DAG definition once to get task dependency info
       if (dagsRes && dagsRes.ok && fetchedRun) {
         const allDags: DagDef[] = await dagsRes.json();
+        if (activeRunIDRef.current !== requestedID) return;
         const dag = allDags.find((d) => d.ID === fetchedRun!.DAGID);
         if (dag?.Tasks) {
           dagDefRef.current = dag.Tasks;
@@ -690,9 +571,24 @@ function RunDetailsContent() {
     } catch (err) {
       console.error("Failed to fetch tasks", err);
     } finally {
-      setLoading(false);
+      if (activeRunIDRef.current === requestedID) setLoading(false);
     }
   }, [id, taskParam]);
+
+  useEffect(() => {
+    activeRunIDRef.current = id;
+    dagDefRef.current = [];
+    setTasks([]);
+    setRun(null);
+    setDagDef([]);
+    setExpandedMap({});
+    setCollapsedGroups({});
+    setGraphNodes([]);
+    setGraphEdges([]);
+    prevNodeIdsRef.current = "";
+    didScrollToTask.current = false;
+    setLoading(true);
+  }, [id, setGraphNodes, setGraphEdges]);
 
   // Poll for task/run updates. useVisibilityPoll pauses when the tab is hidden.
   // Skip the poll once the run reaches a terminal state.
@@ -721,9 +617,37 @@ function RunDetailsContent() {
   // Build/update graph whenever tasks or DAG definition change.
   // Only re-layout (dagre) when the set of node IDs changes — on pure status
   // updates we just patch node data to avoid the graph jumping around.
+  const topology = useMemo(() => projectExecutionTopology(dagDef, tasks), [dagDef, tasks]);
+
   useEffect(() => {
-    if (dagDef.length === 0 || tasks.length === 0) return;
-    const { nodes, edges } = buildRunGraph(dagDef, tasks);
+    const nodes: Node[] = topology.nodes.map((node) => ({
+      id: node.id,
+      type: "runNode",
+      data: {
+        label: node.id,
+        status: node.status ?? "pending",
+        duration: node.runtimeTask?.Metrics?.DurationMs,
+      },
+      position: { x: 0, y: 0 },
+    }));
+    const statusByID = new Map(topology.nodes.map((node) => [node.id, node.status]));
+    const edges: Edge[] = topology.edges.map((edge) => {
+      const sourceStatus = statusByID.get(edge.source);
+      const color =
+        sourceStatus === "success"
+          ? "var(--mantine-color-green-filled)"
+          : sourceStatus === "failed"
+            ? "var(--mantine-color-red-filled)"
+            : sourceStatus === "running"
+              ? "var(--mantine-color-blue-filled)"
+              : "var(--mantine-color-dimmed)";
+      return {
+        ...edge,
+        animated: sourceStatus === "running",
+        style: { stroke: color, strokeWidth: 1.5 },
+        markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
+      };
+    });
 
     const nodeIdStr = nodes
       .map((n) => n.id)
@@ -732,9 +656,8 @@ function RunDetailsContent() {
     if (nodeIdStr !== prevNodeIdsRef.current) {
       // Structure changed — full re-layout
       prevNodeIdsRef.current = nodeIdStr;
-      const laid = layoutRunGraph(nodes, edges);
-      setGraphNodes(laid.nodes);
-      setGraphEdges(laid.edges);
+      setGraphNodes(layoutTopologyStages(nodes, topology.stages, RUN_NODE_W, RUN_NODE_H));
+      setGraphEdges(edges);
     } else {
       // Only status/duration changed — patch data in place, keep positions
       setGraphNodes((prev) =>
@@ -745,7 +668,7 @@ function RunDetailsContent() {
       );
       setGraphEdges(edges);
     }
-  }, [dagDef, tasks, setGraphNodes, setGraphEdges]);
+  }, [topology, setGraphNodes, setGraphEdges]);
 
   // Stable graph height — based on DAG definition task count (doesn't change)
   const graphHeight = useMemo(() => {
@@ -886,33 +809,24 @@ function RunDetailsContent() {
     if (dagDef.length === 0) {
       return tasks.map((t) => ({ kind: "single" as const, task: t, depth: 0 }));
     }
-    // Build a position map from the DAG definition order.
-    const defOrder = new Map<string, number>();
-    dagDef.forEach((d, i) => defOrder.set(d.ID, i));
-
-    // Compute dependency depth per definition task (longest path from root).
-    const dagMap = new Map<string, DagTaskDef>();
-    dagDef.forEach((d) => dagMap.set(d.ID, d));
-    const depthCache = new Map<string, number>();
-    function getDepth(taskId: string): number {
-      if (depthCache.has(taskId)) return depthCache.get(taskId)!;
-      const def = dagMap.get(taskId);
-      if (!def || !def.DependsOn || def.DependsOn.length === 0) {
-        depthCache.set(taskId, 0);
-        return 0;
-      }
-      const d = 1 + Math.max(...def.DependsOn.map(getDepth));
-      depthCache.set(taskId, d);
-      return d;
-    }
-    dagDef.forEach((d) => getDepth(d.ID));
+    const stageOf = new Map<string, number>();
+    const orderOf = new Map<string, number>();
+    topology.stages.forEach((stage, depth) =>
+      stage.forEach((taskID, order) => {
+        stageOf.set(taskID, depth);
+        orderOf.set(taskID, order);
+      })
+    );
 
     // Sort tasks by definition order, parent before children, children by index
     const sorted = [...tasks].sort((a, b) => {
       const baseA = baseTaskID(a.TaskID);
       const baseB = baseTaskID(b.TaskID);
-      const posA = defOrder.get(baseA) ?? 999;
-      const posB = defOrder.get(baseB) ?? 999;
+      const depthA = stageOf.get(a.TaskID) ?? stageOf.get(baseTaskID(a.TaskID)) ?? 999;
+      const depthB = stageOf.get(b.TaskID) ?? stageOf.get(baseTaskID(b.TaskID)) ?? 999;
+      if (depthA !== depthB) return depthA - depthB;
+      const posA = orderOf.get(a.TaskID) ?? orderOf.get(baseTaskID(a.TaskID)) ?? 999;
+      const posB = orderOf.get(b.TaskID) ?? orderOf.get(baseTaskID(b.TaskID)) ?? 999;
       if (posA !== posB) return posA - posB;
       const isChildA = baseA !== a.TaskID;
       const isChildB = baseB !== b.TaskID;
@@ -929,7 +843,7 @@ function RunDetailsContent() {
     while (i < sorted.length) {
       const task = sorted[i];
       const base = baseTaskID(task.TaskID);
-      const depth = depthCache.get(base) ?? 0;
+      const depth = stageOf.get(task.TaskID) ?? stageOf.get(base) ?? 0;
       const isParent = base === task.TaskID;
 
       // Check if this is a map parent with children following
@@ -954,7 +868,7 @@ function RunDetailsContent() {
       i++;
     }
     return segments;
-  }, [tasks, dagDef]);
+  }, [tasks, dagDef, topology]);
 
   const successCount = tasks.filter((t) => t.Status === "success").length;
   const failedCount = tasks.filter((t) => t.Status === "failed").length;
