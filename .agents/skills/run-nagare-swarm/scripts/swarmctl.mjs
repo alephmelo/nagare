@@ -45,6 +45,8 @@ const worktreesDir = join(swarmHome, "worktrees");
 const activeRunPath = join(swarmHome, "active-run");
 const lockPath = join(swarmHome, "state.lock");
 const codexBin = process.env.CODEX_BIN || "codex";
+const maxCheckFailureOutput = 12 * 1024;
+const maxFailureContext = 24 * 1024;
 const safeCommandPath = [
   "/Applications/Xcode.app/Contents/Developer/usr/bin",
   "/opt/homebrew/bin",
@@ -96,6 +98,46 @@ function log(message) {
 
 function fail(message) {
   throw new Error(message);
+}
+
+function boundedText(value, limit, suffix) {
+  if (!value) return null;
+  const text = String(value);
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - suffix.length)}${suffix}`;
+}
+
+function mergeFailureContext(previousFailure, currentFailure) {
+  const suffix = "\n[older failure context truncated]";
+  const previous = boundedText(previousFailure, maxFailureContext, suffix);
+  const current = boundedText(currentFailure, maxFailureContext, suffix);
+  if (!current) return previous;
+  if (!previous || previous === current) {
+    return current;
+  }
+  const combined = `Latest attempt failure:\n${current}\n\nEarlier attempt context:\n${previous}`;
+  return boundedText(combined, maxFailureContext, suffix);
+}
+
+function appendOutputTail(current, chunk) {
+  return `${current}${chunk.toString("utf8")}`.slice(-maxCheckFailureOutput);
+}
+
+function beginTaskAttempt(taskState, baseCommit, lease) {
+  const previousFailure = mergeFailureContext(
+    taskState.previousFailure,
+    taskState.error,
+  );
+  taskState.status = "running";
+  taskState.attempts += 1;
+  taskState.baseCommit = baseCommit;
+  taskState.previousFailure = previousFailure;
+  taskState.error = null;
+  taskState.lease = lease;
+  return {
+    attempt: taskState.attempts,
+    previousFailure,
+  };
 }
 
 function sleep(milliseconds) {
@@ -269,14 +311,11 @@ function claimTask(taskID) {
       claimedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 7 * 60 * 60_000).toISOString(),
     };
-    const attempt = taskState.attempts + 1;
-    const previousFailure = taskState.error || taskState.previousFailure || null;
-    taskState.status = "running";
-    taskState.attempts = attempt;
-    taskState.baseCommit = state.integrationHead;
-    taskState.previousFailure = previousFailure;
-    taskState.error = null;
-    taskState.lease = lease;
+    const { attempt, previousFailure } = beginTaskAttempt(
+      taskState,
+      state.integrationHead,
+      lease,
+    );
     state.updatedAt = new Date().toISOString();
     writeJSONAtomic(statePath(runID), state);
     return {
@@ -1225,15 +1264,24 @@ async function runCheck(command, cwd, allowFailure = false) {
   const sandbox = checkSandbox(cwd, checkRoot);
   const before = changeFingerprint(originalCwd);
   let code;
+  let outputTail = "";
   try {
     code = await new Promise((resolvePromise, rejectPromise) => {
       const child = spawn(sandbox.command, [...sandbox.args, command], {
         cwd,
         env: sandbox.env,
-        stdio: "inherit",
+        stdio: ["ignore", "pipe", "pipe"],
         detached: process.platform !== "win32",
       });
+      child.stdout.on("data", (chunk) => {
+        outputTail = appendOutputTail(outputTail, chunk);
+      });
+      child.stderr.on("data", (chunk) => {
+        outputTail = appendOutputTail(outputTail, chunk);
+      });
       let settled = false;
+      let childExitCode;
+      let cleanupPromise = Promise.resolve();
       child.on("error", async (error) => {
         if (settled) return;
         settled = true;
@@ -1244,13 +1292,19 @@ async function runCheck(command, cwd, allowFailure = false) {
         }
         rejectPromise(error);
       });
-      child.on("exit", async (exitCode) => {
+      child.on("exit", (exitCode) => {
         if (settled) return;
-        settled = true;
+        childExitCode = exitCode;
+        cleanupPromise = terminateProcessGroup(child.pid);
+      });
+      child.on("close", async (exitCode) => {
+        if (settled) return;
         try {
-          await terminateProcessGroup(child.pid);
-          resolvePromise(exitCode);
+          await cleanupPromise;
+          settled = true;
+          resolvePromise(childExitCode ?? exitCode);
         } catch (error) {
+          settled = true;
           rejectPromise(error);
         }
       });
@@ -1258,6 +1312,7 @@ async function runCheck(command, cwd, allowFailure = false) {
   } finally {
     rmSync(checkRoot, { recursive: true, force: true });
   }
+  if (outputTail) process.stdout.write(outputTail);
   const after = changeFingerprint(originalCwd);
   if (after !== before) {
     const error = new Error(
@@ -1267,7 +1322,10 @@ async function runCheck(command, cwd, allowFailure = false) {
     throw error;
   }
   if (code !== 0 && !allowFailure) {
-    fail(`Check failed (${code}): ${command}`);
+    const detail = outputTail.trim();
+    fail(
+      `Check failed (${code}): ${command}${detail ? `\nOutput (tail):\n${detail}` : ""}`,
+    );
   }
   return code;
 }
@@ -1714,6 +1772,69 @@ async function main() {
       break;
     case "sandbox-smoke":
       await runCheck("git diff --check", repo);
+      {
+        const marker = "nagare-check-output-smoke";
+        let captured = false;
+        try {
+          await runCheck(`printf '${marker}\\n' >&2; exit 7`, repo);
+        } catch (error) {
+          if (!error.message.includes(marker)) throw error;
+          captured = true;
+        }
+        if (!captured) {
+          fail("Failed checks do not preserve their diagnostic output");
+        }
+        const boundedOutput = appendOutputTail(
+          "discarded-prefix",
+          "x".repeat(maxCheckFailureOutput + 1),
+        );
+        if (
+          boundedOutput.length !== maxCheckFailureOutput ||
+          !boundedOutput.endsWith("x")
+        ) {
+          fail("Failed check output is not bounded to its configured tail");
+        }
+        const merged = mergeFailureContext(
+          "earlier failure marker".repeat(maxFailureContext),
+          "latest failure marker",
+        );
+        if (
+          merged.length > maxFailureContext ||
+          !merged.includes("latest failure marker") ||
+          !merged.includes("earlier failure marker")
+        ) {
+          fail("Retry context did not preserve cumulative failure evidence");
+        }
+        const retryStatePath = join(swarmHome, "retry-context-smoke.json");
+        try {
+          writeJSONAtomic(retryStatePath, {
+            status: "failed",
+            attempts: 1,
+            error: "first persisted failure",
+            previousFailure: null,
+            lease: null,
+          });
+          const firstRetry = readJSON(retryStatePath);
+          beginTaskAttempt(firstRetry, "base-one", { owner: "first" });
+          firstRetry.status = "failed";
+          firstRetry.error = "second persisted failure";
+          writeJSONAtomic(retryStatePath, firstRetry);
+          const secondRetry = readJSON(retryStatePath);
+          const retry = beginTaskAttempt(secondRetry, "base-two", {
+            owner: "second",
+          });
+          if (
+            secondRetry.attempts !== 3 ||
+            secondRetry.error !== null ||
+            !retry.previousFailure.includes("second persisted failure") ||
+            !retry.previousFailure.includes("first persisted failure")
+          ) {
+            fail("Persisted retries did not retain cumulative failure evidence");
+          }
+        } finally {
+          rmSync(retryStatePath, { force: true });
+        }
+      }
       await runCheck("! ps -p 1 >/dev/null 2>&1", repo);
       if (
         process.env.HOME &&
