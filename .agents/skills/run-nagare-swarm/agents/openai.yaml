@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Nagare Swarm"
+  short_description: "Run guarded unattended Codex agent swarms"
+  default_prompt: "Use $run-nagare-swarm to execute the approved architecture backlog with pinned Nagare and guarded Codex agents."
