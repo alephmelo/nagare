@@ -643,6 +643,45 @@ function timestampID() {
     .replaceAll("-", "");
 }
 
+function prepareTrigger() {
+  validateRuntime();
+  preflightReady();
+  mkdirSync(runsDir, { recursive: true });
+
+  return withLock(() => {
+    if (!existsSync(activeRunPath)) {
+      log("No runner state needs recovery before launch");
+      return;
+    }
+
+    const currentID = readFileSync(activeRunPath, "utf8").trim();
+    const currentPath = statePath(currentID);
+    if (!existsSync(currentPath)) {
+      rmSync(activeRunPath, { force: true });
+      log(`Cleared stale active-run pointer ${currentID}`);
+      return;
+    }
+
+    const current = readJSON(currentPath);
+    const head = gitText(["rev-parse", "HEAD"]);
+    if (current.status === "running" && current.baseCommit === head) {
+      log(`Runner state ${currentID} is resumable at ${head}`);
+      return;
+    }
+    if (current.status === "running") {
+      current.status = "abandoned";
+      current.abandonedAt = new Date().toISOString();
+      current.abandonedReason =
+        `A new committed control release superseded ${current.baseCommit}`;
+      writeJSONAtomic(currentPath, current);
+      log(`Archived interrupted runner state ${currentID}`);
+    } else {
+      log(`Archived ${current.status} runner state ${currentID}`);
+    }
+    rmSync(activeRunPath, { force: true });
+  });
+}
+
 function initializeRun() {
   const backlog = validateRuntime();
   preflightReady();
@@ -1700,6 +1739,9 @@ async function main() {
     case "init-run":
       initializeRun();
       break;
+    case "prepare-trigger":
+      prepareTrigger();
+      break;
     case "execute-task":
       if (!argument) fail("Usage: swarmctl.mjs execute-task <task-id>");
       await executeTask(argument);
@@ -1720,7 +1762,7 @@ async function main() {
       break;
     default:
       fail(
-        "Usage: swarmctl.mjs <validate [--ready]|sandbox-smoke|create-manifest SHA DIRTY_COUNT|init-run|execute-task ID|integrate-wave N|finalize|status>",
+        "Usage: swarmctl.mjs <validate [--ready]|sandbox-smoke|create-manifest SHA DIRTY_COUNT|prepare-trigger|init-run|execute-task ID|integrate-wave N|finalize|status>",
       );
   }
 }

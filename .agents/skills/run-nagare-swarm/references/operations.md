@@ -44,7 +44,7 @@ The local UI is available at `http://127.0.0.1:18080` while the control plane is
 - A Nagare task timed out or the process crashed: inspect `status` and `logs`, then retrigger. Completed runner stages are idempotent.
 - An agent/check/reviewer failed: inspect the preserved worktree and `${SWARM_HOME}/runs/<run-id>/artifacts`. Fix the backlog or code only with explicit user authorization, pin a new release if control files changed, then retrigger.
 - Integration conflict: inspect the preserved integration worktree. Do not resolve by dropping tests or bypassing checks.
-- Wrong base commit: finish or cancel the old run before moving the primary checkout. The runner refuses to resume against a different `HEAD`.
+- Wrong base commit while a Nagare run is active: finish or cancel the old run before moving the primary checkout. Once Nagare reports no active run, `trigger` archives the superseded runner pointer and preserves its state and worktrees before starting from the new committed `HEAD`.
 - Stop scheduling: `scripts/nagare-swarm cancel RUN_ID`, followed by `scripts/nagare-swarm stop` if the control plane should also stop. Runner state and worktrees remain recoverable.
 
 The runner deliberately has no push, merge-to-main, tag, release, or deploy command.

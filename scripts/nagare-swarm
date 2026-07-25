@@ -349,6 +349,8 @@ trigger_swarm() {
     printf 'An architecture swarm DAG run is already active; refusing a duplicate trigger.\n' >&2
     exit 1
   fi
+  SWARM_HOME="$swarm_home" SWARM_REPO="$repo_root" SWARM_RELEASE="$(current_release)" CODEX_BIN="$codex_bin" \
+    node "$(current_release)/scripts/swarmctl.mjs" prepare-trigger
   nagare_cli trigger architecture_refactor_swarm
   rm -f "$swarm_home/api-key"
   printf 'Sealed the API key after launch; the authenticated UI session remains usable.\n'
