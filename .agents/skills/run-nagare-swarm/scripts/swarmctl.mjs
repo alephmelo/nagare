@@ -88,6 +88,7 @@ const controlFileMappings = {
   "references/reviewer.schema.json":
     ".agents/skills/run-nagare-swarm/references/reviewer.schema.json",
 };
+let appleToolchainEnvironment;
 
 function log(message) {
   process.stdout.write(`[swarm] ${message}\n`);
@@ -981,6 +982,7 @@ function toolchainReadablePaths(cwd, extra = []) {
   return {
     goModCache,
     goRoot,
+    worktreeRoot,
     readable: [
       cwd,
       worktreeRoot,
@@ -1003,15 +1005,31 @@ function toolchainReadablePaths(cwd, extra = []) {
   };
 }
 
+function resolveAppleToolchainEnvironment(cwd) {
+  if (appleToolchainEnvironment) return appleToolchainEnvironment;
+  const lookup = (args) =>
+    run("/usr/bin/xcrun", args, { cwd }).stdout.trim();
+  appleToolchainEnvironment = {
+    CC: lookup(["--find", "clang"]),
+    CXX: lookup(["--find", "clang++"]),
+    SDKROOT: lookup(["--show-sdk-path"]),
+  };
+  for (const [name, path] of Object.entries(appleToolchainEnvironment)) {
+    if (!path || !existsSync(path)) {
+      fail(`Could not resolve the Apple toolchain path for ${name}`);
+    }
+  }
+  return appleToolchainEnvironment;
+}
+
 function checkSandbox(cwd, checkRoot) {
   if (process.platform !== "darwin") {
     fail(
       `No supported no-network check sandbox is configured for ${process.platform}`,
     );
   }
-  const { goModCache, goRoot, readable } = toolchainReadablePaths(cwd, [
-    checkRoot,
-  ]);
+  const { goModCache, goRoot, readable, worktreeRoot } =
+    toolchainReadablePaths(cwd, [checkRoot]);
   const filters = readable
     .map((path) => `(subpath ${seatbeltString(resolve(path))})`)
     .join(" ");
@@ -1023,7 +1041,7 @@ function checkSandbox(cwd, checkRoot) {
     '(allow network-inbound (local ip "localhost:*"))',
     '(allow network-outbound (remote ip "localhost:*"))',
     denyReadDataExcept(userHome, readable),
-    denyReadDataExcept(swarmHome, [cwd, checkRoot]),
+    denyReadDataExcept(swarmHome, [worktreeRoot, cwd, checkRoot]),
     "(deny file-write*)",
     `(allow file-read* ${filters})`,
     `(allow file-write* (literal "/dev/null") (subpath ${seatbeltString(resolve(cwd))}) (subpath ${seatbeltString(resolve(checkRoot))}))`,
@@ -1069,6 +1087,7 @@ function checkSandbox(cwd, checkRoot) {
     NEXT_FONT_GOOGLE_MOCKED_RESPONSES: nextFontMocks,
     NEXT_TELEMETRY_DISABLED: "1",
     xcrun_nocache: "1",
+    ...resolveAppleToolchainEnvironment(cwd),
   };
   return {
     command: "/usr/bin/sandbox-exec",
@@ -1633,6 +1652,25 @@ async function main() {
         }
       }
       {
+        mkdirSync(worktreesDir, { recursive: true });
+        const nestedWorktree = join(
+          worktreesDir,
+          `.sandbox-smoke-${process.pid}-${randomUUID()}`,
+        );
+        try {
+          git(["worktree", "add", "--detach", nestedWorktree, "HEAD"], repo);
+          await runCheck(
+            "cd web && test -r ../package.json",
+            nestedWorktree,
+          );
+        } finally {
+          if (existsSync(nestedWorktree)) {
+            git(["worktree", "remove", "--force", nestedWorktree], repo);
+          }
+          git(["worktree", "prune"], repo);
+        }
+      }
+      {
         const descendantMarker = join(
           repo,
           `.nagare-swarm-descendant-smoke-${process.pid}`,
@@ -1655,7 +1693,7 @@ async function main() {
           rmSync(descendantMarker, { force: true });
         }
       }
-      await runCheck("go test ./internal/config ./internal/cli", repo);
+      await runCheck("CGO_ENABLED=1 go test ./internal/...", repo);
       await runCheck("cd web && npm run test:ci && npm run build", repo);
       log("Validated the no-network check sandbox");
       break;
