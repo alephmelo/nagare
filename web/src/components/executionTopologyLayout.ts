@@ -13,12 +13,14 @@ export function layoutTopologyStages<T extends Node>(
     stage.flatMap((id, column) => {
       const node = byId.get(id);
       if (!node) return [];
-      return [{
-        ...node,
-        position: { x: column * (width + columnGap), y: row * (height + rowGap) },
-        targetPosition: Position.Top,
-        sourcePosition: Position.Bottom,
-      }];
+      return [
+        {
+          ...node,
+          position: { x: column * (width + columnGap), y: row * (height + rowGap) },
+          targetPosition: Position.Top,
+          sourcePosition: Position.Bottom,
+        },
+      ];
     })
   );
 }

@@ -129,7 +129,8 @@ export function projectExecutionTopology<T extends ExecutionRuntimeTask>(
   const remaining = new Set(nodes.map((node) => node.id));
   while (remaining.size) {
     let stage = [...remaining].filter((id) => incoming.get(id) === 0);
-    if (!stage.length) stage = [[...remaining].sort((a, b) => nodeOrder.get(a)! - nodeOrder.get(b)!)[0]];
+    if (!stage.length)
+      stage = [[...remaining].sort((a, b) => nodeOrder.get(a)! - nodeOrder.get(b)!)[0]];
     stage.sort((a, b) => nodeOrder.get(a)! - nodeOrder.get(b)!);
     stages.push(stage);
     for (const id of stage) {

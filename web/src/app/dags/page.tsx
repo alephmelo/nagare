@@ -518,11 +518,9 @@ function DagDetailsContent() {
         } catch {
           // Non-critical — the graph still works without the YAML
         }
-
       } catch (err) {
         console.error(err);
-        if (activeDagIDRef.current === id)
-          setError("Failed to load DAG schema from database.");
+        if (activeDagIDRef.current === id) setError("Failed to load DAG schema from database.");
       } finally {
         if (activeDagIDRef.current === id) setLoading(false);
       }
