@@ -33,7 +33,7 @@ scripts/nagare-swarm copy-api-key
 scripts/nagare-swarm trigger
 ```
 
-Nagare allows two wave-one implementation tasks to run concurrently. Integration is serialized. Later tasks start only after the preceding wave passes the full checks.
+Nagare allows up to two path-disjoint tasks in the same wave to run concurrently. Integration is serialized, and later tasks start only after every preceding wave passes the full checks.
 
 The local UI is available at `http://127.0.0.1:18080` while the control plane is running. Before triggering, run `scripts/nagare-swarm copy-api-key` and paste the copied value. Keep that authenticated browser session open to monitor workers after launch; CLI API commands are intentionally unavailable once the key is sealed.
 

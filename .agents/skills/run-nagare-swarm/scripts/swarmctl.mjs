@@ -2,6 +2,8 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
+  constants,
+  cpSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -12,7 +14,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -33,13 +34,7 @@ const backlogPath = existsSync(join(releaseDir, "backlog.json"))
   : join(repo, "swarm", "backlog.json");
 const schemaDir = existsSync(join(releaseDir, "references"))
   ? join(releaseDir, "references")
-  : join(
-      repo,
-      ".agents",
-      "skills",
-      "run-nagare-swarm",
-      "references",
-    );
+  : join(repo, ".agents", "skills", "run-nagare-swarm", "references");
 const runsDir = join(swarmHome, "runs");
 const worktreesDir = join(swarmHome, "worktrees");
 const activeRunPath = join(swarmHome, "active-run");
@@ -141,12 +136,7 @@ function beginTaskAttempt(taskState, baseCommit, lease) {
 }
 
 function sleep(milliseconds) {
-  Atomics.wait(
-    new Int32Array(new SharedArrayBuffer(4)),
-    0,
-    0,
-    milliseconds,
-  );
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
 async function terminateProcessGroup(pid) {
@@ -284,20 +274,40 @@ function leaseIsActive(lease) {
   );
 }
 
+function requireLowerWavesIntegrated(state, wave, subject) {
+  if (!Array.isArray(state.integratedWaves)) {
+    fail(`${subject}: run state has no integrated wave list`);
+  }
+  for (let lowerWave = 1; lowerWave < wave; lowerWave += 1) {
+    if (!state.integratedWaves.includes(lowerWave)) {
+      fail(`${subject}: lower wave ${lowerWave} is not integrated`);
+    }
+    const incompleteTask = state.taskSpecs.find(
+      (task) =>
+        task.wave === lowerWave &&
+        state.tasks[task.id]?.status !== "integrated",
+    );
+    if (incompleteTask) {
+      fail(
+        `${subject}: lower wave ${lowerWave} has non-integrated task ${incompleteTask.id}`,
+      );
+    }
+  }
+}
+
 function claimTask(taskID) {
   return withLock(() => {
     const runID = activeRunID();
     const state = readState(runID);
     const task = state.taskSpecs.find((candidate) => candidate.id === taskID);
     if (!task) fail(`Unknown task ${taskID}`);
+    requireLowerWavesIntegrated(state, task.wave, taskID);
     const taskState = state.tasks[taskID];
     if (["completed", "integrated"].includes(taskState.status)) {
       return { skip: true, status: taskState.status };
     }
     if (taskState.status === "running" && leaseIsActive(taskState.lease)) {
-      fail(
-        `${taskID}: already owned by live runner ${taskState.lease.owner}`,
-      );
+      fail(`${taskID}: already owned by live runner ${taskState.lease.owner}`);
     }
     for (const dependency of task.dependsOn) {
       if (state.tasks[dependency].status !== "integrated") {
@@ -343,6 +353,7 @@ function claimIntegration(wave) {
   return withLock(() => {
     const runID = activeRunID();
     const state = readState(runID);
+    requireLowerWavesIntegrated(state, wave, `wave ${wave}`);
     if (state.integratedWaves.includes(wave)) {
       return { skip: true };
     }
@@ -402,7 +413,9 @@ function claimFinalization() {
       .filter(([, task]) => task.status !== "integrated")
       .map(([id]) => id);
     if (incomplete.length > 0) {
-      fail(`Cannot finalize; tasks are not integrated: ${incomplete.join(", ")}`);
+      fail(
+        `Cannot finalize; tasks are not integrated: ${incomplete.join(", ")}`,
+      );
     }
     const lease = {
       owner: randomUUID(),
@@ -439,10 +452,19 @@ function pathIsOwned(path, ownedPaths) {
   );
 }
 
+function ownedPathsOverlap(left, right) {
+  const normalizedLeft = left.replace(/\/+$/, "");
+  const normalizedRight = right.replace(/\/+$/, "");
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.startsWith(`${normalizedRight}/`) ||
+    normalizedRight.startsWith(`${normalizedLeft}/`)
+  );
+}
+
 function isTestFile(path) {
   return (
-    /_test\.go$/.test(path) ||
-    /\.(test|spec)\.(js|jsx|ts|tsx)$/.test(path)
+    /_test\.go$/.test(path) || /\.(test|spec)\.(js|jsx|ts|tsx)$/.test(path)
   );
 }
 
@@ -509,6 +531,39 @@ function validateBacklog(backlog) {
     }
   }
 
+  const waves = [...new Set(backlog.tasks.map((task) => task.wave))].sort(
+    (left, right) => left - right,
+  );
+  for (let index = 0; index < waves.length; index += 1) {
+    const expectedWave = index + 1;
+    if (waves[index] !== expectedWave) {
+      fail(
+        `Backlog waves must be contiguous starting at 1; missing wave ${expectedWave}`,
+      );
+    }
+  }
+
+  for (let leftIndex = 0; leftIndex < backlog.tasks.length; leftIndex += 1) {
+    const leftTask = backlog.tasks[leftIndex];
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < backlog.tasks.length;
+      rightIndex += 1
+    ) {
+      const rightTask = backlog.tasks[rightIndex];
+      if (leftTask.wave !== rightTask.wave) continue;
+      for (const leftPath of leftTask.ownedPaths) {
+        for (const rightPath of rightTask.ownedPaths) {
+          if (ownedPathsOverlap(leftPath, rightPath)) {
+            fail(
+              `Tasks ${leftTask.id} and ${rightTask.id} have overlapping owned paths in wave ${leftTask.wave}: ${leftPath} and ${rightPath}`,
+            );
+          }
+        }
+      }
+    }
+  }
+
   for (const task of backlog.tasks) {
     for (const dependency of task.dependsOn) {
       if (!ids.has(dependency)) {
@@ -518,10 +573,202 @@ function validateBacklog(backlog) {
         (candidate) => candidate.id === dependency,
       );
       if (predecessor.wave >= task.wave) {
-        fail(
-          `Task ${task.id} must depend only on tasks from an earlier wave`,
-        );
+        fail(`Task ${task.id} must depend only on tasks from an earlier wave`);
       }
+    }
+  }
+}
+
+function parseYAMLScalar(value, context) {
+  const scalar = value.trim();
+  if (!scalar) fail(`${context} must not be empty`);
+  if (scalar.startsWith("'")) {
+    if (!scalar.endsWith("'") || scalar.length < 2) {
+      fail(`Could not parse ${context}`);
+    }
+    return scalar.slice(1, -1).replaceAll("''", "'");
+  }
+  if (scalar.startsWith('"')) {
+    try {
+      return JSON.parse(scalar);
+    } catch {
+      fail(`Could not parse ${context}`);
+    }
+  }
+  return scalar;
+}
+
+function parseInlineYAMLList(value, context) {
+  const list = value.trim();
+  if (list === "[]") return [];
+  if (!list.startsWith("[") || !list.endsWith("]")) {
+    fail(`Could not parse ${context}`);
+  }
+  return list
+    .slice(1, -1)
+    .split(",")
+    .map((item, index) => parseYAMLScalar(item, `${context}[${index}]`));
+}
+
+function parseSwarmDAG(dagText) {
+  const lines = dagText.split(/\r?\n/);
+  const tasksHeaders = lines
+    .map((line, index) => (/^tasks:\s*(?:#.*)?$/.test(line) ? index : -1))
+    .filter((index) => index >= 0);
+  if (tasksHeaders.length !== 1) {
+    fail("DAG must contain exactly one top-level tasks list");
+  }
+
+  const tasks = [];
+  let current = null;
+  let collectingDependencies = false;
+  for (let index = tasksHeaders[0] + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\S/.test(line) && !/^#/.test(line)) break;
+    if (/^\s*(?:#.*)?$/.test(line)) continue;
+
+    const taskStart = line.match(/^ {2}- id:\s*(.+?)\s*$/);
+    if (taskStart) {
+      if (current) tasks.push(current);
+      current = {
+        id: parseYAMLScalar(taskStart[1], `DAG task id at line ${index + 1}`),
+        type: null,
+        command: null,
+        dependsOn: [],
+        hasDependsOn: false,
+      };
+      collectingDependencies = false;
+      continue;
+    }
+    if (/^ {2}-\s+/.test(line)) {
+      fail(`Every DAG task must start with an id at line ${index + 1}`);
+    }
+    if (!current) {
+      fail(`Could not parse DAG tasks at line ${index + 1}`);
+    }
+
+    const dependency = line.match(/^ {6}-\s*(.+?)\s*$/);
+    if (dependency) {
+      if (!collectingDependencies) {
+        fail(`Unexpected DAG list item at line ${index + 1}`);
+      }
+      current.dependsOn.push(
+        parseYAMLScalar(dependency[1], `DAG dependency at line ${index + 1}`),
+      );
+      continue;
+    }
+
+    const property = line.match(/^ {4}([a-zA-Z0-9_]+):(?:\s*(.*))?$/);
+    if (!property) {
+      if (collectingDependencies) {
+        fail(`Could not parse DAG dependencies at line ${index + 1}`);
+      }
+      continue;
+    }
+    collectingDependencies = false;
+    const [, key, rawValue = ""] = property;
+    if (key === "id") {
+      fail(`DAG task ${current.id} declares id more than once`);
+    }
+    if (key === "type" || key === "command") {
+      if (current[key] !== null) {
+        fail(`DAG task ${current.id} declares ${key} more than once`);
+      }
+      current[key] = parseYAMLScalar(rawValue, `DAG task ${current.id}.${key}`);
+    } else if (key === "depends_on") {
+      if (current.hasDependsOn) {
+        fail(`DAG task ${current.id} declares depends_on more than once`);
+      }
+      current.hasDependsOn = true;
+      if (rawValue.trim()) {
+        current.dependsOn = parseInlineYAMLList(
+          rawValue,
+          `DAG task ${current.id}.depends_on`,
+        );
+      } else {
+        collectingDependencies = true;
+      }
+    }
+  }
+  if (current) tasks.push(current);
+  if (tasks.length === 0) fail("DAG tasks must be a non-empty list");
+  return tasks;
+}
+
+function validateDAGTopology(dagText, backlog) {
+  const dagTasks = parseSwarmDAG(dagText);
+  const expected = new Map();
+  const commandPrefix = 'node "$SWARM_RELEASE/scripts/swarmctl.mjs"';
+  const addExpected = (id, task) => {
+    if (expected.has(id)) {
+      fail(`Backlog task IDs collide at DAG task id ${id}`);
+    }
+    expected.set(id, task);
+  };
+  addExpected("initialize", {
+    command: `${commandPrefix} init-run`,
+    dependsOn: [],
+  });
+
+  const waves = [...new Set(backlog.tasks.map((task) => task.wave))].sort(
+    (left, right) => left - right,
+  );
+  for (const wave of waves) {
+    const waveTasks = backlog.tasks.filter((task) => task.wave === wave);
+    const priorBarrier =
+      wave === 1 ? "initialize" : `integrate_wave_${wave - 1}`;
+    for (const task of waveTasks) {
+      const dagTaskID = task.id.replaceAll("-", "_");
+      addExpected(dagTaskID, {
+        command: `${commandPrefix} execute-task ${task.id}`,
+        dependsOn: [priorBarrier],
+      });
+    }
+    addExpected(`integrate_wave_${wave}`, {
+      command: `${commandPrefix} integrate-wave ${wave}`,
+      dependsOn: waveTasks.map((task) => task.id.replaceAll("-", "_")),
+    });
+  }
+  addExpected("finalize", {
+    command: `${commandPrefix} finalize`,
+    dependsOn: [`integrate_wave_${waves.at(-1)}`],
+  });
+
+  const actual = new Map();
+  for (const task of dagTasks) {
+    if (actual.has(task.id)) fail(`DAG has duplicate task id ${task.id}`);
+    actual.set(task.id, task);
+  }
+  const missing = [...expected.keys()].filter((id) => !actual.has(id));
+  const unexpected = [...actual.keys()].filter((id) => !expected.has(id));
+  if (missing.length > 0 || unexpected.length > 0) {
+    fail(
+      `DAG task set does not match backlog and integration barriers` +
+        `${missing.length > 0 ? `; missing: ${missing.join(", ")}` : ""}` +
+        `${unexpected.length > 0 ? `; unexpected: ${unexpected.join(", ")}` : ""}`,
+    );
+  }
+
+  for (const [id, expectedTask] of expected) {
+    const actualTask = actual.get(id);
+    if (actualTask.type !== "command") {
+      fail(`DAG task ${id} must have type command`);
+    }
+    if (actualTask.command !== expectedTask.command) {
+      fail(`DAG task ${id} has an unexpected command`);
+    }
+    const actualDependencies = new Set(actualTask.dependsOn);
+    const expectedDependencies = new Set(expectedTask.dependsOn);
+    if (
+      actualDependencies.size !== actualTask.dependsOn.length ||
+      actualDependencies.size !== expectedDependencies.size ||
+      [...expectedDependencies].some(
+        (dependency) => !actualDependencies.has(dependency),
+      )
+    ) {
+      fail(
+        `DAG task ${id} must depend exactly on: ${expectedTask.dependsOn.join(", ") || "(none)"}`,
+      );
     }
   }
 }
@@ -593,12 +840,7 @@ function validateRuntime() {
     ? runtimeDAG
     : join(repo, "swarm", "dags", "architecture-swarm.yaml");
   if (!existsSync(dag)) fail(`Missing runtime DAG: ${dag}`);
-  for (const task of backlog.tasks) {
-    const dagText = readFileSync(dag, "utf8");
-    if (!dagText.includes(`execute-task ${task.id}`)) {
-      fail(`DAG does not execute backlog task ${task.id}`);
-    }
-  }
+  validateDAGTopology(readFileSync(dag, "utf8"), backlog);
   validateManifest();
   return backlog;
 }
@@ -657,9 +899,7 @@ function preflightReady() {
       `Pinned binary source ${manifest.sourceCommit} is not an ancestor of the current HEAD`,
     );
   }
-  for (const [runtimePath, sourcePath] of Object.entries(
-    controlFileMappings,
-  )) {
+  for (const [runtimePath, sourcePath] of Object.entries(controlFileMappings)) {
     if (
       sha256File(join(releaseDir, runtimePath)) !==
       sha256File(join(repo, sourcePath))
@@ -713,8 +953,7 @@ function prepareTrigger() {
     if (current.status === "running") {
       current.status = "abandoned";
       current.abandonedAt = new Date().toISOString();
-      current.abandonedReason =
-        `A new committed control release superseded ${current.baseCommit}`;
+      current.abandonedReason = `A new committed control release superseded ${current.baseCommit}`;
       writeJSONAtomic(currentPath, current);
       log(`Archived interrupted runner state ${currentID}`);
     } else {
@@ -832,17 +1071,13 @@ function freezeTests(cwd, paths) {
 
 function validateScope(cwd, task, frozenTests = {}) {
   const changed = changedPaths(cwd);
-  const outside = changed.filter(
-    (path) => !pathIsOwned(path, task.ownedPaths),
-  );
+  const outside = changed.filter((path) => !pathIsOwned(path, task.ownedPaths));
   if (outside.length > 0) {
     fail(
       `Task ${task.id} changed files outside its owned paths: ${outside.join(", ")}`,
     );
   }
-  const dependencyChanges = changed.filter((path) =>
-    dependencyFiles.has(path),
-  );
+  const dependencyChanges = changed.filter((path) => dependencyFiles.has(path));
   if (dependencyChanges.length > 0 && !task.allowDependencies) {
     fail(
       `Task ${task.id} changed unapproved dependency files: ${dependencyChanges.join(", ")}`,
@@ -870,7 +1105,12 @@ function makeWorktree(runID, name, baseCommit, attempt) {
   const sharedModules = join(repo, "web", "node_modules");
   const worktreeModules = join(path, "web", "node_modules");
   if (existsSync(sharedModules) && !existsSync(worktreeModules)) {
-    symlinkSync(sharedModules, worktreeModules, "dir");
+    cpSync(sharedModules, worktreeModules, {
+      recursive: true,
+      mode: constants.COPYFILE_FICLONE,
+      dereference: false,
+      verbatimSymlinks: true,
+    });
   }
   return path;
 }
@@ -1067,9 +1307,7 @@ function denyReadDataExcept(root, allowedPaths, includeAncestors = true) {
     if (!includeAncestors) continue;
     while (current !== absoluteRoot) {
       current = dirname(current);
-      exceptions.push(
-        `(require-not (literal ${seatbeltString(current)}))`,
-      );
+      exceptions.push(`(require-not (literal ${seatbeltString(current)}))`);
     }
   }
   return `(deny file-read-data (require-all (subpath ${seatbeltString(absoluteRoot)}) ${[...new Set(exceptions)].join(" ")}))`;
@@ -1095,12 +1333,10 @@ function processIsolationRules(allowSelfControl = false) {
 
 function toolchainReadablePaths(cwd, extra = []) {
   const worktreeRoot = gitText(["rev-parse", "--show-toplevel"], cwd);
-  const goEnvironment = run(
-    "go",
-    ["env", "GOMODCACHE", "GOPATH", "GOROOT"],
-    { cwd },
-  ).stdout
-    .trim()
+  const goEnvironment = run("go", ["env", "GOMODCACHE", "GOPATH", "GOROOT"], {
+    cwd,
+  })
+    .stdout.trim()
     .split("\n");
   const [goModCache, , goRoot] = goEnvironment;
   return {
@@ -1131,8 +1367,7 @@ function toolchainReadablePaths(cwd, extra = []) {
 
 function resolveAppleToolchainEnvironment(cwd) {
   if (appleToolchainEnvironment) return appleToolchainEnvironment;
-  const lookup = (args) =>
-    run("/usr/bin/xcrun", args, { cwd }).stdout.trim();
+  const lookup = (args) => run("/usr/bin/xcrun", args, { cwd }).stdout.trim();
   appleToolchainEnvironment = {
     CC: lookup(["--find", "clang"]),
     CXX: lookup(["--find", "clang++"]),
@@ -1152,8 +1387,10 @@ function checkSandbox(cwd, checkRoot) {
       `No supported no-network check sandbox is configured for ${process.platform}`,
     );
   }
-  const { goModCache, goRoot, readable, worktreeRoot } =
-    toolchainReadablePaths(cwd, [checkRoot]);
+  const { goModCache, goRoot, readable, worktreeRoot } = toolchainReadablePaths(
+    cwd,
+    [checkRoot],
+  );
   const filters = readable
     .map((path) => `(subpath ${seatbeltString(resolve(path))})`)
     .join(" ");
@@ -1245,9 +1482,7 @@ function changeFingerprint(cwd) {
 async function runCheck(command, cwd, allowFailure = false) {
   log(`sandboxed check: ${command}`);
   const originalCwd = cwd;
-  const directoryPrefix = command.match(
-    /^cd ([A-Za-z0-9._/-]+) && ([\s\S]+)$/,
-  );
+  const directoryPrefix = command.match(/^cd ([A-Za-z0-9._/-]+) && ([\s\S]+)$/);
   if (directoryPrefix) {
     if (!isSafeRelativePath(directoryPrefix[1])) {
       fail(`Check uses an unsafe working directory: ${command}`);
@@ -1402,14 +1637,7 @@ async function executeTask(taskID) {
     log(`${taskID}: already ${claim.status}`);
     return;
   }
-  const {
-    initial,
-    task,
-    attempt,
-    baseCommit,
-    previousFailure,
-    lease,
-  } = claim;
+  const { initial, task, attempt, baseCommit, previousFailure, lease } = claim;
   let worktree;
 
   try {
@@ -1540,7 +1768,9 @@ The new tests must express the intended boundary behavior and must cause at leas
       let review = {
         verdict: "FAIL",
         summary: "Targeted checks failed before review.",
-        blockingIssues: [checkError?.message || "Unknown targeted-check failure"],
+        blockingIssues: [
+          checkError?.message || "Unknown targeted-check failure",
+        ],
         checks: task.checks,
       };
       if (!checkError) {
@@ -1559,7 +1789,9 @@ ${task.nonGoals.map((item) => `- ${item}`).join("\n")}
 Owned paths:
 ${task.ownedPaths.map((item) => `- ${item}`).join("\n")}
 Frozen tests:
-${Object.keys(allFrozen).map((item) => `- ${item}`).join("\n")}
+${Object.keys(allFrozen)
+  .map((item) => `- ${item}`)
+  .join("\n")}
 Checks already passed:
 ${task.checks.map((item) => `- ${item}`).join("\n")}
 Implementation report:
@@ -1643,10 +1875,11 @@ async function integrateWave(wave) {
   }
   const { initial, tasks, lease } = claim;
 
-  const attempt = readdirSync(join(worktreesDir, initial.runID), {
-    withFileTypes: true,
-  }).filter((entry) => entry.name.startsWith(`integration-wave-${wave}-`))
-    .length + 1;
+  const attempt =
+    readdirSync(join(worktreesDir, initial.runID), {
+      withFileTypes: true,
+    }).filter((entry) => entry.name.startsWith(`integration-wave-${wave}-`))
+      .length + 1;
   const worktree = makeWorktree(
     initial.runID,
     `integration-wave-${wave}`,
@@ -1727,7 +1960,9 @@ function finalize() {
     state.finalizeLease = null;
   });
   log(`Finalized local branch ${branch} at ${initial.integrationHead}`);
-  log("No push, pull request, tag, deployment, or primary-checkout change occurred.");
+  log(
+    "No push, pull request, tag, deployment, or primary-checkout change occurred.",
+  );
 }
 
 function status() {
@@ -1829,7 +2064,9 @@ async function main() {
             !retry.previousFailure.includes("second persisted failure") ||
             !retry.previousFailure.includes("first persisted failure")
           ) {
-            fail("Persisted retries did not retain cumulative failure evidence");
+            fail(
+              "Persisted retries did not retain cumulative failure evidence",
+            );
           }
         } finally {
           rmSync(retryStatePath, { force: true });
@@ -1871,10 +2108,7 @@ async function main() {
             10,
           );
           if (processIsAlive(daemonPID)) {
-            await runCheck(
-              `! kill -0 ${daemonPID} >/dev/null 2>&1`,
-              repo,
-            );
+            await runCheck(`! kill -0 ${daemonPID} >/dev/null 2>&1`, repo);
           }
         }
       }
@@ -1920,18 +2154,12 @@ async function main() {
             `${readFileSync(trackedAbsolute, "utf8")}\n`,
           );
           const observedPaths = changedPaths(nestedWorktree);
-          if (
-            observedPaths.length !== 1 ||
-            observedPaths[0] !== trackedPath
-          ) {
+          if (observedPaths.length !== 1 || observedPaths[0] !== trackedPath) {
             fail(
               `Git scope parser returned ${JSON.stringify(observedPaths)} instead of ${trackedPath}`,
             );
           }
-          await runCheck(
-            "cd web && test -r ../package.json",
-            nestedWorktree,
-          );
+          await runCheck("cd web && test -r ../package.json", nestedWorktree);
         } finally {
           if (existsSync(nestedWorktree)) {
             git(["worktree", "remove", "--force", nestedWorktree], repo);
@@ -1956,7 +2184,9 @@ async function main() {
             setTimeout(resolvePromise, 1_250),
           );
           if (existsSync(descendantMarker)) {
-            fail("A sandboxed background descendant escaped process-group cleanup");
+            fail(
+              "A sandboxed background descendant escaped process-group cleanup",
+            );
           }
         } finally {
           rmSync(descendantMarker, { force: true });
