@@ -21,7 +21,9 @@
       "acceptance": [
         "A queued task attempt can be claimed at most once under concurrent local and remote workers.",
         "Local and remote execution apply the same retry and terminal-state rules.",
+        "The scheduler delegates retry, cancellation, and terminal transitions to the same lifecycle policy as local and remote workers.",
         "Cancelling a logical task resolves and cancels its current attempt without duplicating terminal metrics or logs.",
+        "A remote cancellation acknowledgement is idempotent and still releases worker accounting and log resources.",
         "Invalid lifecycle transitions fail explicitly and leave persisted state unchanged.",
         "Lifecycle behavior is covered at the new module boundary."
       ],
@@ -34,6 +36,7 @@
         "internal/tasklifecycle/",
         "internal/worker/",
         "internal/cluster/",
+        "internal/scheduler/",
         "internal/api/server.go",
         "internal/models/store.go",
         "main.go"
@@ -50,7 +53,10 @@
       "architecture": "Make topology derivation a pure frontend module. Pages provide definitions and statuses; the projection owns fan-out grouping, fan-in edges, stage order, stable node identity, and status overlays.",
       "acceptance": [
         "Mapped tasks and their fan-in and fan-out relationships produce deterministic stages and edges.",
+        "Map-source relationships participate in staging and edges even when they are not duplicated in depends-on.",
         "Equivalent DAG and run inputs produce the same topology semantics on both screens.",
+        "Definition nodes remain visible for empty runs, runtime-only tasks remain inspectable, and stale runtime overlays clear when no run is selected.",
+        "Both screens consume projected stage order while preserving existing pending, running, success, and failure visual conventions.",
         "Updating statuses without changing structure preserves node identity and layout order.",
         "Pure projection tests cover ordinary tasks, static fan-out, dynamic map children, and joins."
       ],

@@ -270,9 +270,11 @@ function claimTask(taskID) {
       expiresAt: new Date(Date.now() + 7 * 60 * 60_000).toISOString(),
     };
     const attempt = taskState.attempts + 1;
+    const previousFailure = taskState.error || taskState.previousFailure || null;
     taskState.status = "running";
     taskState.attempts = attempt;
     taskState.baseCommit = state.integrationHead;
+    taskState.previousFailure = previousFailure;
     taskState.error = null;
     taskState.lease = lease;
     state.updatedAt = new Date().toISOString();
@@ -283,6 +285,7 @@ function claimTask(taskID) {
       task,
       attempt,
       baseCommit: state.integrationHead,
+      previousFailure,
       lease,
     };
   });
@@ -720,6 +723,7 @@ function initializeRun() {
           implementationCommit: null,
           worktree: null,
           error: null,
+          previousFailure: null,
           lease: null,
         },
       ]),
@@ -863,6 +867,14 @@ function tomlInlineTable(values) {
     .join(",")}}`;
 }
 
+function writeAgentShellProfile(shellHome) {
+  writeFileSync(
+    join(shellHome, ".zprofile"),
+    `export PATH=${shellString(safeCommandPath)}\n`,
+    { mode: 0o600 },
+  );
+}
+
 async function runCodex({
   role,
   cwd,
@@ -890,15 +902,19 @@ async function runCodex({
   ]) {
     mkdirSync(path, { recursive: true });
   }
+  writeAgentShellProfile(shellHome);
   const { goModCache, goRoot } = toolchainReadablePaths(cwd);
   const shellEnvironment = tomlInlineTable({
     PATH: safeCommandPath,
     HOME: shellHome,
     TMPDIR: shellTemp,
+    ZDOTDIR: shellHome,
     GOCACHE: shellGoCache,
     GOMODCACHE: goModCache,
     GOPATH: shellGoPath,
     GOROOT: goRoot,
+    GOENV: "off",
+    GOTOOLCHAIN: "local",
     npm_config_cache: shellNpmCache,
     USER: "nagare-swarm",
     LOGNAME: "nagare-swarm",
@@ -1289,7 +1305,7 @@ function commitAll(cwd, message) {
   return gitText(["rev-parse", "HEAD"], cwd);
 }
 
-function taskPrompt(task, plan, frozenPaths = []) {
+function taskPrompt(task, plan, frozenPaths = [], previousFailure = null) {
   return `
 You are the implementation agent for one bounded Nagare architecture task.
 
@@ -1312,10 +1328,13 @@ ${task.checks.map((item) => `- ${item}`).join("\n")}
 Planner result:
 ${JSON.stringify(plan, null, 2)}
 
+Prior attempt failure:
+${previousFailure || "- None; this is the first attempt."}
+
 Frozen tests (never edit, move, or delete):
 ${frozenPaths.map((item) => `- ${item}`).join("\n")}
 
-Implement the smallest complete solution. Do not change dependency manifests, git state, frozen tests, or files outside the owned paths. Do not commit, push, tag, publish, or spawn other agents. Return the required JSON summary.
+Implement the smallest complete solution. When prior-attempt findings are present, treat them as required regression context. Do not change dependency manifests, git state, frozen tests, or files outside the owned paths. Do not commit, push, tag, publish, or spawn other agents. Return the required JSON summary.
 `.trim();
 }
 
@@ -1325,7 +1344,14 @@ async function executeTask(taskID) {
     log(`${taskID}: already ${claim.status}`);
     return;
   }
-  const { initial, task, attempt, baseCommit, lease } = claim;
+  const {
+    initial,
+    task,
+    attempt,
+    baseCommit,
+    previousFailure,
+    lease,
+  } = claim;
   let worktree;
 
   try {
@@ -1367,6 +1393,9 @@ ${task.ownedPaths.map((item) => `- ${item}`).join("\n")}
 Required checks:
 ${task.checks.map((item) => `- ${item}`).join("\n")}
 
+Prior attempt failure:
+${previousFailure || "- None; this is the first attempt."}
+
 Inspect the current code, identify the narrowest viable seam, and return the required JSON plan. Do not edit, commit, or spawn other agents.
 `.trim(),
       schema: join(schemaDir, "planner.schema.json"),
@@ -1392,6 +1421,9 @@ Targeted checks:
 ${task.checks.map((item) => `- ${item}`).join("\n")}
 Planner:
 ${JSON.stringify(planner, null, 2)}
+
+Prior attempt failure:
+${previousFailure || "- None; this is the first attempt."}
 
 The new tests must express the intended boundary behavior and must cause at least one targeted check to fail on the current baseline for the intended reason. Do not edit production code, existing tests, dependency manifests, or git state. Do not commit or spawn other agents. Return the required JSON summary.
 `.trim(),
@@ -1423,7 +1455,12 @@ The new tests must express the intended boundary behavior and must cause at leas
     let implementation = await runCodex({
       role: "implementer",
       cwd: worktree,
-      prompt: taskPrompt(task, planner, Object.keys(allFrozen)),
+      prompt: taskPrompt(
+        task,
+        planner,
+        Object.keys(allFrozen),
+        previousFailure,
+      ),
       schema: join(schemaDir, "agent.schema.json"),
       artifact: join(artifacts, "implementation.json"),
       sandbox: "workspace-write",
@@ -1495,7 +1532,7 @@ Repair the bounded implementation for ${task.id}.
 Blocking findings:
 ${review.blockingIssues.map((item) => `- ${item}`).join("\n")}
 
-${taskPrompt(task, planner, Object.keys(allFrozen))}
+${taskPrompt(task, planner, Object.keys(allFrozen), previousFailure)}
 
 Address only the blocking findings. Do not broaden scope, edit frozen tests, change dependencies, or modify git state.
 `.trim(),
@@ -1718,6 +1755,33 @@ async function main() {
               repo,
             );
           }
+        }
+      }
+      {
+        const shellSmokeRoot = mkdtempSync(
+          "/private/tmp/nagare-swarm-shell-smoke-",
+        );
+        try {
+          writeAgentShellProfile(shellSmokeRoot);
+          const shellEnvironment = {
+            ...process.env,
+            HOME: shellSmokeRoot,
+            ZDOTDIR: shellSmokeRoot,
+            PATH: safeCommandPath,
+          };
+          const expectedGo = run("/usr/bin/which", ["go"], {
+            env: shellEnvironment,
+          }).stdout.trim();
+          const observedGo = run("/bin/zsh", ["-lc", "command -v go"], {
+            env: shellEnvironment,
+          }).stdout.trim();
+          if (observedGo !== expectedGo) {
+            fail(
+              `Agent login shell selected ${observedGo} instead of ${expectedGo}`,
+            );
+          }
+        } finally {
+          rmSync(shellSmokeRoot, { recursive: true, force: true });
         }
       }
       {
