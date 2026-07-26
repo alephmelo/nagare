@@ -441,7 +441,7 @@ func (s *Scheduler) RetryTaskAutomatically(expected models.TaskInstance, retryDe
 		return nil
 	}
 
-	pendingSuccessor, err := s.retryUsesPendingSuccessor(expected)
+	pendingSuccessor, err := s.retryUsesPendingSuccessor(*persisted)
 	if err != nil {
 		return fmt.Errorf("resolve automatic retry kind for task %s: %w", expected.TaskID, err)
 	}
@@ -514,6 +514,7 @@ func (s *Scheduler) retryUsesPendingSuccessor(current models.TaskInstance) (bool
 			return def.Type == "map", nil
 		}
 		if current.TaskID != models.BaseTaskID(current.TaskID) &&
+			current.ItemValue != nil &&
 			s.isStoredMapChild(dag, current.TaskID) {
 			return false, nil
 		}
@@ -522,15 +523,16 @@ func (s *Scheduler) retryUsesPendingSuccessor(current models.TaskInstance) (bool
 		}
 	}
 
-	if current.TaskID != models.BaseTaskID(current.TaskID) {
-		return false, nil
-	}
 	provedMapParent, err := s.hasDurableMapSetupHistory(current)
 	if err != nil {
 		return false, err
 	}
 	if provedMapParent {
 		return true, nil
+	}
+	if current.TaskID != models.BaseTaskID(current.TaskID) &&
+		current.ItemValue != nil {
+		return false, nil
 	}
 	return false, &RetryKindUnresolvedError{
 		RunID: current.RunID, TaskID: current.TaskID,

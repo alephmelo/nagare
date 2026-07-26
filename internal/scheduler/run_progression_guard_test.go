@@ -231,6 +231,8 @@ func TestRetryKindUsesExactDefinitionThenDurableMissingDAGProof(t *testing.T) {
 
 	child := current
 	child.TaskID = "map[0]"
+	item := ""
+	child.ItemValue = &item
 	pending, err = sched.retryUsesPendingSuccessor(child)
 	if err != nil || pending {
 		t.Fatalf("missing-DAG mapped-child retry kind = (%v, %v), want ordinary", pending, err)
@@ -240,11 +242,20 @@ func TestRetryKindUsesExactDefinitionThenDurableMissingDAGProof(t *testing.T) {
 		ID: "dag",
 		Tasks: []models.TaskDef{{
 			ID: "map", Type: "map", MapOver: "source",
+		}, {
+			ID: "literal[0]", Type: "command",
 		}},
 	}
 	pending, err = sched.retryUsesPendingSuccessor(child)
 	if err != nil || pending {
 		t.Fatalf("loaded-DAG mapped-child retry kind = (%v, %v), want ordinary", pending, err)
+	}
+	exactBracket := current
+	exactBracket.TaskID = "literal[0]"
+	exactBracket.ItemValue = nil
+	pending, err = sched.retryUsesPendingSuccessor(exactBracket)
+	if err != nil || pending {
+		t.Fatalf("loaded-DAG exact bracket retry kind = (%v, %v), want ordinary", pending, err)
 	}
 }
 
@@ -309,10 +320,11 @@ func TestAutomaticRetryMissingDAGRecognizesStoredMappedChild(t *testing.T) {
 	store := openControlStore(t, t.TempDir()+"/retry-kind-mapped-child.db")
 	now := time.Now().UTC()
 	createControlRun(t, store, "run-1", models.RunRunning, now)
+	item := ""
 	child := models.TaskInstance{
 		ID: "child-1", RunID: "run-1", TaskID: "map[0]@g2",
 		Status: models.TaskUpForRetry, Attempt: 1,
-		CreatedAt: now, UpdatedAt: now,
+		ItemValue: &item, CreatedAt: now, UpdatedAt: now,
 	}
 	createControlAttempt(t, store, child)
 
@@ -321,8 +333,65 @@ func TestAutomaticRetryMissingDAGRecognizesStoredMappedChild(t *testing.T) {
 	}
 	attempts, err := store.GetTaskAttempts("run-1", child.TaskID)
 	if err != nil || len(attempts) != 2 ||
-		attempts[1].Status != models.TaskQueued {
+		attempts[1].Status != models.TaskQueued ||
+		attempts[1].ItemValue == nil || *attempts[1].ItemValue != "" {
 		t.Fatalf("attempts = %#v, %v, want one queued mapped-child successor", attempts, err)
+	}
+}
+
+func TestAutomaticRetryMissingDAGUsesSetupBeforeNumericBracketSyntax(t *testing.T) {
+	store := openControlStore(t, t.TempDir()+"/retry-kind-bracket-map-parent.db")
+	now := time.Now().UTC()
+	createControlRun(t, store, "run-1", models.RunRunning, now)
+	parent := models.TaskInstance{
+		ID: "parent-1", RunID: "run-1", TaskID: "map[0]",
+		Status: models.TaskUpForRetry, Attempt: 1,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	createControlAttempt(t, store, parent)
+	if _, _, err := store.EnsureMapSetup(models.MapSetup{
+		ParentAttemptID:   parent.ID,
+		UpstreamAttemptID: parent.ID,
+		UpstreamOutput:    "[]",
+		StartedAt:         now,
+	}); err != nil {
+		t.Fatalf("EnsureMapSetup: %v", err)
+	}
+
+	if err := NewScheduler(store).RetryTaskAutomatically(parent, 0, now); err != nil {
+		t.Fatalf("RetryTaskAutomatically: %v", err)
+	}
+	attempts, err := store.GetTaskAttempts("run-1", parent.TaskID)
+	if err != nil || len(attempts) != 2 ||
+		attempts[1].Status != models.TaskPending {
+		t.Fatalf("attempts = %#v, %v, want one pending map-parent successor", attempts, err)
+	}
+}
+
+func TestAutomaticRetryMissingDAGRejectsAmbiguousNumericBracketTask(t *testing.T) {
+	store := openControlStore(t, t.TempDir()+"/retry-kind-bracket-ambiguous.db")
+	now := time.Now().UTC()
+	createControlRun(t, store, "run-1", models.RunRunning, now)
+	persisted := models.TaskInstance{
+		ID: "ambiguous-1", RunID: "run-1", TaskID: "foo[0]",
+		Status: models.TaskUpForRetry, Attempt: 1,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	createControlAttempt(t, store, persisted)
+
+	// A caller-provided item cannot substitute for a durable item binding.
+	spoofedItem := "not persisted"
+	observed := persisted
+	observed.ItemValue = &spoofedItem
+	err := NewScheduler(store).RetryTaskAutomatically(observed, 0, now)
+	var unresolved *RetryKindUnresolvedError
+	if !errors.As(err, &unresolved) {
+		t.Fatalf("RetryTaskAutomatically error = %v, want RetryKindUnresolvedError", err)
+	}
+	attempts, loadErr := store.GetTaskAttempts("run-1", persisted.TaskID)
+	if loadErr != nil || len(attempts) != 1 ||
+		attempts[0].Status != models.TaskUpForRetry {
+		t.Fatalf("attempts = %#v, %v, want no successor", attempts, loadErr)
 	}
 }
 
