@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -168,6 +169,17 @@ const (
 	GuardedTaskPromotionAlreadyApplied
 	GuardedTaskPromotionStale
 	GuardedTaskPromotionInvalid
+)
+
+// GuardedTaskSetupResult uses the same classification contract for atomic
+// scheduler-owned setup transitions.
+type GuardedTaskSetupResult = GuardedTaskPromotionResult
+
+const (
+	GuardedTaskSetupApplied        GuardedTaskSetupResult = GuardedTaskPromotionApplied
+	GuardedTaskSetupAlreadyApplied GuardedTaskSetupResult = GuardedTaskPromotionAlreadyApplied
+	GuardedTaskSetupStale          GuardedTaskSetupResult = GuardedTaskPromotionStale
+	GuardedTaskSetupInvalid        GuardedTaskSetupResult = GuardedTaskPromotionInvalid
 )
 
 func (r GuardedTaskPromotionResult) String() string {
@@ -492,38 +504,14 @@ func (s *Store) PromoteTaskAttemptForRunSnapshot(
 	}
 	defer finish(&err)
 
-	var currentRunStatus RunStatus
-	if err = conn.QueryRowContext(
-		context.Background(),
-		`SELECT status FROM dag_runs WHERE id = ?`,
-		runID,
-	).Scan(&currentRunStatus); err != nil {
-		return 0, err
-	}
-	if currentRunStatus != observedRunStatus {
-		return GuardedTaskPromotionStale, nil
-	}
-
-	currentTasks, err := getLatestTaskAttemptsOn(conn, runID)
+	target, classification, err := guardedSnapshotTaskOn(
+		conn, runID, attemptID, observedRunStatus, observedTasks,
+	)
 	if err != nil {
 		return 0, err
 	}
-	if !sameTaskAttemptSnapshot(runID, observedTasks, currentTasks) {
-		return GuardedTaskPromotionStale, nil
-	}
-	if observedRunStatus != RunRunning {
-		return GuardedTaskPromotionInvalid, nil
-	}
-
-	var target *TaskInstance
-	for i := range currentTasks {
-		if currentTasks[i].ID == attemptID {
-			target = &currentTasks[i]
-			break
-		}
-	}
-	if target == nil {
-		return GuardedTaskPromotionInvalid, nil
+	if classification != 0 {
+		return classification, nil
 	}
 	switch target.Status {
 	case TaskQueued:
@@ -547,6 +535,159 @@ func (s *Store) PromoteTaskAttemptForRunSnapshot(
 		return GuardedTaskPromotionStale, nil
 	}
 	return GuardedTaskPromotionApplied, nil
+}
+
+// StartMapSetupForRunSnapshot atomically persists or verifies a map binding,
+// verifies a running run and its complete latest-attempt snapshot, and takes
+// scheduler setup ownership of one exact current pending or queued attempt. A
+// running attempt is an exact replay only when both its persisted binding and
+// ownership watermark match setup.
+func (s *Store) StartMapSetupForRunSnapshot(
+	runID, attemptID string,
+	observedRunStatus RunStatus,
+	observedTasks []TaskInstance,
+	setup MapSetup,
+) (_ GuardedTaskSetupResult, err error) {
+	if setup.ParentAttemptID != attemptID {
+		return GuardedTaskSetupInvalid, nil
+	}
+
+	conn, finish, err := s.beginImmediate()
+	if err != nil {
+		return 0, err
+	}
+	defer finish(&err)
+
+	target, classification, err := guardedSnapshotTaskOn(
+		conn, runID, attemptID, observedRunStatus, observedTasks,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if classification != 0 {
+		return classification, nil
+	}
+
+	persistedSetup, setupErr := getMapSetupOn(conn, attemptID)
+	switch target.Status {
+	case TaskRunning:
+		if setupErr == nil && sameMapSetup(persistedSetup, setup) &&
+			target.StartedAt != nil && target.StartedAt.Equal(setup.StartedAt) {
+			return GuardedTaskSetupAlreadyApplied, nil
+		}
+		if setupErr != nil && !errors.Is(setupErr, sql.ErrNoRows) {
+			return 0, setupErr
+		}
+		return GuardedTaskSetupInvalid, nil
+	case TaskPending, TaskQueued:
+	default:
+		return GuardedTaskSetupInvalid, nil
+	}
+
+	switch {
+	case setupErr == nil:
+		if !sameMapSetup(persistedSetup, setup) {
+			return GuardedTaskSetupInvalid, nil
+		}
+	case errors.Is(setupErr, sql.ErrNoRows):
+		if err = insertMapSetupOn(conn, setup); err != nil {
+			return 0, err
+		}
+	default:
+		return 0, setupErr
+	}
+
+	startedAt := setup.StartedAt.UTC()
+	applied, err := compareAndSetTaskAttemptForRunStatusOn(
+		conn,
+		attemptID,
+		target.Status,
+		RunRunning,
+		TaskAttemptMutation{
+			Status: TaskRunning, UpdatedAt: startedAt, StartedAt: &startedAt,
+		},
+	)
+	if err != nil {
+		return 0, err
+	}
+	if !applied {
+		return GuardedTaskSetupStale, nil
+	}
+	return GuardedTaskSetupApplied, nil
+}
+
+func getMapSetupOn(q immediateConn, parentAttemptID string) (MapSetup, error) {
+	var setup MapSetup
+	err := q.QueryRowContext(
+		context.Background(),
+		`SELECT parent_attempt_id, upstream_attempt_id, upstream_output, started_at
+		 FROM map_setups
+		 WHERE parent_attempt_id = ?`,
+		parentAttemptID,
+	).Scan(
+		&setup.ParentAttemptID,
+		&setup.UpstreamAttemptID,
+		&setup.UpstreamOutput,
+		&setup.StartedAt,
+	)
+	return setup, err
+}
+
+func insertMapSetupOn(q contextExecer, setup MapSetup) error {
+	_, err := q.ExecContext(
+		context.Background(),
+		`INSERT INTO map_setups (
+			parent_attempt_id, upstream_attempt_id, upstream_output, started_at
+		) VALUES (?, ?, ?, ?)`,
+		setup.ParentAttemptID,
+		setup.UpstreamAttemptID,
+		setup.UpstreamOutput,
+		setup.StartedAt.UTC(),
+	)
+	return err
+}
+
+func sameMapSetup(a, b MapSetup) bool {
+	return a.ParentAttemptID == b.ParentAttemptID &&
+		a.UpstreamAttemptID == b.UpstreamAttemptID &&
+		a.UpstreamOutput == b.UpstreamOutput &&
+		a.StartedAt.Equal(b.StartedAt)
+}
+
+func guardedSnapshotTaskOn(
+	q immediateConn,
+	runID, attemptID string,
+	observedRunStatus RunStatus,
+	observedTasks []TaskInstance,
+) (*TaskInstance, GuardedTaskPromotionResult, error) {
+	var currentRunStatus RunStatus
+	if err := q.QueryRowContext(
+		context.Background(),
+		`SELECT status FROM dag_runs WHERE id = ?`,
+		runID,
+	).Scan(&currentRunStatus); err != nil {
+		return nil, 0, err
+	}
+	if currentRunStatus != observedRunStatus {
+		return nil, GuardedTaskPromotionStale, nil
+	}
+
+	currentTasks, err := getLatestTaskAttemptsOn(q, runID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !sameTaskAttemptSnapshot(runID, observedTasks, currentTasks) {
+		return nil, GuardedTaskPromotionStale, nil
+	}
+	if observedRunStatus != RunRunning {
+		return nil, GuardedTaskPromotionInvalid, nil
+	}
+	for i := range currentTasks {
+		if currentTasks[i].ID == attemptID {
+			return &currentTasks[i], 0, nil
+		}
+	}
+	return nil, GuardedTaskPromotionInvalid, nil
 }
 
 type contextExecer interface {

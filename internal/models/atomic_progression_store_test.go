@@ -264,6 +264,450 @@ func TestPromoteTaskAttemptForRunSnapshot(t *testing.T) {
 	})
 }
 
+func TestStartMapSetupForRunSnapshotAppliesAndReplays(t *testing.T) {
+	t.Run("applies pending setup and classifies exact replay", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 5, 0, 0, time.UTC)
+		createRunProgressionRun(t, store, "setup-replay", RunRunning, now)
+		if err := store.CreateTaskInstance(&TaskInstance{
+			ID: "setup-replay_map", RunID: "setup-replay", TaskID: "map",
+			Status: TaskPending, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("CreateTaskInstance: %v", err)
+		}
+		pendingSnapshot, err := store.GetLatestTaskAttempts("setup-replay")
+		if err != nil {
+			t.Fatalf("GetLatestTaskAttempts(pending): %v", err)
+		}
+		startedAt := now.Add(time.Second)
+		setup := MapSetup{
+			ParentAttemptID:   "setup-replay_map",
+			UpstreamAttemptID: "setup-replay_source",
+			UpstreamOutput:    "[]",
+			StartedAt:         startedAt,
+		}
+
+		result, err := store.StartMapSetupForRunSnapshot(
+			"setup-replay", "setup-replay_map", RunRunning,
+			pendingSnapshot, setup,
+		)
+		if err != nil {
+			t.Fatalf("first guarded setup: %v", err)
+		}
+		if result != GuardedTaskPromotionApplied {
+			t.Fatalf("first guarded setup = %v, want Applied", result)
+		}
+		task, err := store.GetTaskInstance("setup-replay_map")
+		if err != nil {
+			t.Fatalf("GetTaskInstance: %v", err)
+		}
+		if task.Status != TaskRunning || task.StartedAt == nil ||
+			!task.StartedAt.Equal(startedAt) || !task.UpdatedAt.Equal(startedAt) {
+			t.Fatalf("guarded setup persisted %+v", task)
+		}
+		binding, err := store.GetMapSetup("setup-replay_map")
+		if err != nil {
+			t.Fatalf("GetMapSetup: %v", err)
+		}
+		if !sameMapSetup(*binding, setup) {
+			t.Fatalf("persisted setup = %+v, want %+v", *binding, setup)
+		}
+
+		result, err = store.StartMapSetupForRunSnapshot(
+			"setup-replay", "setup-replay_map", RunRunning,
+			pendingSnapshot, setup,
+		)
+		if err != nil {
+			t.Fatalf("old-snapshot setup replay: %v", err)
+		}
+		if result != GuardedTaskPromotionStale {
+			t.Fatalf("old-snapshot setup replay = %v, want Stale", result)
+		}
+
+		runningSnapshot, err := store.GetLatestTaskAttempts("setup-replay")
+		if err != nil {
+			t.Fatalf("GetLatestTaskAttempts(running): %v", err)
+		}
+		result, err = store.StartMapSetupForRunSnapshot(
+			"setup-replay", "setup-replay_map", RunRunning,
+			runningSnapshot, setup,
+		)
+		if err != nil {
+			t.Fatalf("exact setup replay: %v", err)
+		}
+		if result != GuardedTaskPromotionAlreadyApplied {
+			t.Fatalf("exact setup replay = %v, want AlreadyApplied", result)
+		}
+	})
+
+	t.Run("queued setup is eligible", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 6, 0, 0, time.UTC)
+		createRunProgressionRun(t, store, "setup-queued", RunRunning, now)
+		if err := store.CreateTaskInstance(&TaskInstance{
+			ID: "setup-queued_map", RunID: "setup-queued", TaskID: "map",
+			Status: TaskQueued, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("CreateTaskInstance: %v", err)
+		}
+		snapshot, err := store.GetLatestTaskAttempts("setup-queued")
+		if err != nil {
+			t.Fatalf("GetLatestTaskAttempts: %v", err)
+		}
+
+		result, err := store.StartMapSetupForRunSnapshot(
+			"setup-queued", "setup-queued_map", RunRunning,
+			snapshot, MapSetup{
+				ParentAttemptID:   "setup-queued_map",
+				UpstreamAttemptID: "setup-queued_source",
+				UpstreamOutput:    "[]",
+				StartedAt:         now.Add(time.Second),
+			},
+		)
+		if err != nil {
+			t.Fatalf("guarded queued setup: %v", err)
+		}
+		if result != GuardedTaskPromotionApplied {
+			t.Fatalf("guarded queued setup = %v, want Applied", result)
+		}
+	})
+}
+
+func TestStartMapSetupForRunSnapshotRejectsStaleSnapshots(t *testing.T) {
+	t.Run("predecessor retry makes complete snapshot stale", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 7, 0, 0, time.UTC)
+		createRunProgressionRun(t, store, "setup-predecessor", RunRunning, now)
+		for _, task := range []TaskInstance{
+			{
+				ID: "setup-predecessor_source", RunID: "setup-predecessor", TaskID: "source",
+				Status: TaskSuccess, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+			},
+			{
+				ID: "setup-predecessor_map", RunID: "setup-predecessor", TaskID: "map",
+				Status: TaskPending, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+			},
+		} {
+			task := task
+			if err := store.CreateTaskInstance(&task); err != nil {
+				t.Fatalf("CreateTaskInstance(%s): %v", task.ID, err)
+			}
+		}
+		snapshot, err := store.GetLatestTaskAttempts("setup-predecessor")
+		if err != nil {
+			t.Fatalf("GetLatestTaskAttempts: %v", err)
+		}
+		if err := store.CreateTaskInstance(&TaskInstance{
+			ID: "setup-predecessor_source_2", RunID: "setup-predecessor", TaskID: "source",
+			Status: TaskQueued, Attempt: 2,
+			CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
+		}); err != nil {
+			t.Fatalf("CreateTaskInstance(source retry): %v", err)
+		}
+
+		result, err := store.StartMapSetupForRunSnapshot(
+			"setup-predecessor", "setup-predecessor_map", RunRunning,
+			snapshot, MapSetup{
+				ParentAttemptID:   "setup-predecessor_map",
+				UpstreamAttemptID: "setup-predecessor_source",
+				UpstreamOutput:    "[]",
+				StartedAt:         now.Add(2 * time.Second),
+			},
+		)
+		if err != nil {
+			t.Fatalf("guarded setup with retried predecessor: %v", err)
+		}
+		if result != GuardedTaskPromotionStale {
+			t.Fatalf("retried-predecessor setup = %v, want Stale", result)
+		}
+		task, err := store.GetTaskInstance("setup-predecessor_map")
+		if err != nil {
+			t.Fatalf("GetTaskInstance(map): %v", err)
+		}
+		if task.Status != TaskPending || task.StartedAt != nil {
+			t.Fatalf("stale setup mutated map task: %+v", task)
+		}
+		if _, err := store.GetMapSetup("setup-predecessor_map"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("stale setup persisted binding: %v", err)
+		}
+	})
+
+	t.Run("run cancellation makes setup stale", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 8, 0, 0, time.UTC)
+		createRunProgressionRun(t, store, "setup-cancel", RunRunning, now)
+		if err := store.CreateTaskInstance(&TaskInstance{
+			ID: "setup-cancel_map", RunID: "setup-cancel", TaskID: "map",
+			Status: TaskPending, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("CreateTaskInstance: %v", err)
+		}
+		snapshot, err := store.GetLatestTaskAttempts("setup-cancel")
+		if err != nil {
+			t.Fatalf("GetLatestTaskAttempts: %v", err)
+		}
+		applied, err := store.CompareAndSetDagRunStatus(
+			"setup-cancel", RunRunning, RunCancelled, now.Add(time.Second),
+		)
+		if err != nil || !applied {
+			t.Fatalf("cancel run = (%v, %v), want (true, nil)", applied, err)
+		}
+
+		result, err := store.StartMapSetupForRunSnapshot(
+			"setup-cancel", "setup-cancel_map", RunRunning,
+			snapshot, MapSetup{
+				ParentAttemptID:   "setup-cancel_map",
+				UpstreamAttemptID: "setup-cancel_source",
+				UpstreamOutput:    "[]",
+				StartedAt:         now.Add(2 * time.Second),
+			},
+		)
+		if err != nil {
+			t.Fatalf("guarded setup after cancellation: %v", err)
+		}
+		if result != GuardedTaskPromotionStale {
+			t.Fatalf("cancelled-run setup = %v, want Stale", result)
+		}
+		task, err := store.GetTaskInstance("setup-cancel_map")
+		if err != nil {
+			t.Fatalf("GetTaskInstance(map): %v", err)
+		}
+		if task.Status != TaskPending || task.StartedAt != nil {
+			t.Fatalf("cancelled-run setup mutated task: %+v", task)
+		}
+		if _, err := store.GetMapSetup("setup-cancel_map"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("cancelled-run setup persisted binding: %v", err)
+		}
+	})
+}
+
+func TestStartMapSetupForRunSnapshotRejectsInvalidStates(t *testing.T) {
+	t.Run("foreign running ownership is invalid", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 9, 0, 0, time.UTC)
+		createRunProgressionRun(t, store, "setup-invalid", RunRunning, now)
+		if err := store.CreateTaskInstance(&TaskInstance{
+			ID: "setup-invalid_map", RunID: "setup-invalid", TaskID: "map",
+			Status: TaskQueued, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("CreateTaskInstance: %v", err)
+		}
+		foreignStartedAt := now.Add(time.Second)
+		applied, err := store.CompareAndSetTaskAttemptForRunStatus(
+			"setup-invalid_map", TaskQueued, RunRunning, TaskAttemptMutation{
+				Status: TaskRunning, UpdatedAt: foreignStartedAt,
+				StartedAt: &foreignStartedAt,
+			},
+		)
+		if err != nil || !applied {
+			t.Fatalf("foreign setup claim = (%v, %v), want (true, nil)", applied, err)
+		}
+		snapshot, err := store.GetLatestTaskAttempts("setup-invalid")
+		if err != nil {
+			t.Fatalf("GetLatestTaskAttempts: %v", err)
+		}
+
+		result, err := store.StartMapSetupForRunSnapshot(
+			"setup-invalid", "setup-invalid_map", RunRunning,
+			snapshot, MapSetup{
+				ParentAttemptID:   "setup-invalid_map",
+				UpstreamAttemptID: "setup-invalid_source",
+				UpstreamOutput:    "[]",
+				StartedAt:         foreignStartedAt.Add(time.Second),
+			},
+		)
+		if err != nil {
+			t.Fatalf("guarded setup with foreign ownership: %v", err)
+		}
+		if result != GuardedTaskPromotionInvalid {
+			t.Fatalf("foreign ownership setup = %v, want Invalid", result)
+		}
+		if _, err := store.GetMapSetup("setup-invalid_map"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("foreign ownership persisted binding: %v", err)
+		}
+	})
+
+	t.Run("terminal attempt is invalid", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 10, 0, 0, time.UTC)
+		createRunProgressionRun(t, store, "setup-terminal", RunRunning, now)
+		if err := store.CreateTaskInstance(&TaskInstance{
+			ID: "setup-terminal_map", RunID: "setup-terminal", TaskID: "map",
+			Status: TaskSuccess, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("CreateTaskInstance: %v", err)
+		}
+		snapshot, err := store.GetLatestTaskAttempts("setup-terminal")
+		if err != nil {
+			t.Fatalf("GetLatestTaskAttempts: %v", err)
+		}
+
+		result, err := store.StartMapSetupForRunSnapshot(
+			"setup-terminal", "setup-terminal_map", RunRunning,
+			snapshot, MapSetup{
+				ParentAttemptID:   "setup-terminal_map",
+				UpstreamAttemptID: "setup-terminal_source",
+				UpstreamOutput:    "[]",
+				StartedAt:         now.Add(time.Second),
+			},
+		)
+		if err != nil {
+			t.Fatalf("guarded terminal setup: %v", err)
+		}
+		if result != GuardedTaskPromotionInvalid {
+			t.Fatalf("terminal setup = %v, want Invalid", result)
+		}
+		if _, err := store.GetMapSetup("setup-terminal_map"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("invalid terminal setup persisted binding: %v", err)
+		}
+	})
+}
+
+func TestStartMapSetupForRunSnapshotRejectsParentIdentityMismatch(t *testing.T) {
+	store := newRunProgressionStore(t)
+	now := time.Date(2026, time.July, 27, 16, 11, 0, 0, time.UTC)
+	createRunProgressionRun(t, store, "setup-identity", RunRunning, now)
+	if err := store.CreateTaskInstance(&TaskInstance{
+		ID: "setup-identity_map", RunID: "setup-identity", TaskID: "map",
+		Status: TaskPending, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateTaskInstance: %v", err)
+	}
+	snapshot, err := store.GetLatestTaskAttempts("setup-identity")
+	if err != nil {
+		t.Fatalf("GetLatestTaskAttempts: %v", err)
+	}
+
+	result, err := store.StartMapSetupForRunSnapshot(
+		"setup-identity", "setup-identity_map", RunRunning,
+		snapshot, MapSetup{
+			ParentAttemptID:   "different-parent",
+			UpstreamAttemptID: "setup-identity_source",
+			UpstreamOutput:    "[]",
+			StartedAt:         now.Add(time.Second),
+		},
+	)
+	if err != nil {
+		t.Fatalf("guarded setup with mismatched parent: %v", err)
+	}
+	if result != GuardedTaskSetupInvalid {
+		t.Fatalf("mismatched-parent setup = %v, want Invalid", result)
+	}
+	if _, err := store.GetMapSetup("different-parent"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("mismatched parent persisted binding: %v", err)
+	}
+	task, err := store.GetTaskInstance("setup-identity_map")
+	if err != nil {
+		t.Fatalf("GetTaskInstance: %v", err)
+	}
+	if task.Status != TaskPending || task.StartedAt != nil {
+		t.Fatalf("mismatched parent mutated task: %+v", task)
+	}
+}
+
+func TestStartMapSetupForRunSnapshotRejectsConflictingBinding(t *testing.T) {
+	store := newRunProgressionStore(t)
+	now := time.Date(2026, time.July, 27, 16, 12, 0, 0, time.UTC)
+	createRunProgressionRun(t, store, "setup-conflict", RunRunning, now)
+	if err := store.CreateTaskInstance(&TaskInstance{
+		ID: "setup-conflict_map", RunID: "setup-conflict", TaskID: "map",
+		Status: TaskPending, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateTaskInstance: %v", err)
+	}
+	persisted := MapSetup{
+		ParentAttemptID:   "setup-conflict_map",
+		UpstreamAttemptID: "setup-conflict_source_1",
+		UpstreamOutput:    `["old"]`,
+		StartedAt:         now.Add(time.Second),
+	}
+	if _, _, err := store.EnsureMapSetup(persisted); err != nil {
+		t.Fatalf("EnsureMapSetup: %v", err)
+	}
+	snapshot, err := store.GetLatestTaskAttempts("setup-conflict")
+	if err != nil {
+		t.Fatalf("GetLatestTaskAttempts: %v", err)
+	}
+
+	result, err := store.StartMapSetupForRunSnapshot(
+		"setup-conflict", "setup-conflict_map", RunRunning,
+		snapshot, MapSetup{
+			ParentAttemptID:   "setup-conflict_map",
+			UpstreamAttemptID: "setup-conflict_source_2",
+			UpstreamOutput:    `["new"]`,
+			StartedAt:         now.Add(2 * time.Second),
+		},
+	)
+	if err != nil {
+		t.Fatalf("guarded setup with conflicting binding: %v", err)
+	}
+	if result != GuardedTaskSetupInvalid {
+		t.Fatalf("conflicting setup = %v, want Invalid", result)
+	}
+	binding, err := store.GetMapSetup("setup-conflict_map")
+	if err != nil {
+		t.Fatalf("GetMapSetup: %v", err)
+	}
+	if !sameMapSetup(*binding, persisted) {
+		t.Fatalf("conflicting setup changed binding: got %+v, want %+v", *binding, persisted)
+	}
+	task, err := store.GetTaskInstance("setup-conflict_map")
+	if err != nil {
+		t.Fatalf("GetTaskInstance: %v", err)
+	}
+	if task.Status != TaskPending || task.StartedAt != nil {
+		t.Fatalf("conflicting setup mutated task: %+v", task)
+	}
+}
+
+func TestStartMapSetupForRunSnapshotRollsBackBindingOnTransitionError(t *testing.T) {
+	store := newRunProgressionStore(t)
+	now := time.Date(2026, time.July, 27, 16, 13, 0, 0, time.UTC)
+	createRunProgressionRun(t, store, "setup-rollback", RunRunning, now)
+	if err := store.CreateTaskInstance(&TaskInstance{
+		ID: "setup-rollback_map", RunID: "setup-rollback", TaskID: "map",
+		Status: TaskPending, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateTaskInstance: %v", err)
+	}
+	snapshot, err := store.GetLatestTaskAttempts("setup-rollback")
+	if err != nil {
+		t.Fatalf("GetLatestTaskAttempts: %v", err)
+	}
+	if _, err := store.db.Exec(`
+		CREATE TRIGGER reject_setup_transition
+		BEFORE UPDATE OF status ON task_instances
+		WHEN NEW.id = 'setup-rollback_map' AND NEW.status = 'running'
+		BEGIN
+			SELECT RAISE(ABORT, 'reject setup transition');
+		END`); err != nil {
+		t.Fatalf("create rejection trigger: %v", err)
+	}
+
+	_, err = store.StartMapSetupForRunSnapshot(
+		"setup-rollback", "setup-rollback_map", RunRunning,
+		snapshot, MapSetup{
+			ParentAttemptID:   "setup-rollback_map",
+			UpstreamAttemptID: "setup-rollback_source",
+			UpstreamOutput:    "[]",
+			StartedAt:         now.Add(time.Second),
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "reject setup transition") {
+		t.Fatalf("transition error = %v, want trigger rejection", err)
+	}
+	if _, err := store.GetMapSetup("setup-rollback_map"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("failed transition retained new binding: %v", err)
+	}
+	task, err := store.GetTaskInstance("setup-rollback_map")
+	if err != nil {
+		t.Fatalf("GetTaskInstance: %v", err)
+	}
+	if task.Status != TaskPending || task.StartedAt != nil {
+		t.Fatalf("failed setup transition mutated task: %+v", task)
+	}
+}
+
 func TestCompareAndSetTaskAttemptForRunStatus(t *testing.T) {
 	t.Run("applies while run status matches", func(t *testing.T) {
 		store := newRunProgressionStore(t)
