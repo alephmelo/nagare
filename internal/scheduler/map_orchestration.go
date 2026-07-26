@@ -525,8 +525,19 @@ func (s *Scheduler) promoteMapChildLocked(
 		if err != nil {
 			return fmt.Errorf("reload snapshot for mapped instance %s: %w", initialID, err)
 		}
+		currentParent, ok := exactAttempt(tasks, parent.ID)
+		if !ok || currentParent.TaskID != parent.TaskID ||
+			currentParent.Attempt != parent.Attempt ||
+			currentParent.Status != models.TaskRunning ||
+			currentParent.StartedAt == nil || parent.StartedAt == nil ||
+			!currentParent.StartedAt.Equal(*parent.StartedAt) {
+			return fmt.Errorf(
+				"%w: map parent %s no longer owns child reconciliation",
+				errGuardedActionRejected, parent.ID,
+			)
+		}
 		var child models.TaskInstance
-		ok := false
+		ok = false
 		for _, task := range tasks {
 			if task.TaskID == taskID {
 				child, ok = task, true
