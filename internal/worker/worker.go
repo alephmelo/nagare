@@ -67,6 +67,12 @@ type Pool struct {
 
 // NewPool initializes a new worker pool manager.
 func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string, string, map[string]string) (*models.DagRun, error), sizes map[string]int, broker *logbroker.Broker) *Pool {
+	return NewPoolWithLifecycle(store, tasklifecycle.New(store), getDAG, triggerDAG, sizes, broker)
+}
+
+// NewPoolWithLifecycle initializes a worker pool using the provided shared
+// task-attempt lifecycle.
+func NewPoolWithLifecycle(store *models.Store, lifecycle *tasklifecycle.Lifecycle, getDAG func(string) (*models.DAGDef, bool), triggerDAG func(string, string, map[string]string) (*models.DagRun, error), sizes map[string]int, broker *logbroker.Broker) *Pool {
 	queues := make(map[string]chan queuedAttempt)
 	admissions := make(map[string]chan struct{})
 	for name, size := range sizes {
@@ -77,7 +83,7 @@ func NewPool(store *models.Store, getDAG func(string) (*models.DAGDef, bool), tr
 		admissions[name] = make(chan struct{}, size)
 	}
 	return &Pool{
-		store: store, lifecycle: tasklifecycle.New(store), getDAG: getDAG,
+		store: store, lifecycle: lifecycle, getDAG: getDAG,
 		triggerDAG: triggerDAG, broker: broker, taskQueues: queues,
 		admissions: admissions, workerSizes: sizes, attempts: make(map[string]*localAttempt),
 	}
