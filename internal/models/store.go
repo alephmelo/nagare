@@ -158,6 +158,33 @@ type CurrentAttemptResult struct {
 	Replay  bool
 }
 
+// GuardedTaskPromotionResult classifies an atomic run-and-task guarded
+// promotion without collapsing a reloadable stale observation into an illegal
+// task transition.
+type GuardedTaskPromotionResult uint8
+
+const (
+	GuardedTaskPromotionApplied GuardedTaskPromotionResult = iota + 1
+	GuardedTaskPromotionAlreadyApplied
+	GuardedTaskPromotionStale
+	GuardedTaskPromotionInvalid
+)
+
+func (r GuardedTaskPromotionResult) String() string {
+	switch r {
+	case GuardedTaskPromotionApplied:
+		return "Applied"
+	case GuardedTaskPromotionAlreadyApplied:
+		return "AlreadyApplied"
+	case GuardedTaskPromotionStale:
+		return "Stale"
+	case GuardedTaskPromotionInvalid:
+		return "Invalid"
+	default:
+		return fmt.Sprintf("GuardedTaskPromotionResult(%d)", r)
+	}
+}
+
 // Store handles all database operations for the scheduler
 type Store struct {
 	db *sql.DB
@@ -343,6 +370,44 @@ func (s *Store) GetPausedDAGs() (map[string]bool, error) {
 
 // CreateDagRun inserts a new DagRun into the database
 func (s *Store) CreateDagRun(run *DagRun) error {
+	return createDagRunOn(s.db, run)
+}
+
+// CreateDagRunWithTasks creates a run and its complete initial task set as one
+// transaction. A task conflict or insert error rolls back the run and every
+// task inserted before it.
+func (s *Store) CreateDagRunWithTasks(run *DagRun, tasks []TaskInstance) (err error) {
+	for i := range tasks {
+		if tasks[i].RunID != run.ID {
+			return fmt.Errorf(
+				"initial task %s belongs to run %s, want %s",
+				tasks[i].ID, tasks[i].RunID, run.ID,
+			)
+		}
+	}
+
+	conn, finish, err := s.beginImmediate()
+	if err != nil {
+		return err
+	}
+	defer finish(&err)
+
+	if err = createDagRunOn(conn, run); err != nil {
+		return fmt.Errorf("create dag run %s: %w", run.ID, err)
+	}
+	for i := range tasks {
+		task := tasks[i]
+		if task.Attempt == 0 {
+			task.Attempt = 1
+		}
+		if err = createTaskInstanceOn(conn, task); err != nil {
+			return fmt.Errorf("create initial task instance %s: %w", task.ID, err)
+		}
+	}
+	return nil
+}
+
+func createDagRunOn(q contextExecer, run *DagRun) error {
 	confJSON := "{}"
 	if run.Conf != nil {
 		if b, err := json.Marshal(run.Conf); err == nil {
@@ -355,7 +420,12 @@ func (s *Store) CreateDagRun(run *DagRun) error {
 	createdAt := run.CreatedAt.UTC()
 
 	query := `INSERT INTO dag_runs (id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, run.ID, run.DAGID, run.Status, run.ExecDate, run.TriggerType, confJSON, createdAt, run.CompletedAt)
+	_, err := q.ExecContext(
+		context.Background(),
+		query,
+		run.ID, run.DAGID, run.Status, run.ExecDate, run.TriggerType,
+		confJSON, createdAt, run.CompletedAt,
+	)
 	return err
 }
 
@@ -404,6 +474,79 @@ func (s *Store) CompareAndSetDagRunStatusForTaskSnapshot(
 		return false, nil
 	}
 	return compareAndSetDagRunStatusOn(conn, runID, observed, desired, now)
+}
+
+// PromoteTaskAttemptForRunSnapshot atomically verifies a running run and its
+// complete latest-attempt snapshot before promoting one exact current pending
+// attempt. The caller must reload on Stale and must not retry Invalid without a
+// new control-plane decision.
+func (s *Store) PromoteTaskAttemptForRunSnapshot(
+	runID, attemptID string,
+	observedRunStatus RunStatus,
+	observedTasks []TaskInstance,
+	queuedAt time.Time,
+) (_ GuardedTaskPromotionResult, err error) {
+	conn, finish, err := s.beginImmediate()
+	if err != nil {
+		return 0, err
+	}
+	defer finish(&err)
+
+	var currentRunStatus RunStatus
+	if err = conn.QueryRowContext(
+		context.Background(),
+		`SELECT status FROM dag_runs WHERE id = ?`,
+		runID,
+	).Scan(&currentRunStatus); err != nil {
+		return 0, err
+	}
+	if currentRunStatus != observedRunStatus {
+		return GuardedTaskPromotionStale, nil
+	}
+
+	currentTasks, err := getLatestTaskAttemptsOn(conn, runID)
+	if err != nil {
+		return 0, err
+	}
+	if !sameTaskAttemptSnapshot(runID, observedTasks, currentTasks) {
+		return GuardedTaskPromotionStale, nil
+	}
+	if observedRunStatus != RunRunning {
+		return GuardedTaskPromotionInvalid, nil
+	}
+
+	var target *TaskInstance
+	for i := range currentTasks {
+		if currentTasks[i].ID == attemptID {
+			target = &currentTasks[i]
+			break
+		}
+	}
+	if target == nil {
+		return GuardedTaskPromotionInvalid, nil
+	}
+	switch target.Status {
+	case TaskQueued:
+		return GuardedTaskPromotionAlreadyApplied, nil
+	case TaskPending:
+	default:
+		return GuardedTaskPromotionInvalid, nil
+	}
+
+	applied, err := compareAndSetTaskAttemptForRunStatusOn(
+		conn,
+		attemptID,
+		TaskPending,
+		RunRunning,
+		TaskAttemptMutation{Status: TaskQueued, UpdatedAt: queuedAt.UTC()},
+	)
+	if err != nil {
+		return 0, err
+	}
+	if !applied {
+		return GuardedTaskPromotionStale, nil
+	}
+	return GuardedTaskPromotionApplied, nil
 }
 
 type contextExecer interface {
@@ -741,8 +884,17 @@ func (s *Store) CreateTaskInstance(ti *TaskInstance) error {
 	if ti.Attempt == 0 {
 		ti.Attempt = 1
 	}
+	return createTaskInstanceOn(s.db, *ti)
+}
+
+func createTaskInstanceOn(q contextExecer, ti TaskInstance) error {
 	query := `INSERT INTO task_instances (id, run_id, task_id, status, output, item_value, attempt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, ti.ID, ti.RunID, ti.TaskID, ti.Status, ti.Output, ti.ItemValue, ti.Attempt, ti.CreatedAt, ti.UpdatedAt)
+	_, err := q.ExecContext(
+		context.Background(),
+		query,
+		ti.ID, ti.RunID, ti.TaskID, ti.Status, ti.Output, ti.ItemValue,
+		ti.Attempt, ti.CreatedAt, ti.UpdatedAt,
+	)
 	return err
 }
 
@@ -779,12 +931,13 @@ func (s *Store) EnsureTaskInstance(ti *TaskInstance) (_ bool, err error) {
 	}
 
 	var existingID string
+	var existingItem sql.NullString
 	err = conn.QueryRowContext(
 		context.Background(),
-		`SELECT id FROM task_instances
+		`SELECT id, item_value FROM task_instances
 		 WHERE run_id = ? AND task_id = ? AND attempt = ?`,
 		ti.RunID, ti.TaskID, ti.Attempt,
-	).Scan(&existingID)
+	).Scan(&existingID, &existingItem)
 	if err != nil {
 		return false, fmt.Errorf(
 			"verify task instance %s logical-attempt conflict: %w", ti.ID, err,
@@ -796,7 +949,20 @@ func (s *Store) EnsureTaskInstance(ti *TaskInstance) (_ bool, err error) {
 			ti.ID, existingID, ti.RunID, ti.TaskID, ti.Attempt,
 		)
 	}
+	if !sameItemBinding(existingItem, ti.ItemValue) {
+		return false, fmt.Errorf(
+			"task instance %s has conflicting item binding for logical attempt %s/%s/%d",
+			ti.ID, ti.RunID, ti.TaskID, ti.Attempt,
+		)
+	}
 	return false, nil
+}
+
+func sameItemBinding(persisted sql.NullString, requested *string) bool {
+	if !persisted.Valid || requested == nil {
+		return !persisted.Valid && requested == nil
+	}
+	return persisted.String == *requested
 }
 
 // EnsureMapSetup inserts setup metadata once and returns the durable value.
@@ -917,6 +1083,58 @@ func (s *Store) CompareAndSetTaskAttempt(id string, expected TaskStatus, mutatio
 		mutation.UpdatedAt,
 		mutation.StartedAt != nil, mutation.StartedAt,
 		id, expected,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+// CompareAndSetTaskAttemptForRunStatus applies one exact attempt mutation only
+// while both the attempt and its owning run remain in the caller's observed
+// statuses. It is the run-terminal guard for claims, setup ownership, and
+// ordinary promotions that do not require a complete dependency snapshot.
+func (s *Store) CompareAndSetTaskAttemptForRunStatus(
+	id string,
+	expectedTaskStatus TaskStatus,
+	expectedRunStatus RunStatus,
+	mutation TaskAttemptMutation,
+) (bool, error) {
+	return compareAndSetTaskAttemptForRunStatusOn(
+		s.db, id, expectedTaskStatus, expectedRunStatus, mutation,
+	)
+}
+
+func compareAndSetTaskAttemptForRunStatusOn(
+	q contextExecer,
+	id string,
+	expectedTaskStatus TaskStatus,
+	expectedRunStatus RunStatus,
+	mutation TaskAttemptMutation,
+) (bool, error) {
+	result, err := q.ExecContext(context.Background(), `
+		UPDATE task_instances
+		SET status = ?,
+			output = CASE WHEN ? THEN ? ELSE output END,
+			updated_at = ?,
+			started_at = CASE WHEN ? THEN ? ELSE started_at END
+		WHERE id = ?
+		  AND status = ?
+		  AND EXISTS (
+			SELECT 1
+			FROM dag_runs
+			WHERE dag_runs.id = task_instances.run_id
+			  AND dag_runs.status = ?
+		  )`,
+		mutation.Status,
+		mutation.SetOutput, mutation.Output,
+		mutation.UpdatedAt,
+		mutation.StartedAt != nil, mutation.StartedAt,
+		id, expectedTaskStatus, expectedRunStatus,
 	)
 	if err != nil {
 		return false, err
