@@ -257,6 +257,7 @@ func openStoreAt(t *testing.T, path string) *models.Store {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
+	ensureTestRun(t, store)
 	t.Cleanup(func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("Close: %v", err)

@@ -15,6 +15,8 @@ type Disposition uint8
 const (
 	Applied Disposition = iota + 1
 	AlreadyApplied
+	Stale
+	Invalid
 )
 
 type MissingAttemptError struct{ AttemptID string }
@@ -46,6 +48,26 @@ func (e *ConflictError) Error() string {
 type store interface {
 	GetTaskInstance(string) (*models.TaskInstance, error)
 	CompareAndSetTaskAttempt(string, models.TaskStatus, models.TaskAttemptMutation) (bool, error)
+	CompareAndSetTaskAttemptForRunStatus(
+		string,
+		models.TaskStatus,
+		models.RunStatus,
+		models.TaskAttemptMutation,
+	) (bool, error)
+	PromoteTaskAttemptForRunSnapshot(
+		string,
+		string,
+		models.RunStatus,
+		[]models.TaskInstance,
+		time.Time,
+	) (models.GuardedTaskPromotionResult, error)
+	StartMapSetupForRunSnapshot(
+		string,
+		string,
+		models.RunStatus,
+		[]models.TaskInstance,
+		models.MapSetup,
+	) (models.GuardedTaskSetupResult, error)
 	CancelCurrentTaskAttempt(string, string, time.Time) (models.CurrentAttemptResult, error)
 	RetryCurrentTaskAttempt(string, string, time.Time) (models.CurrentAttemptResult, error)
 	RetryCurrentTaskAttemptPending(string, string, time.Time) (models.CurrentAttemptResult, error)
@@ -75,26 +97,52 @@ type CurrentCancellation struct {
 // exposing a queued intermediate to workers. Queued is accepted for recovery;
 // it competes with worker Claim and only the compare-and-set winner is Applied.
 func (l *Lifecycle) StartSetup(attemptID string, startedAt time.Time) (Disposition, error) {
-	for {
-		attempt, err := l.get(attemptID)
-		if err != nil {
-			return 0, err
-		}
-		if attempt.Status == models.TaskRunning {
-			return AlreadyApplied, nil
-		}
-		if attempt.Status != models.TaskPending && attempt.Status != models.TaskQueued {
-			return 0, invalid(attempt, "start setup")
-		}
-		applied, err := l.store.CompareAndSetTaskAttempt(attemptID, attempt.Status, models.TaskAttemptMutation{
-			Status: models.TaskRunning, UpdatedAt: startedAt, StartedAt: &startedAt,
-		})
+	attempt, err := l.get(attemptID)
+	if err != nil {
+		return 0, err
+	}
+	switch attempt.Status {
+	case models.TaskPending, models.TaskQueued:
+		applied, err := l.store.CompareAndSetTaskAttemptForRunStatus(
+			attemptID,
+			attempt.Status,
+			models.RunRunning,
+			models.TaskAttemptMutation{
+				Status: models.TaskRunning, UpdatedAt: startedAt, StartedAt: &startedAt,
+			},
+		)
 		if err != nil {
 			return 0, err
 		}
 		if applied {
 			return Applied, nil
 		}
+	case models.TaskRunning:
+		applied, err := l.guardReplay(attempt)
+		if err != nil {
+			return 0, err
+		}
+		if applied {
+			return AlreadyApplied, nil
+		}
+	default:
+		return 0, invalid(attempt, "start setup")
+	}
+
+	current, err := l.get(attemptID)
+	if err != nil {
+		return 0, err
+	}
+	switch current.Status {
+	case models.TaskRunning:
+		if attempt.Status == models.TaskRunning {
+			return Stale, nil
+		}
+		return AlreadyApplied, nil
+	case models.TaskPending, models.TaskQueued:
+		return Stale, nil
+	default:
+		return 0, invalid(current, "start setup")
 	}
 }
 
@@ -103,31 +151,52 @@ func (l *Lifecycle) Claim(attemptID string, claimedAt time.Time) (Disposition, e
 	if err != nil {
 		return 0, err
 	}
-	if attempt.Status == models.TaskRunning {
-		return AlreadyApplied, nil
-	}
-	if attempt.Status != models.TaskQueued {
+	switch attempt.Status {
+	case models.TaskRunning:
+		applied, err := l.guardReplay(attempt)
+		if err != nil {
+			return 0, err
+		}
+		if applied {
+			return AlreadyApplied, nil
+		}
+	case models.TaskQueued:
+		applied, err := l.store.CompareAndSetTaskAttemptForRunStatus(
+			attemptID,
+			models.TaskQueued,
+			models.RunRunning,
+			models.TaskAttemptMutation{
+				Status: models.TaskRunning, UpdatedAt: claimedAt, StartedAt: &claimedAt,
+			},
+		)
+		if err != nil {
+			return 0, err
+		}
+		if applied {
+			return Applied, nil
+		}
+	default:
 		return 0, invalid(attempt, "claim")
 	}
-	applied, err := l.store.CompareAndSetTaskAttempt(attemptID, models.TaskQueued, models.TaskAttemptMutation{
-		Status: models.TaskRunning, UpdatedAt: claimedAt, StartedAt: &claimedAt,
-	})
-	if err != nil {
-		return 0, err
-	}
-	if applied {
-		return Applied, nil
-	}
-	return l.classifyClaim(attemptID)
+	return l.classifyClaim(attemptID, attempt.Status)
 }
 
-func (l *Lifecycle) classifyClaim(attemptID string) (Disposition, error) {
+func (l *Lifecycle) classifyClaim(
+	attemptID string,
+	observedStatus models.TaskStatus,
+) (Disposition, error) {
 	attempt, err := l.get(attemptID)
 	if err != nil {
 		return 0, err
 	}
 	if attempt.Status == models.TaskRunning {
+		if observedStatus == models.TaskRunning {
+			return Stale, nil
+		}
 		return AlreadyApplied, nil
+	}
+	if attempt.Status == models.TaskQueued {
+		return Stale, nil
 	}
 	return 0, invalid(attempt, "claim")
 }
@@ -137,29 +206,130 @@ func (l *Lifecycle) Promote(attemptID string, queuedAt time.Time) (Disposition, 
 	if err != nil {
 		return 0, err
 	}
-	if attempt.Status == models.TaskQueued {
-		return AlreadyApplied, nil
-	}
-	if attempt.Status != models.TaskPending {
+	switch attempt.Status {
+	case models.TaskQueued:
+		applied, err := l.guardReplay(attempt)
+		if err != nil {
+			return 0, err
+		}
+		if applied {
+			return AlreadyApplied, nil
+		}
+	case models.TaskPending:
+		applied, err := l.store.CompareAndSetTaskAttemptForRunStatus(
+			attemptID,
+			models.TaskPending,
+			models.RunRunning,
+			models.TaskAttemptMutation{Status: models.TaskQueued, UpdatedAt: queuedAt},
+		)
+		if err != nil {
+			return 0, err
+		}
+		if applied {
+			return Applied, nil
+		}
+	default:
 		return 0, invalid(attempt, "promote")
-	}
-	applied, err := l.store.CompareAndSetTaskAttempt(attemptID, models.TaskPending, models.TaskAttemptMutation{
-		Status: models.TaskQueued, UpdatedAt: queuedAt,
-	})
-	if err != nil {
-		return 0, err
-	}
-	if applied {
-		return Applied, nil
 	}
 	current, err := l.get(attemptID)
 	if err != nil {
 		return 0, err
 	}
 	if current.Status == models.TaskQueued {
+		if attempt.Status == models.TaskQueued {
+			return Stale, nil
+		}
 		return AlreadyApplied, nil
 	}
+	if current.Status == models.TaskPending {
+		return Stale, nil
+	}
 	return 0, invalid(current, "promote")
+}
+
+// PromoteGuarded atomically promotes one exact pending attempt only while the
+// observed run status and complete latest-attempt snapshot remain current.
+// Stale is a normal reconciliation outcome: callers must reload and evaluate
+// again instead of treating it as an illegal task transition.
+func (l *Lifecycle) PromoteGuarded(
+	target models.TaskInstance,
+	observedRunStatus models.RunStatus,
+	observedTasks []models.TaskInstance,
+	queuedAt time.Time,
+) (Disposition, error) {
+	result, err := l.store.PromoteTaskAttemptForRunSnapshot(
+		target.RunID,
+		target.ID,
+		observedRunStatus,
+		observedTasks,
+		queuedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, &MissingAttemptError{AttemptID: target.ID}
+		}
+		return 0, err
+	}
+	return guardedDisposition(target.ID, "promote", result)
+}
+
+// StartSetupGuarded atomically persists the exact map binding and takes
+// scheduler setup ownership only while the observed running run and complete
+// latest-attempt snapshot remain current.
+func (l *Lifecycle) StartSetupGuarded(
+	target models.TaskInstance,
+	observedRunStatus models.RunStatus,
+	observedTasks []models.TaskInstance,
+	setup models.MapSetup,
+) (Disposition, error) {
+	result, err := l.store.StartMapSetupForRunSnapshot(
+		target.RunID,
+		target.ID,
+		observedRunStatus,
+		observedTasks,
+		setup,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, &MissingAttemptError{AttemptID: target.ID}
+		}
+		return 0, err
+	}
+	return guardedDisposition(target.ID, "start setup", result)
+}
+
+func guardedDisposition(
+	attemptID, operation string,
+	result models.GuardedTaskPromotionResult,
+) (Disposition, error) {
+	switch result {
+	case models.GuardedTaskPromotionApplied:
+		return Applied, nil
+	case models.GuardedTaskPromotionAlreadyApplied:
+		return AlreadyApplied, nil
+	case models.GuardedTaskPromotionStale:
+		return Stale, nil
+	case models.GuardedTaskPromotionInvalid:
+		return Invalid, nil
+	default:
+		return 0, fmt.Errorf(
+			"%s attempt %s returned unknown guarded result %d",
+			operation, attemptID, result,
+		)
+	}
+}
+
+func (l *Lifecycle) guardReplay(attempt *models.TaskInstance) (bool, error) {
+	return l.store.CompareAndSetTaskAttemptForRunStatus(
+		attempt.ID,
+		attempt.Status,
+		models.RunRunning,
+		models.TaskAttemptMutation{
+			Status:    attempt.Status,
+			UpdatedAt: attempt.UpdatedAt,
+			StartedAt: attempt.StartedAt,
+		},
+	)
 }
 
 func (l *Lifecycle) Complete(input Completion) (Disposition, error) {

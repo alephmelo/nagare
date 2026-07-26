@@ -1,6 +1,7 @@
 package tasklifecycle_test
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -232,12 +233,28 @@ func newStore(t *testing.T) *models.Store {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
+	ensureTestRun(t, store)
 	t.Cleanup(func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("Close: %v", err)
 		}
 	})
 	return store
+}
+
+func ensureTestRun(t *testing.T, store *models.Store) {
+	t.Helper()
+	if _, err := store.GetDagRun("run-1"); err == nil {
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetDagRun(run-1): %v", err)
+	}
+	if err := store.CreateDagRun(&models.DagRun{
+		ID: "run-1", DAGID: "dag", Status: models.RunRunning,
+		ExecDate: createdAt, TriggerType: "manual", CreatedAt: createdAt,
+	}); err != nil {
+		t.Fatalf("CreateDagRun(run-1): %v", err)
+	}
 }
 
 func createAttempt(t *testing.T, store *models.Store, status models.TaskStatus, attempt int, output string) {
