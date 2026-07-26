@@ -62,8 +62,9 @@ tasks:
 		{ID: runID + "_source", RunID: runID, TaskID: "source", Status: models.TaskSuccess, Attempt: 1},
 		{ID: runID + "_map", RunID: runID, TaskID: "map", Status: models.TaskUpForRetry, Attempt: 1},
 		{ID: runID + "_map_2", RunID: runID, TaskID: "map", Status: models.TaskRunning, Attempt: 2},
-		{ID: runID + "_map[0]", RunID: runID, TaskID: "map[0]", Status: models.TaskFailed, ItemValue: &item, Attempt: 1},
-		{ID: runID + "_map[0]@g2", RunID: runID, TaskID: "map[0]@g2", Status: models.TaskFailed, ItemValue: &item, Attempt: 1},
+		{ID: runID + "_map[0]", RunID: runID, TaskID: "map[0]", Status: models.TaskFailed, Output: "obsolete-one\n", ItemValue: &item, Attempt: 1},
+		{ID: runID + "_map[0]_2", RunID: runID, TaskID: "map[0]", Status: models.TaskFailed, Output: "obsolete-two\n", ItemValue: &item, Attempt: 2},
+		{ID: runID + "_map[0]@g2", RunID: runID, TaskID: "map[0]@g2", Status: models.TaskFailed, Output: "current-one\n", ItemValue: &item, Attempt: 1},
 		{ID: runID + "_map[0]@g2_2", RunID: runID, TaskID: "map[0]@g2", Status: models.TaskSuccess, Output: "hello\n", ItemValue: &item, Attempt: 2},
 		{ID: runID + "_publish@g2", RunID: runID, TaskID: "publish@g2", Status: models.TaskSuccess, Attempt: 1},
 		{ID: runID + "_foo[bar]", RunID: runID, TaskID: "foo[bar]", Status: models.TaskSuccess, Attempt: 1},
@@ -85,7 +86,7 @@ tasks:
 		t.Fatalf("InsertTaskMetrics: %v", err)
 	}
 	if err := store.InsertTaskMetrics(&models.TaskMetrics{
-		TaskInstanceID: runID + "_map[0]",
+		TaskInstanceID: runID + "_map[0]_2",
 		RunID:          runID,
 		DAGID:          "map_api",
 		TaskID:         "map[0]",
@@ -101,7 +102,7 @@ tasks:
 	t.Run("attempt history", func(t *testing.T) { assertProjectedAttempts(t, server, runID) })
 	t.Run("projected log identity", func(t *testing.T) { assertProjectedLogs(t, server, runID) })
 	t.Run("metrics responses", func(t *testing.T) {
-		assertProjectedMetrics(t, server, runID, rawInstanceID)
+		assertProjectedMetrics(t, server, runID)
 	})
 
 	persistedTask, err := store.GetTaskInstance(rawInstanceID)
@@ -174,24 +175,33 @@ func assertProjectedAttempts(t *testing.T, server *Server, runID string) {
 
 func assertProjectedLogs(t *testing.T, server *Server, runID string) {
 	t.Helper()
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/runs/"+runID+"/tasks/"+runID+"_map[0]_2/logs", nil)
-	server.handleTaskLogs(recorder, request)
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "data: hello") {
-		t.Fatalf("status = %d, body = %q", recorder.Code, recorder.Body.String())
+	for _, test := range []struct {
+		instanceID string
+		output     string
+	}{
+		{runID + "_map[0]", "data: current-one"},
+		{runID + "_map[0]_2", "data: hello"},
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/runs/"+runID+"/tasks/"+test.instanceID+"/logs", nil)
+		server.handleTaskLogs(recorder, request)
+		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), test.output) ||
+			strings.Contains(recorder.Body.String(), "obsolete") {
+			t.Fatalf("instance %s: status = %d, body = %q", test.instanceID, recorder.Code, recorder.Body.String())
+		}
 	}
 }
 
-func assertProjectedMetrics(t *testing.T, server *Server, runID, rawInstanceID string) {
+func assertProjectedMetrics(t *testing.T, server *Server, runID string) {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/metrics/tasks/"+rawInstanceID, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/metrics/tasks/"+runID+"_map[0]_2", nil)
 	server.handleGetTaskMetrics(recorder, request)
 	var metric models.TaskMetrics
 	if err := json.Unmarshal(recorder.Body.Bytes(), &metric); err != nil {
 		t.Fatalf("decode task metric: %v", err)
 	}
-	if metric.TaskID != "map[0]" || metric.TaskInstanceID != runID+"_map[0]_2" {
+	if metric.TaskID != "map[0]" || metric.TaskInstanceID != runID+"_map[0]_2" || metric.DurationMs != 42 {
 		t.Fatalf("projected task metric = %+v", metric)
 	}
 
@@ -204,5 +214,16 @@ func assertProjectedMetrics(t *testing.T, server *Server, runID, rawInstanceID s
 	}
 	if len(metrics) != 1 || metrics[0].TaskID != "map[0]" || metrics[0].TaskInstanceID != runID+"_map[0]_2" {
 		t.Fatalf("projected run metrics = %+v", metrics)
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/metrics/timeseries?dag_id=map_api&since=24h", nil)
+	server.handleGetMetricsTimeSeries(recorder, request)
+	var series []models.TimeSeriesPoint
+	if err := json.Unmarshal(recorder.Body.Bytes(), &series); err != nil {
+		t.Fatalf("decode time series: %v", err)
+	}
+	if len(series) != 1 || series[0].TaskID != "map[0]" || series[0].DurationMs != 42 {
+		t.Fatalf("projected time series = %+v", series)
 	}
 }

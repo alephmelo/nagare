@@ -13,6 +13,8 @@ import (
 	"github.com/alephmelo/nagare/internal/tasklifecycle"
 )
 
+var errMapSetupNotOwned = errors.New("map setup is not scheduler-owned")
+
 func (s *Scheduler) promoteAndRecover() error {
 	s.orchestrate.Lock()
 	defer s.orchestrate.Unlock()
@@ -185,6 +187,9 @@ func (s *Scheduler) reconcileMapParentLocked(parent models.TaskInstance, taskDef
 	parent = attempts[len(attempts)-1]
 
 	setup, err := s.ensureMapSetupLocked(parent, taskDef)
+	if errors.Is(err, errMapSetupNotOwned) {
+		return nil
+	}
 	if err != nil {
 		if _, claimErr := s.lifecycle.StartSetup(parent.ID, time.Now().UTC()); claimErr != nil {
 			return errors.Join(err, claimErr)
@@ -211,6 +216,9 @@ func (s *Scheduler) reconcileMapParentLocked(parent models.TaskInstance, taskDef
 	}
 
 	parent, err = s.reloadOwnedMapSetup(parent.ID, setup)
+	if errors.Is(err, errMapSetupNotOwned) {
+		return nil
+	}
 	if err != nil {
 		return s.failMapParentLocked(parent, taskDef, err)
 	}
@@ -244,6 +252,11 @@ func (s *Scheduler) ensureMapSetupLocked(parent models.TaskInstance, taskDef *mo
 		return *setup, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return models.MapSetup{}, err
+	}
+	if parent.Status == models.TaskRunning {
+		// A worker won the queued-attempt claim before the scheduler durably
+		// bound setup. It is not safe to infer a source or reconcile children.
+		return models.MapSetup{}, errMapSetupNotOwned
 	}
 
 	var upstream models.TaskInstance
@@ -281,7 +294,7 @@ func (s *Scheduler) reloadOwnedMapSetup(parentID string, setup models.MapSetup) 
 		return *parent, fmt.Errorf("map parent %s is %s after setup claim", parent.ID, parent.Status)
 	}
 	if parent.StartedAt == nil || !parent.StartedAt.Equal(setup.StartedAt) {
-		return *parent, fmt.Errorf("map parent %s is running without scheduler setup ownership", parent.ID)
+		return *parent, fmt.Errorf("%w: map parent %s has a different ownership watermark", errMapSetupNotOwned, parent.ID)
 	}
 	return *parent, nil
 }
@@ -551,7 +564,7 @@ func (s *Scheduler) aggregateMapParentsLocked(runID string, dag *models.DAGDef) 
 			return err
 		}
 		if parent.StartedAt == nil || !parent.StartedAt.Equal(setup.StartedAt) {
-			return s.failMapParentLocked(parent, taskDef, fmt.Errorf("map parent %s has invalid setup ownership", parent.ID))
+			continue
 		}
 		items, err := decodeMapItems(setup.UpstreamOutput)
 		if err != nil {
@@ -592,6 +605,11 @@ func (s *Scheduler) aggregateMapParentsLocked(runID string, dag *models.DAGDef) 
 		}
 		if !anyFailed && !allSuccess {
 			continue
+		}
+		if anyFailed {
+			if err := s.cancelMapChildrenLocked(parent.RunID, parent.TaskID, parent.Attempt); err != nil {
+				return fmt.Errorf("cancel active siblings for failed map parent %s: %w", parent.ID, err)
+			}
 		}
 		disposition, err := s.lifecycle.Complete(tasklifecycle.Completion{
 			AttemptID:   parent.ID,

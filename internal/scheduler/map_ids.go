@@ -20,7 +20,8 @@ func splitMapChildID(taskID string) (parentID string, index int, ok bool) {
 	if open <= 0 || open == len(taskID)-2 {
 		return "", 0, false
 	}
-	index, err := strconv.Atoi(taskID[open+1 : len(taskID)-1])
+	indexText := taskID[open+1 : len(taskID)-1]
+	index, err := strconv.Atoi(indexText)
 	if err != nil || index < 0 {
 		return "", 0, false
 	}
@@ -34,8 +35,9 @@ func splitInternalMapGeneration(taskID string) (publicID string, generation int,
 	if suffix < 0 || suffix+2 == len(taskID) {
 		return "", 0, false
 	}
-	generation, err := strconv.Atoi(taskID[suffix+2:])
-	if err != nil || generation < 2 {
+	generationText := taskID[suffix+2:]
+	generation, err := strconv.Atoi(generationText)
+	if err != nil || generation < 2 || strconv.Itoa(generation) != generationText {
 		return "", 0, false
 	}
 	publicID = taskID[:suffix]
@@ -123,19 +125,29 @@ func ProjectTaskInstance(task models.TaskInstance) models.TaskInstance {
 // ResolveTaskInstanceID maps a projected current-attempt identity back to its
 // persisted identity. Raw storage IDs remain accepted for compatibility.
 func (s *Scheduler) ResolveTaskInstanceID(runID, instanceID string) (string, error) {
-	tasks, err := s.store.GetLatestTaskAttempts(runID)
+	tasks, err := s.store.GetAllTaskAttemptsByRun(runID)
 	if err != nil {
 		return "", err
 	}
+	var historical []models.TaskInstance
 	for _, task := range tasks {
+		if ProjectTaskInstance(task).ID != instanceID {
+			continue
+		}
+		historical = append(historical, task)
 		publicID := PublicTaskID(task.TaskID)
 		resolvedID, resolveErr := s.ResolveTaskID(runID, publicID)
 		if resolveErr != nil || resolvedID != task.TaskID {
 			continue
 		}
-		if ProjectTaskInstance(task).ID == instanceID {
-			return task.ID, nil
-		}
+		// Current-generation projections win over colliding obsolete raw IDs.
+		return task.ID, nil
+	}
+	if len(historical) == 1 {
+		return historical[0].ID, nil
+	}
+	if len(historical) > 1 {
+		return "", fmt.Errorf("projected task instance ID %q is ambiguous in run %s", instanceID, runID)
 	}
 	if task, err := s.store.GetTaskInstance(instanceID); err == nil {
 		if task.RunID != runID {

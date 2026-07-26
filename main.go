@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -142,13 +143,13 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) erro
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 7. Reset any tasks left running/queued by a previous process that was killed
-	//    or crashed. Those processes are dead, so the tasks can never complete —
-	//    mark them failed so runs surface as failed in the UI and can be re-triggered.
-	if n, err := store.ResetStaleTasks(); err != nil {
-		log.Printf("Warning: failed to reset stale tasks: %v", err)
+	// 7. Recover persisted orchestration before workers can claim queued work.
+	//    Map setup remains replayable; stale executor-owned running attempts are
+	//    completed through the lifecycle so their configured retry policy wins.
+	if n, err := recoverStartupState(store, lifecycle, sched); err != nil {
+		log.Printf("Warning: startup recovery encountered errors: %v", err)
 	} else if n > 0 {
-		log.Printf("Startup: reset %d stale task(s) from previous run to 'failed'", n)
+		log.Printf("Startup: reconciled %d stale running task attempt(s)", n)
 	}
 
 	// 8. Start local workers, autoscaler, and API server.
@@ -221,6 +222,61 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) erro
 			}
 		}
 	}
+}
+
+func recoverStartupState(
+	store *models.Store,
+	lifecycle *tasklifecycle.Lifecycle,
+	sched *scheduler.Scheduler,
+) (int, error) {
+	running, err := store.GetTasksByStatus(models.TaskRunning)
+	if err != nil {
+		return 0, fmt.Errorf("load stale running attempts: %w", err)
+	}
+
+	reconciled := 0
+	var recoveryErrs []error
+	for _, attempt := range running {
+		run, runErr := store.GetDagRun(attempt.RunID)
+		if runErr != nil {
+			recoveryErrs = append(recoveryErrs,
+				fmt.Errorf("load run for stale attempt %s: %w", attempt.ID, runErr))
+			continue
+		}
+		dag := sched.GetDAGs()[run.DAGID]
+		var taskDef *models.TaskDef
+		if dag != nil {
+			taskDef = dag.FindTaskForInstance(attempt.TaskID)
+		}
+		if taskDef != nil && taskDef.Type == "map" && taskDef.ID == attempt.TaskID {
+			// Scheduler-owned map setup is replayed below. A worker-owned map
+			// claim has no binding and must not be reinterpreted as setup.
+			continue
+		}
+
+		retries := 0
+		if taskDef != nil {
+			retries = taskDef.Retries
+		}
+		disposition, completeErr := lifecycle.Complete(tasklifecycle.Completion{
+			AttemptID:   attempt.ID,
+			Output:      "task interrupted by master restart",
+			Retries:     retries,
+			CompletedAt: time.Now().UTC(),
+		})
+		if completeErr != nil {
+			recoveryErrs = append(recoveryErrs,
+				fmt.Errorf("complete stale attempt %s: %w", attempt.ID, completeErr))
+			continue
+		}
+		if disposition == tasklifecycle.Applied {
+			reconciled++
+		}
+	}
+	if err := sched.PromotePendingTasks(); err != nil {
+		recoveryErrs = append(recoveryErrs, fmt.Errorf("replay scheduler setup: %w", err))
+	}
+	return reconciled, errors.Join(recoveryErrs...)
 }
 
 // runWorker starts a worker-only node that registers with and polls a master.

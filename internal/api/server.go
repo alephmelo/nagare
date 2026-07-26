@@ -768,6 +768,26 @@ func (s *Server) handleGetTaskMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskInstanceID := parts[4]
+	if s.scheduler != nil {
+		runIDs, resolveErr := s.store.GetRunIDsForTaskInstanceID(taskInstanceID)
+		if resolveErr != nil {
+			http.Error(w, "Metrics not found", http.StatusNotFound)
+			return
+		}
+		resolved := false
+		for _, runID := range runIDs {
+			storageID, err := s.scheduler.ResolveTaskInstanceID(runID, taskInstanceID)
+			if err == nil {
+				taskInstanceID = storageID
+				resolved = true
+				break
+			}
+		}
+		if len(runIDs) > 0 && !resolved {
+			http.Error(w, "Metrics not found", http.StatusNotFound)
+			return
+		}
+	}
 
 	m, err := s.store.GetTaskMetrics(taskInstanceID)
 	if err != nil {

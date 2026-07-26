@@ -128,7 +128,7 @@ func (p *Pool) Dispatch() error {
 			}
 			continue
 		}
-		taskDef := dag.FindTask(models.BaseTaskID(ti.TaskID))
+		taskDef := dag.FindTaskForInstance(ti.TaskID)
 		if taskDef == nil {
 			if err := p.claimAndFail(ti, fmt.Sprintf("task definition %q not found in DAG %q", ti.TaskID, dag.ID)); err != nil {
 				return err
@@ -250,7 +250,7 @@ func (p *Pool) executeTask(ctx context.Context, work queuedAttempt, workerID int
 		p.completeAttempt(control, ti, run.DAGID, RunResult{Output: fmt.Sprintf("DAG %q not found", run.DAGID)}, false, 0, workerID)
 		return
 	}
-	taskDef := dag.FindTask(models.BaseTaskID(ti.TaskID))
+	taskDef := dag.FindTaskForInstance(ti.TaskID)
 
 	control.gate.Lock()
 	if ctx.Err() != nil {

@@ -489,6 +489,45 @@ func (s *Store) GetLatestTaskAttempts(runID string) ([]TaskInstance, error) {
 	return s.scanTaskInstances(rows)
 }
 
+// GetAllTaskAttemptsByRun returns every persisted attempt in a run. It is used
+// when resolving public attempt identities whose retry suffix is historical.
+func (s *Store) GetAllTaskAttemptsByRun(runID string) ([]TaskInstance, error) {
+	rows, err := s.db.Query(`
+		SELECT id, run_id, task_id, status, COALESCE(output,''), item_value,
+			attempt, created_at, updated_at, started_at
+		FROM task_instances
+		WHERE run_id = ?
+		ORDER BY created_at ASC, task_id ASC, attempt ASC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return s.scanTaskInstances(rows)
+}
+
+// GetRunIDsForTaskInstanceID returns runs whose ID is a valid prefix of an
+// instance ID. Longer matches come first to make nested run-ID prefixes stable.
+func (s *Store) GetRunIDsForTaskInstanceID(instanceID string) ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT id
+		FROM dag_runs
+		WHERE substr(?, 1, length(id) + 1) = id || '_'
+		ORDER BY length(id) DESC, id ASC`, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runIDs []string
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return nil, err
+		}
+		runIDs = append(runIDs, runID)
+	}
+	return runIDs, rows.Err()
+}
+
 // GetTaskAttempts returns all attempts for a single task within a run, ordered oldest first.
 func (s *Store) GetTaskAttempts(runID, taskID string) ([]TaskInstance, error) {
 	query := `
@@ -637,11 +676,9 @@ func (s *Store) GetQueuedTasks() ([]TaskInstance, error) {
 	return s.GetTasksByStatus(TaskQueued)
 }
 
-// ResetStaleTasks marks any task instances left in 'running' or 'queued' state
-// as 'failed'. This is called once at master startup to clean up orphaned tasks
-// from a previous process that was killed or crashed before they could complete.
-// DAG runs that owned those tasks are also marked failed so the user can see
-// what was interrupted and re-trigger if needed.
+// ResetStaleTasks is a legacy administrative bulk reset. Production startup
+// deliberately does not call it because lifecycle-aware recovery must preserve
+// map setup and per-task retry policy.
 func (s *Store) ResetStaleTasks() (int64, error) {
 	result, err := s.db.Exec(
 		`UPDATE task_instances SET status = ?, updated_at = ? WHERE status IN (?, ?)`,

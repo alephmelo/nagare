@@ -83,13 +83,35 @@ type DAGDef struct {
 	Tasks       []TaskDef            `yaml:"tasks"`
 }
 
-// BaseTaskID strips the "[item]" suffix from a map-expanded task ID,
-// returning the original task definition ID.
+// BaseTaskID strips only Nagare's numeric map-child suffix, plus the reserved
+// generation suffix used for later parent attempts. Brackets and @g text in
+// ordinary task IDs remain byte-for-byte unchanged.
 func BaseTaskID(taskID string) string {
-	if idx := strings.Index(taskID, "["); idx != -1 {
-		return taskID[:idx]
+	publicID := taskID
+	if suffix := strings.LastIndex(publicID, "@g"); suffix >= 0 {
+		generationText := publicID[suffix+2:]
+		generation, err := strconv.Atoi(generationText)
+		if err == nil && generation >= 2 && strconv.Itoa(generation) == generationText &&
+			numericMapChildBase(publicID[:suffix]) != publicID[:suffix] {
+			publicID = publicID[:suffix]
+		}
 	}
-	return taskID
+	return numericMapChildBase(publicID)
+}
+
+func numericMapChildBase(taskID string) string {
+	if !strings.HasSuffix(taskID, "]") {
+		return taskID
+	}
+	open := strings.LastIndexByte(taskID, '[')
+	if open <= 0 || open == len(taskID)-2 {
+		return taskID
+	}
+	indexText := taskID[open+1 : len(taskID)-1]
+	if _, err := strconv.ParseUint(indexText, 10, 64); err != nil {
+		return taskID
+	}
+	return taskID[:open]
 }
 
 // FindTask returns the TaskDef matching the given base ID, or nil.
@@ -102,9 +124,18 @@ func (d *DAGDef) FindTask(baseID string) *TaskDef {
 	return nil
 }
 
+// FindTaskForInstance resolves an exact task definition first, then falls back
+// to the numeric map-child syntax used by expanded instances.
+func (d *DAGDef) FindTaskForInstance(taskID string) *TaskDef {
+	if task := d.FindTask(taskID); task != nil {
+		return task
+	}
+	return d.FindTask(BaseTaskID(taskID))
+}
+
 // TaskPool returns the pool name for a given task ID, defaulting to "default".
 func (d *DAGDef) TaskPool(taskID string) string {
-	if td := d.FindTask(BaseTaskID(taskID)); td != nil && td.Pool != "" {
+	if td := d.FindTaskForInstance(taskID); td != nil && td.Pool != "" {
 		return td.Pool
 	}
 	return "default"
