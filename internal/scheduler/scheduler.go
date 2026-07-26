@@ -195,6 +195,11 @@ func (s *Scheduler) Tick() error {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	now := time.Now()
 
+	type scheduledRun struct {
+		dag      *models.DAGDef
+		execDate time.Time
+	}
+	var scheduledRuns []scheduledRun
 	s.mu.Lock()
 	for _, dag := range s.dags {
 		if dag.Schedule == "" || dag.Schedule == "workflow_dispatch" {
@@ -219,27 +224,29 @@ func (s *Scheduler) Tick() error {
 			log.Printf("Cron Triggering DAG %s", dag.ID)
 
 			if dag.Catchup != nil && *dag.Catchup {
-				// Catchup: create a run for every missed interval
+				// Catchup: stage a run for every missed interval. Materialize
+				// it after releasing the DAG registry lock so creation can use
+				// the same orchestration serialization as retries and cancels.
 				currRunTime := nextRunTime
 				for now.After(currRunTime) || now.Equal(currRunTime) {
-					_, err := s.createRun(dag, "scheduled", currRunTime, nil)
-					if err != nil {
-						log.Printf("Cron failed to trigger %s at %v: %v", dag.ID, currRunTime, err)
-					}
+					scheduledRuns = append(scheduledRuns, scheduledRun{dag: dag, execDate: currRunTime})
 					s.lastExec[dag.ID] = currRunTime
 					currRunTime = sched.Next(currRunTime)
 				}
 			} else {
 				// No catchup: trigger single run, advance lastExec to now
-				_, err := s.createRun(dag, "scheduled", now, nil)
-				if err != nil {
-					log.Printf("Cron failed to trigger %s: %v", dag.ID, err)
-				}
+				scheduledRuns = append(scheduledRuns, scheduledRun{dag: dag, execDate: now})
 				s.lastExec[dag.ID] = now
 			}
 		}
 	}
 	s.mu.Unlock()
+
+	for _, scheduled := range scheduledRuns {
+		if _, err := s.createRun(scheduled.dag, "scheduled", scheduled.execDate, nil); err != nil {
+			log.Printf("Cron failed to trigger %s at %v: %v", scheduled.dag.ID, scheduled.execDate, err)
+		}
+	}
 
 	// Now promote any pending tasks whose dependencies are met
 	if err := s.PromotePendingTasks(); err != nil {
@@ -272,6 +279,9 @@ func (s *Scheduler) TriggerDAG(dagID string, triggerType string, conf map[string
 }
 
 func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate time.Time, conf map[string]string) (*models.DagRun, error) {
+	s.orchestrate.Lock()
+	defer s.orchestrate.Unlock()
+
 	now := time.Now()
 	run := &models.DagRun{
 		ID:          fmt.Sprintf("%s_%d", dag.ID, now.UnixNano()),
@@ -301,12 +311,26 @@ func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate t
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		if _, err := s.store.EnsureTaskInstance(ti); err != nil {
-			return nil, fmt.Errorf("create task instance %s: %w", ti.ID, err)
+		created, err := s.store.EnsureTaskInstance(ti)
+		if err != nil {
+			materializeErr := fmt.Errorf("create task instance %s: %w", ti.ID, err)
+			return nil, errors.Join(materializeErr, s.containRunMaterializationFailureLocked(run, now))
+		}
+		if !created {
+			materializeErr := fmt.Errorf("create task instance %s: logical attempt already exists", ti.ID)
+			return nil, errors.Join(materializeErr, s.containRunMaterializationFailureLocked(run, now))
 		}
 	}
 
 	return run, nil
+}
+
+func (s *Scheduler) containRunMaterializationFailureLocked(run *models.DagRun, now time.Time) error {
+	if err := s.transitionRunStatusLocked(run.ID, run.Status, models.RunFailed, now.UTC()); err != nil {
+		return fmt.Errorf("contain partially materialized run %s: %w", run.ID, err)
+	}
+	run.Status = models.RunFailed
+	return nil
 }
 
 // RetryTask creates a new attempt for a failed/succeeded task rather than
@@ -360,7 +384,7 @@ func (s *Scheduler) RetryTask(runID, taskID string) error {
 
 	// Also run on replay: the successor may have committed before a previous
 	// status update failed.
-	if err := s.progressRetryLocked(runID, time.Now().UTC()); err != nil {
+	if err := s.progressRetryLocked(runID, time.Now().UTC(), true); err != nil {
 		return fmt.Errorf("progress retried dag run %s: %w", runID, err)
 	}
 
@@ -425,13 +449,13 @@ func (s *Scheduler) RetryTaskAutomatically(expected models.TaskInstance, retryDe
 		return fmt.Errorf("automatic retry for task %s returned unknown disposition %d", expected.TaskID, disposition)
 	}
 
-	if err := s.progressRetryLocked(expected.RunID, dueAt); err != nil {
+	if err := s.progressRetryLocked(expected.RunID, dueAt, false); err != nil {
 		return fmt.Errorf("progress automatically retried dag run %s: %w", expected.RunID, err)
 	}
 	return nil
 }
 
-func (s *Scheduler) progressRetryLocked(runID string, now time.Time) error {
+func (s *Scheduler) progressRetryLocked(runID string, now time.Time, manual bool) error {
 	run, err := s.store.GetDagRun(runID)
 	if err != nil {
 		return err
@@ -439,18 +463,21 @@ func (s *Scheduler) progressRetryLocked(runID string, now time.Time) error {
 	s.mu.RLock()
 	dag := s.dags[run.DAGID]
 	s.mu.RUnlock()
+	intent := progressionAutomaticRetry
+	if manual {
+		intent = progressionManualRetry
+	}
 	if dag == nil {
-		// Without authoritative definitions progression cannot safely reopen
-		// the run. Evaluate an empty authoritative set, which is a no-op, and
-		// let reconciliation converge after the DAG is loaded.
-		return s.applyProgressionLocked(run, &models.DAGDef{}, nil, now)
+		// An explicit retry is itself durable authority to reopen a run. The
+		// missing definition only prevents dependency-derived promotion.
+		return s.applyProgressionIntentLocked(run, &models.DAGDef{}, nil, now, intent)
 	}
 	tasks, err := s.store.GetLatestTaskAttempts(runID)
 	if err != nil {
 		return err
 	}
 	tasks = currentGenerationTasks(dag, tasks)
-	return s.applyProgressionLocked(run, dag, tasks, now)
+	return s.applyProgressionIntentLocked(run, dag, tasks, now, intent)
 }
 
 func sameAutomaticRetryObservation(persisted *models.TaskInstance, expected models.TaskInstance) bool {
@@ -655,15 +682,17 @@ func (s *Scheduler) progressCancellationLocked(runID string, now time.Time) erro
 	dag := s.dags[run.DAGID]
 	s.mu.RUnlock()
 	if dag == nil {
-		// Cancellation of the attempt is already durable. Do not derive a run
-		// terminal state until its authoritative definitions are available.
-		return s.applyProgressionLocked(run, &models.DAGDef{}, nil, now)
+		return s.applyProgressionIntentLocked(
+			run, &models.DAGDef{}, nil, now, progressionCancellation,
+		)
 	}
 	tasks, err := s.store.GetLatestTaskAttempts(runID)
 	if err != nil {
 		return err
 	}
-	return s.applyProgressionLocked(run, dag, currentGenerationTasks(dag, tasks), now)
+	return s.applyProgressionIntentLocked(
+		run, dag, currentGenerationTasks(dag, tasks), now, progressionCancellation,
+	)
 }
 
 func (s *Scheduler) transitionRunStatusLocked(

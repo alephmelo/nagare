@@ -16,6 +16,15 @@ import (
 
 var errMapSetupNotOwned = errors.New("map setup is not scheduler-owned")
 
+type progressionIntent uint8
+
+const (
+	progressionObserved progressionIntent = iota
+	progressionAutomaticRetry
+	progressionManualRetry
+	progressionCancellation
+)
+
 func (s *Scheduler) promoteAndRecover() error {
 	s.orchestrate.Lock()
 	defer s.orchestrate.Unlock()
@@ -27,6 +36,7 @@ func (s *Scheduler) promoteAndRecover() error {
 
 	var mapParents []models.TaskInstance
 	seenMapParents := make(map[string]bool)
+	ordinaryRunIDs := make(map[string]struct{})
 	for _, task := range pending {
 		run, dag, err := s.runAndDAG(task.RunID)
 		if err != nil {
@@ -60,12 +70,26 @@ func (s *Scheduler) promoteAndRecover() error {
 			seenMapParents[task.ID] = true
 			continue
 		}
-		if !s.dependenciesSucceeded(task.RunID, taskDef) {
+		ordinaryRunIDs[task.RunID] = struct{}{}
+	}
+
+	runIDs := make([]string, 0, len(ordinaryRunIDs))
+	for runID := range ordinaryRunIDs {
+		runIDs = append(runIDs, runID)
+	}
+	sort.Strings(runIDs)
+	for _, runID := range runIDs {
+		run, dag, err := s.runAndDAG(runID)
+		if err != nil || run.Status != models.RunRunning {
 			continue
 		}
-
-		log.Printf("Promoting task %s to queued", task.ID)
-		if _, err := s.lifecycle.Promote(task.ID, time.Now().UTC()); err != nil {
+		tasks, err := s.store.GetLatestTaskAttempts(runID)
+		if err != nil {
+			return err
+		}
+		if err := s.applyProgressionLocked(
+			run, dag, currentGenerationTasks(dag, tasks), time.Now().UTC(),
+		); err != nil {
 			return err
 		}
 	}
@@ -520,10 +544,9 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 	dag := s.dags[run.DAGID]
 	s.mu.RUnlock()
 	if dag == nil {
-		log.Printf("DAG %s not found in memory. Marking run %s as failed", run.DAGID, run.ID)
-		if err := s.store.UpdateDagRunStatus(run.ID, models.RunFailed); err != nil {
-			return nil, fmt.Errorf("mark run %s failed without DAG: %w", run.ID, err)
-		}
+		// A transient registry miss is not authority for a terminal write. The
+		// next cadence will reconcile after definitions are loaded.
+		log.Printf("DAG %s not found in memory; deferring run %s evaluation", run.DAGID, run.ID)
 		return nil, nil
 	}
 
@@ -539,8 +562,7 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 	var retries []automaticRetryCandidate
 	for _, task := range tasks {
 		taskDef := taskDefinitionForStoredID(dag, task.TaskID)
-		switch task.Status {
-		case models.TaskUpForRetry:
+		if task.Status == models.TaskUpForRetry {
 			if taskDef != nil {
 				delay := time.Duration(taskDef.RetryDelaySeconds) * time.Second
 				dueAt := task.UpdatedAt.Add(delay)
@@ -562,7 +584,16 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 
 func progressionInput(run *models.DagRun, dag *models.DAGDef, tasks []models.TaskInstance) runprogression.Input {
 	input := runprogression.Input{RunStatus: run.Status}
+	materialized := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		if dag.FindTask(task.TaskID) != nil {
+			materialized[task.TaskID] = struct{}{}
+		}
+	}
 	for _, definition := range dag.Tasks {
+		if _, exists := materialized[definition.ID]; !exists {
+			continue
+		}
 		input.Definitions = append(input.Definitions, runprogression.TaskDefinition{
 			ID: definition.ID, DependsOn: definition.DependsOn,
 		})
@@ -576,17 +607,54 @@ func progressionInput(run *models.DagRun, dag *models.DAGDef, tasks []models.Tas
 }
 
 func (s *Scheduler) applyProgressionLocked(run *models.DagRun, dag *models.DAGDef, tasks []models.TaskInstance, now time.Time) error {
+	return s.applyProgressionIntentLocked(run, dag, tasks, now, progressionObserved)
+}
+
+func (s *Scheduler) applyProgressionIntentLocked(
+	run *models.DagRun,
+	dag *models.DAGDef,
+	tasks []models.TaskInstance,
+	now time.Time,
+	intent progressionIntent,
+) error {
 	plan := runprogression.Evaluate(progressionInput(run, dag, tasks))
-	for _, attemptID := range plan.PromoteAttemptIDs {
-		if _, err := s.lifecycle.Promote(attemptID, now); err != nil {
-			return fmt.Errorf("promote attempt %s: %w", attemptID, err)
+	if intent != progressionCancellation {
+		attemptsByID := make(map[string]models.TaskInstance, len(tasks))
+		for _, task := range tasks {
+			attemptsByID[task.ID] = task
+		}
+		for _, attemptID := range plan.PromoteAttemptIDs {
+			task, exists := attemptsByID[attemptID]
+			if !exists {
+				continue
+			}
+			taskDef := dag.FindTask(task.TaskID)
+			if taskDef != nil && taskDef.Type == "map" && taskDef.ID == task.TaskID {
+				// A map parent remains pending until reconcileMapParentLocked
+				// has persisted setup ownership. Queued means worker-claimable.
+				continue
+			}
+			if _, err := s.lifecycle.Promote(attemptID, now); err != nil {
+				return fmt.Errorf("promote attempt %s: %w", attemptID, err)
+			}
 		}
 	}
-	if plan.DesiredRunStatus != nil {
-		if err := s.transitionRunStatusLocked(run.ID, run.Status, *plan.DesiredRunStatus, now); err != nil {
+
+	desired := plan.DesiredRunStatus
+	switch intent {
+	case progressionManualRetry:
+		status := models.RunRunning
+		desired = &status
+	case progressionCancellation:
+		status := models.RunCancelled
+		desired = &status
+	}
+	if desired != nil && *desired != run.Status {
+		if err := s.transitionRunStatusLocked(run.ID, run.Status, *desired, now); err != nil {
 			return fmt.Errorf("transition run %s from %s to %s: %w",
-				run.ID, run.Status, *plan.DesiredRunStatus, err)
+				run.ID, run.Status, *desired, err)
 		}
+		run.Status = *desired
 	}
 	return nil
 }
