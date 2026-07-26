@@ -411,36 +411,51 @@ func mapChildAttemptID(runID, taskID string, attempt int) string {
 }
 
 func (s *Scheduler) failMapParentLocked(parent models.TaskInstance, taskDef *models.TaskDef, setupErr error) error {
-	cancelErr := s.cancelMapChildrenLocked(parent.RunID, parent.TaskID, parent.Attempt)
+	cancelErr, stopErr := s.cancelMapChildrenLocked(parent.RunID, parent.TaskID, parent.Attempt, nil)
 	_, completeErr := s.lifecycle.Complete(tasklifecycle.Completion{
 		AttemptID:   parent.ID,
 		Output:      setupErr.Error(),
 		Retries:     taskDef.Retries,
 		CompletedAt: time.Now().UTC(),
 	})
-	return errors.Join(setupErr, cancelErr, completeErr)
+	return errors.Join(setupErr, cancelErr, stopErr, completeErr)
 }
 
-// cancelMapChildrenLocked cancels every cancellable latest child in one exact
-// map generation. Callers must hold orchestrate.
-func (s *Scheduler) cancelMapChildrenLocked(runID, parentID string, generation int) error {
+// cancelMapChildrenLocked durably cancels every latest child in one exact map
+// generation, then requests an exact local stop. Callers must hold orchestrate.
+func (s *Scheduler) cancelMapChildrenLocked(runID, parentID string, generation int, pool interface {
+	KillTask(string) error
+}) (durableErr, followupErr error) {
 	tasks, err := s.store.GetLatestTaskAttempts(runID)
 	if err != nil {
-		return err
+		return err, nil
 	}
-	var cancelErrs []error
+	var durableErrs []error
+	var followupErrs []error
 	for _, task := range tasks {
 		if !belongsToMapGeneration(task.TaskID, parentID, generation) {
 			continue
 		}
 		switch task.Status {
-		case models.TaskPending, models.TaskQueued, models.TaskRunning, models.TaskUpForRetry:
-			if _, err := s.lifecycle.CancelAttempt(task.ID, time.Now().UTC()); err != nil {
-				cancelErrs = append(cancelErrs, fmt.Errorf("cancel mapped instance %s: %w", task.ID, err))
+		case models.TaskPending, models.TaskQueued, models.TaskRunning, models.TaskUpForRetry, models.TaskCancelled:
+			disposition, err := s.lifecycle.CancelAttempt(task.ID, time.Now().UTC())
+			if err != nil {
+				durableErrs = append(durableErrs, fmt.Errorf("cancel mapped instance %s: %w", task.ID, err))
+				continue
+			}
+			if disposition != tasklifecycle.Applied && disposition != tasklifecycle.AlreadyApplied {
+				durableErrs = append(durableErrs,
+					fmt.Errorf("cancel mapped instance %s returned unknown disposition %d", task.ID, disposition))
+				continue
+			}
+			if pool != nil {
+				if err := pool.KillTask(task.ID); err != nil {
+					followupErrs = append(followupErrs, fmt.Errorf("stop mapped instance %s: %w", task.ID, err))
+				}
 			}
 		}
 	}
-	return errors.Join(cancelErrs...)
+	return errors.Join(durableErrs...), errors.Join(followupErrs...)
 }
 
 type automaticRetryCandidate struct {
@@ -607,7 +622,8 @@ func (s *Scheduler) aggregateMapParentsLocked(runID string, dag *models.DAGDef) 
 			continue
 		}
 		if anyFailed {
-			if err := s.cancelMapChildrenLocked(parent.RunID, parent.TaskID, parent.Attempt); err != nil {
+			durableErr, followupErr := s.cancelMapChildrenLocked(parent.RunID, parent.TaskID, parent.Attempt, nil)
+			if err := errors.Join(durableErr, followupErr); err != nil {
 				return fmt.Errorf("cancel active siblings for failed map parent %s: %w", parent.ID, err)
 			}
 		}

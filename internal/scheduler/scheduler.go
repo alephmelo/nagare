@@ -531,9 +531,16 @@ func (s *Scheduler) cancelTaskLockedDetailed(runID, taskID string, pool interfac
 			durableErrs = append(durableErrs,
 				fmt.Errorf("resolve mapped children for cancelled attempt %s: %w", result.AttemptID, mapErr))
 		} else if isMapParent {
-			if cascadeErr := s.cancelMapChildrenLocked(runID, taskID, attempt.Attempt); cascadeErr != nil {
+			cascadeDurableErr, cascadeFollowupErr := s.cancelMapChildrenLocked(
+				runID, taskID, attempt.Attempt, pool,
+			)
+			if cascadeDurableErr != nil {
 				durableErrs = append(durableErrs,
-					fmt.Errorf("cancel mapped children for attempt %s: %w", result.AttemptID, cascadeErr))
+					fmt.Errorf("cancel mapped children for attempt %s: %w", result.AttemptID, cascadeDurableErr))
+			}
+			if cascadeFollowupErr != nil {
+				followupErrs = append(followupErrs,
+					fmt.Errorf("stop mapped children for attempt %s: %w", result.AttemptID, cascadeFollowupErr))
 			}
 		}
 	}
@@ -544,6 +551,36 @@ func (s *Scheduler) cancelTaskLockedDetailed(runID, taskID string, pool interfac
 		}
 	}
 	return errors.Join(durableErrs...), errors.Join(followupErrs...)
+}
+
+// cancelPersistedAttemptLockedDetailed is the DAG-independent cancellation
+// path used by whole-run cancellation. The caller has already selected the
+// exact latest persisted attempt, so no public-ID or DAG resolution is needed.
+func (s *Scheduler) cancelPersistedAttemptLockedDetailed(attempt models.TaskInstance, pool interface {
+	KillTask(string) error
+}) (durableErr, followupErr error) {
+	disposition, err := s.lifecycle.CancelAttempt(attempt.ID, time.Now())
+	if err != nil {
+		return fmt.Errorf("durably cancel exact attempt %s: %w", attempt.ID, err), nil
+	}
+	if disposition != tasklifecycle.Applied && disposition != tasklifecycle.AlreadyApplied {
+		return fmt.Errorf("cancel exact attempt %s returned unknown disposition %d", attempt.ID, disposition), nil
+	}
+	persisted, err := s.store.GetTaskInstance(attempt.ID)
+	if err != nil {
+		followupErr = fmt.Errorf("reload cancelled exact attempt %s: %w", attempt.ID, err)
+	} else if persisted.Status != models.TaskCancelled {
+		followupErr = fmt.Errorf(
+			"cancelled exact attempt %s has authoritative status %s", attempt.ID, persisted.Status,
+		)
+	}
+	if pool != nil {
+		if err := pool.KillTask(attempt.ID); err != nil {
+			followupErr = errors.Join(followupErr,
+				fmt.Errorf("stop cancelled exact attempt %s: %w", attempt.ID, err))
+		}
+	}
+	return nil, followupErr
 }
 
 // KillDagRun cancels only the latest current attempt of every logical task.
@@ -560,23 +597,14 @@ func (s *Scheduler) KillDagRun(runID string, pool interface {
 	var durableErrs []error
 	var followupErrs []error
 	for _, ti := range tasks {
-		publicID := PublicTaskID(ti.TaskID)
-		resolvedID, resolveErr := s.ResolveTaskID(runID, publicID)
-		if resolveErr != nil {
-			durableErrs = append(durableErrs, fmt.Errorf("resolve task %s: %w", publicID, resolveErr))
-			continue
-		}
-		if resolvedID != ti.TaskID {
-			continue
-		}
 		switch ti.Status {
 		case models.TaskPending, models.TaskQueued, models.TaskRunning, models.TaskUpForRetry, models.TaskCancelled:
-			durableErr, followupErr := s.cancelTaskLockedDetailed(runID, publicID, pool)
+			durableErr, followupErr := s.cancelPersistedAttemptLockedDetailed(ti, pool)
 			if durableErr != nil {
-				durableErrs = append(durableErrs, fmt.Errorf("cancel task %s: %w", publicID, durableErr))
+				durableErrs = append(durableErrs, fmt.Errorf("cancel task %s: %w", ti.TaskID, durableErr))
 			}
 			if followupErr != nil {
-				followupErrs = append(followupErrs, fmt.Errorf("finish cancelling task %s: %w", publicID, followupErr))
+				followupErrs = append(followupErrs, fmt.Errorf("finish cancelling task %s: %w", ti.TaskID, followupErr))
 			}
 		}
 	}

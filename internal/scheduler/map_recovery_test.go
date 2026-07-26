@@ -440,9 +440,9 @@ func TestCancelMapChildrenLockedTargetsExactGeneration(t *testing.T) {
 		Status: models.TaskQueued, ItemValue: &currentItem, Attempt: 1,
 	})
 	sched.orchestrate.Lock()
-	err := sched.cancelMapChildrenLocked(runID, "map", 2)
+	durableErr, followupErr := sched.cancelMapChildrenLocked(runID, "map", 2, nil)
 	sched.orchestrate.Unlock()
-	if err != nil {
+	if err := errors.Join(durableErr, followupErr); err != nil {
 		t.Fatalf("cancelMapChildrenLocked: %v", err)
 	}
 	old, _ := store.GetTaskInstance(runID + "_map[0]")

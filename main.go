@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -249,9 +250,17 @@ func recoverStartupState(
 			taskDef = dag.FindTaskForInstance(attempt.TaskID)
 		}
 		if taskDef != nil && taskDef.Type == "map" && taskDef.ID == attempt.TaskID {
-			// Scheduler-owned map setup is replayed below. A worker-owned map
-			// claim has no binding and must not be reinterpreted as setup.
-			continue
+			setup, setupErr := store.GetMapSetup(attempt.ID)
+			if setupErr == nil && attempt.StartedAt != nil && attempt.StartedAt.Equal(setup.StartedAt) {
+				// Only a durable binding with the same lifecycle watermark
+				// proves scheduler ownership. It is replayed below.
+				continue
+			}
+			if setupErr != nil && !errors.Is(setupErr, sql.ErrNoRows) {
+				recoveryErrs = append(recoveryErrs,
+					fmt.Errorf("load map setup for stale attempt %s: %w", attempt.ID, setupErr))
+				continue
+			}
 		}
 
 		retries := 0
