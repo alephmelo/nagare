@@ -11,6 +11,7 @@ import (
 	"github.com/alephmelo/nagare/internal/autoscaler"
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
+	"github.com/alephmelo/nagare/internal/tasklifecycle"
 	"github.com/alephmelo/nagare/internal/worker"
 )
 
@@ -25,6 +26,8 @@ type Coordinator struct {
 	workerTimeout time.Duration // marks workers offline after this idle period
 	mu            sync.RWMutex
 	workers       map[string]*WorkerInfo // keyed by WorkerID
+	lifecycle     *tasklifecycle.Lifecycle
+	assignments   map[string]*remoteAssignment
 
 	// autoscaler is optional; when set, the coordinator notifies it on
 	// worker registration and stale-worker expiry for cloud-managed workers.
@@ -40,6 +43,8 @@ func NewCoordinator(store *models.Store, getDAG func(string) (*models.DAGDef, bo
 		token:         token,
 		workerTimeout: workerTimeout,
 		workers:       make(map[string]*WorkerInfo),
+		lifecycle:     tasklifecycle.New(store),
+		assignments:   make(map[string]*remoteAssignment),
 	}
 }
 
@@ -340,19 +345,10 @@ func (c *Coordinator) handlePoll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Claim the task by marking it running before returning.
-		if err := c.store.UpdateTaskInstanceStatus(ti.ID, models.TaskRunning); err != nil {
+		disposition, err := c.claimRemote(req.WorkerID, ti, assignment, time.Now())
+		if err != nil || disposition != tasklifecycle.Applied {
 			continue
 		}
-
-		// Increment the active-task counter for this worker.
-		c.mu.Lock()
-		if ww, ok := c.workers[req.WorkerID]; ok {
-			ww.ActiveTasks++
-		}
-		c.mu.Unlock()
-
-		c.store.SetTaskStartedAt(ti.ID, time.Now())
 
 		writeJSON(w, assignment.ToDTO())
 		return
@@ -370,37 +366,21 @@ func (c *Coordinator) handleResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var status models.TaskStatus
 	switch res.Status {
-	case "success":
-		status = models.TaskSuccess
-	case "failed":
-		status = models.TaskFailed
-	case "cancelled":
-		status = models.TaskCancelled
-	case "up_for_retry":
-		status = models.TaskUpForRetry
+	case "success", "failed", "cancelled", "up_for_retry":
 	default:
 		http.Error(w, "unknown status", http.StatusBadRequest)
 		return
 	}
 
-	if err := c.store.UpdateTaskInstanceStatusAndOutput(res.TaskInstanceID, status, res.Output); err != nil {
+	completion, err := c.completeRemote(res, time.Now())
+	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
 
-	// Decrement the active-task counter for the worker that reported this result.
-	if res.WorkerID != "" {
-		c.mu.Lock()
-		if ww, ok := c.workers[res.WorkerID]; ok && ww.ActiveTasks > 0 {
-			ww.ActiveTasks--
-		}
-		c.mu.Unlock()
-	}
-
 	// Persist resource metrics reported by the remote worker.
-	if res.DurationMs > 0 || res.PeakMemoryBytes > 0 {
+	if completion.disposition == tasklifecycle.Applied && (res.DurationMs > 0 || res.PeakMemoryBytes > 0) {
 		if ti, err := c.store.GetTaskInstance(res.TaskInstanceID); err == nil {
 			run, runErr := c.store.GetDagRun(ti.RunID)
 			dagID := ""
@@ -426,12 +406,14 @@ func (c *Coordinator) handleResult(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if c.broker != nil {
+	if completion.cleanup && c.broker != nil {
 		c.broker.Close(res.TaskInstanceID)
 		c.broker.Cleanup(res.TaskInstanceID)
 	}
 
-	log.Printf("Cluster: task %s reported %s by remote worker", res.TaskInstanceID, res.Status)
+	if completion.disposition == tasklifecycle.Applied {
+		log.Printf("Cluster: task %s reported %s by remote worker", res.TaskInstanceID, res.Status)
+	}
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
