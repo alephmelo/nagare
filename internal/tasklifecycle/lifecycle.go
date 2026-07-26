@@ -48,6 +48,7 @@ type store interface {
 	CompareAndSetTaskAttempt(string, models.TaskStatus, models.TaskAttemptMutation) (bool, error)
 	CancelCurrentTaskAttempt(string, string, time.Time) (models.CurrentAttemptResult, error)
 	RetryCurrentTaskAttempt(string, string, time.Time) (models.CurrentAttemptResult, error)
+	RetryCurrentTaskAttemptPending(string, string, time.Time) (models.CurrentAttemptResult, error)
 }
 
 type Lifecycle struct{ store store }
@@ -68,6 +69,33 @@ type Completion struct {
 type CurrentCancellation struct {
 	Disposition Disposition
 	AttemptID   string
+}
+
+// StartSetup atomically takes ownership of one exact pending attempt without
+// exposing a queued intermediate to workers. Queued is accepted for recovery;
+// it competes with worker Claim and only the compare-and-set winner is Applied.
+func (l *Lifecycle) StartSetup(attemptID string, startedAt time.Time) (Disposition, error) {
+	for {
+		attempt, err := l.get(attemptID)
+		if err != nil {
+			return 0, err
+		}
+		if attempt.Status == models.TaskRunning {
+			return AlreadyApplied, nil
+		}
+		if attempt.Status != models.TaskPending && attempt.Status != models.TaskQueued {
+			return 0, invalid(attempt, "start setup")
+		}
+		applied, err := l.store.CompareAndSetTaskAttempt(attemptID, attempt.Status, models.TaskAttemptMutation{
+			Status: models.TaskRunning, UpdatedAt: startedAt, StartedAt: &startedAt,
+		})
+		if err != nil {
+			return 0, err
+		}
+		if applied {
+			return Applied, nil
+		}
+	}
 }
 
 func (l *Lifecycle) Claim(attemptID string, claimedAt time.Time) (Disposition, error) {
@@ -200,6 +228,28 @@ func (l *Lifecycle) CancelCurrentAttempt(runID, taskID string, cancelledAt time.
 // RetryCurrent creates one queued successor for the current retryable attempt.
 func (l *Lifecycle) RetryCurrent(runID, taskID string, retriedAt time.Time) (Disposition, error) {
 	result, err := l.store.RetryCurrentTaskAttempt(runID, taskID, retriedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, &MissingAttemptError{AttemptID: runID + "/" + taskID}
+	}
+	if err != nil {
+		return 0, err
+	}
+	if result.Applied {
+		return Applied, nil
+	}
+	if result.Replay {
+		return AlreadyApplied, nil
+	}
+	if result.Attempt.Status == models.TaskCancelled {
+		return AlreadyApplied, nil
+	}
+	return 0, invalid(result.Attempt, "retry")
+}
+
+// RetryCurrentPending creates one pending successor for scheduler-owned setup.
+// Unlike RetryCurrent, the successor is not visible to worker dispatch.
+func (l *Lifecycle) RetryCurrentPending(runID, taskID string, retriedAt time.Time) (Disposition, error) {
+	result, err := l.store.RetryCurrentTaskAttemptPending(runID, taskID, retriedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, &MissingAttemptError{AttemptID: runID + "/" + taskID}
 	}

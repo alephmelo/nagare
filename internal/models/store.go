@@ -677,6 +677,17 @@ func (s *Store) CancelCurrentTaskAttempt(runID, taskID string, cancelledAt time.
 // wins over a racing retry; a later explicit retry of a cancelled task remains
 // eligible.
 func (s *Store) RetryCurrentTaskAttempt(runID, taskID string, retriedAt time.Time) (_ CurrentAttemptResult, err error) {
+	return s.retryCurrentTaskAttempt(runID, taskID, TaskQueued, retriedAt)
+}
+
+// RetryCurrentTaskAttemptPending atomically inserts a pending successor when
+// the latest attempt remains retryable. It is intended for scheduler-owned
+// setup which must not expose the successor to workers before setup starts.
+func (s *Store) RetryCurrentTaskAttemptPending(runID, taskID string, retriedAt time.Time) (_ CurrentAttemptResult, err error) {
+	return s.retryCurrentTaskAttempt(runID, taskID, TaskPending, retriedAt)
+}
+
+func (s *Store) retryCurrentTaskAttempt(runID, taskID string, successorStatus TaskStatus, retriedAt time.Time) (_ CurrentAttemptResult, err error) {
 	conn, finish, err := s.beginImmediate()
 	if err != nil {
 		return CurrentAttemptResult{}, err
@@ -687,8 +698,11 @@ func (s *Store) RetryCurrentTaskAttempt(runID, taskID string, retriedAt time.Tim
 	if err != nil {
 		return CurrentAttemptResult{}, err
 	}
-	if current.Status == TaskQueued && retryOf.Valid {
-		return CurrentAttemptResult{Attempt: current, Replay: true}, nil
+	if retryOf.Valid && (current.Status == TaskPending || current.Status == TaskQueued) {
+		if current.Status == successorStatus {
+			return CurrentAttemptResult{Attempt: current, Replay: true}, nil
+		}
+		return CurrentAttemptResult{Attempt: current}, nil
 	}
 	switch current.Status {
 	case TaskPending, TaskUpForRetry, TaskFailed, TaskSuccess:
@@ -714,7 +728,7 @@ func (s *Store) RetryCurrentTaskAttempt(runID, taskID string, retriedAt time.Tim
 		FROM task_instances
 		WHERE id = ?
 		ON CONFLICT(run_id, task_id, attempt) DO NOTHING`,
-		TaskQueued, retriedAt, retriedAt, current.ID,
+		successorStatus, retriedAt, retriedAt, current.ID,
 	)
 	if err != nil {
 		return CurrentAttemptResult{}, err
