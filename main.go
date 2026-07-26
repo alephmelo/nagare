@@ -52,12 +52,14 @@ func main() {
 		return
 	}
 
-	runMaster(*port, *masterAddr, *dbPath, *dagsDir, *token, *apiKey)
+	if err := runMaster(*port, *masterAddr, *dbPath, *dagsDir, *token, *apiKey); err != nil {
+		log.Fatalf("Master stopped with error: %v", err)
+	}
 }
 
 // runMaster starts the full Nagare master node: scheduler + local worker pool +
 // optional cluster coordinator for remote workers + HTTP API.
-func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
+func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) error {
 	log.Println("Booting up Nagare: Lean Airflow in Go")
 
 	// Ensure dags directory exists.
@@ -199,9 +201,11 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
 		case <-sigChan:
 			log.Println("Received shutdown signal, terminating workers...")
 			cancel()
-			pool.Stop()
+			if err := pool.Stop(); err != nil {
+				return fmt.Errorf("stop local worker pool: %w", err)
+			}
 			log.Println("Nagare shut down successfully")
-			return
+			return nil
 
 		case <-ticker.C:
 			if err := sched.LoadDAGs(dagsDir); err != nil {

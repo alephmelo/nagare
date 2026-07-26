@@ -17,7 +17,7 @@ import (
 type attemptLifecycle interface {
 	Claim(string, time.Time) (tasklifecycle.Disposition, error)
 	Complete(tasklifecycle.Completion) (tasklifecycle.Disposition, error)
-	CancelCurrent(string, string, time.Time) (tasklifecycle.Disposition, error)
+	CancelAttempt(string, time.Time) (tasklifecycle.Disposition, error)
 }
 
 type localAttempt struct {
@@ -396,17 +396,10 @@ func (p *Pool) KillTask(taskInstanceID string) error {
 	return nil
 }
 
-// cancelAttempt protects the exact-attempt contract of the worker API while
-// adapting it to lifecycle's logical-task cancellation operation.
+// cancelAttempt preserves the worker API's exact-attempt contract at the
+// lifecycle boundary.
 func (p *Pool) cancelAttempt(ti models.TaskInstance, cancelledAt time.Time) (tasklifecycle.Disposition, error) {
-	attempts, err := p.store.GetTaskAttempts(ti.RunID, ti.TaskID)
-	if err != nil {
-		return 0, err
-	}
-	if len(attempts) == 0 || attempts[len(attempts)-1].ID != ti.ID {
-		return tasklifecycle.AlreadyApplied, nil
-	}
-	return p.lifecycle.CancelCurrent(ti.RunID, ti.TaskID, cancelledAt)
+	return p.lifecycle.CancelAttempt(ti.ID, cancelledAt)
 }
 
 func (p *Pool) finishLocal(control *localAttempt) {
