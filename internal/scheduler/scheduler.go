@@ -301,8 +301,8 @@ func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate t
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		if err := s.store.CreateTaskInstance(ti); err != nil {
-			log.Printf("Failed to map TaskInstance %s: %v", ti.ID, err)
+		if _, err := s.store.EnsureTaskInstance(ti); err != nil {
+			return nil, fmt.Errorf("create task instance %s: %w", ti.ID, err)
 		}
 	}
 
@@ -360,8 +360,8 @@ func (s *Scheduler) RetryTask(runID, taskID string) error {
 
 	// Also run on replay: the successor may have committed before a previous
 	// status update failed.
-	if err := s.store.UpdateDagRunStatus(runID, models.RunRunning); err != nil {
-		return fmt.Errorf("failed resetting dag run %s to running: %w", runID, err)
+	if err := s.progressRetryLocked(runID, time.Now().UTC()); err != nil {
+		return fmt.Errorf("progress retried dag run %s: %w", runID, err)
 	}
 
 	log.Printf("Staged retry for task %s on run %s", taskID, runID)
@@ -425,10 +425,32 @@ func (s *Scheduler) RetryTaskAutomatically(expected models.TaskInstance, retryDe
 		return fmt.Errorf("automatic retry for task %s returned unknown disposition %d", expected.TaskID, disposition)
 	}
 
-	if err := s.store.UpdateDagRunStatus(expected.RunID, models.RunRunning); err != nil {
-		return fmt.Errorf("failed resetting dag run %s to running: %w", expected.RunID, err)
+	if err := s.progressRetryLocked(expected.RunID, dueAt); err != nil {
+		return fmt.Errorf("progress automatically retried dag run %s: %w", expected.RunID, err)
 	}
 	return nil
+}
+
+func (s *Scheduler) progressRetryLocked(runID string, now time.Time) error {
+	run, err := s.store.GetDagRun(runID)
+	if err != nil {
+		return err
+	}
+	s.mu.RLock()
+	dag := s.dags[run.DAGID]
+	s.mu.RUnlock()
+	if dag == nil {
+		// Without authoritative definitions progression cannot safely reopen
+		// the run. Evaluate an empty authoritative set, which is a no-op, and
+		// let reconciliation converge after the DAG is loaded.
+		return s.applyProgressionLocked(run, &models.DAGDef{}, nil, now)
+	}
+	tasks, err := s.store.GetLatestTaskAttempts(runID)
+	if err != nil {
+		return err
+	}
+	tasks = currentGenerationTasks(dag, tasks)
+	return s.applyProgressionLocked(run, dag, tasks, now)
 }
 
 func sameAutomaticRetryObservation(persisted *models.TaskInstance, expected models.TaskInstance) bool {
@@ -497,6 +519,11 @@ func (s *Scheduler) cancelTaskLocked(runID, taskID string, pool interface {
 	KillTask(string) error
 }) error {
 	durableErr, followupErr := s.cancelTaskLockedDetailed(runID, taskID, pool)
+	if durableErr == nil {
+		if progressErr := s.progressCancellationLocked(runID, time.Now().UTC()); progressErr != nil {
+			durableErr = fmt.Errorf("progress cancelled task run %s: %w", runID, progressErr)
+		}
+	}
 	return errors.Join(durableErr, followupErr)
 }
 
@@ -612,9 +639,52 @@ func (s *Scheduler) KillDagRun(runID string, pool interface {
 	// Local process cleanup can be retried independently. The run is durably
 	// cancelled once all eligible task lifecycle writes have succeeded.
 	if len(durableErrs) == 0 {
-		if err := s.store.UpdateDagRunStatus(runID, models.RunCancelled); err != nil {
-			durableErrs = append(durableErrs, fmt.Errorf("mark dag run %s cancelled: %w", runID, err))
+		if err := s.progressCancellationLocked(runID, time.Now().UTC()); err != nil {
+			durableErrs = append(durableErrs, fmt.Errorf("progress cancelled dag run %s: %w", runID, err))
 		}
 	}
 	return errors.Join(errors.Join(durableErrs...), errors.Join(followupErrs...))
+}
+
+func (s *Scheduler) progressCancellationLocked(runID string, now time.Time) error {
+	run, err := s.store.GetDagRun(runID)
+	if err != nil {
+		return err
+	}
+	s.mu.RLock()
+	dag := s.dags[run.DAGID]
+	s.mu.RUnlock()
+	if dag == nil {
+		// Cancellation of the attempt is already durable. Do not derive a run
+		// terminal state until its authoritative definitions are available.
+		return s.applyProgressionLocked(run, &models.DAGDef{}, nil, now)
+	}
+	tasks, err := s.store.GetLatestTaskAttempts(runID)
+	if err != nil {
+		return err
+	}
+	return s.applyProgressionLocked(run, dag, currentGenerationTasks(dag, tasks), now)
+}
+
+func (s *Scheduler) transitionRunStatusLocked(
+	runID string,
+	observed models.RunStatus,
+	desired models.RunStatus,
+	now time.Time,
+) error {
+	applied, err := s.store.CompareAndSetDagRunStatus(runID, observed, desired, now)
+	if err != nil {
+		return err
+	}
+	if applied {
+		return nil
+	}
+	current, err := s.store.GetDagRun(runID)
+	if err != nil {
+		return fmt.Errorf("reload run after concurrent status transition: %w", err)
+	}
+	if current.Status == desired {
+		return nil
+	}
+	return fmt.Errorf("concurrent status transition changed run to %s", current.Status)
 }

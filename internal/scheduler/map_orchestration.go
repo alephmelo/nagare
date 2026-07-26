@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alephmelo/nagare/internal/models"
+	"github.com/alephmelo/nagare/internal/runprogression"
 	"github.com/alephmelo/nagare/internal/tasklifecycle"
 )
 
@@ -147,13 +148,28 @@ func (s *Scheduler) failUnresolvablePendingLocked(task models.TaskInstance) erro
 }
 
 func (s *Scheduler) dependenciesSucceeded(runID string, taskDef *models.TaskDef) bool {
-	for _, dependency := range taskDef.DependsOn {
-		status, err := s.store.GetTaskStatus(runID, dependency)
-		if err != nil || status != models.TaskSuccess {
-			return false
+	run, dag, err := s.runAndDAG(runID)
+	if err != nil {
+		return false
+	}
+	tasks, err := s.store.GetLatestTaskAttempts(runID)
+	if err != nil {
+		return false
+	}
+	for index := range tasks {
+		if tasks[index].TaskID == taskDef.ID {
+			tasks[index].Status = models.TaskPending
 		}
 	}
-	return true
+	plan := runprogression.Evaluate(progressionInput(run, dag, tasks))
+	for _, attemptID := range plan.PromoteAttemptIDs {
+		for _, task := range tasks {
+			if task.TaskID == taskDef.ID && task.ID == attemptID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Scheduler) mapSetupCanResume(task models.TaskInstance, taskDef *models.TaskDef) bool {
@@ -520,14 +536,11 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 	}
 	tasks = currentGenerationTasks(dag, tasks)
 
-	allSuccess := len(tasks) > 0
-	anyFailed := false
 	var retries []automaticRetryCandidate
 	for _, task := range tasks {
 		taskDef := taskDefinitionForStoredID(dag, task.TaskID)
 		switch task.Status {
 		case models.TaskUpForRetry:
-			allSuccess = false
 			if taskDef != nil {
 				delay := time.Duration(taskDef.RetryDelaySeconds) * time.Second
 				dueAt := task.UpdatedAt.Add(delay)
@@ -539,26 +552,43 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 					})
 				}
 			}
-		case models.TaskFailed:
-			anyFailed = true
-		case models.TaskSuccess:
-		default:
-			allSuccess = false
 		}
 	}
-
-	if anyFailed {
-		log.Printf("Marking run %s as failed", run.ID)
-		if err := s.store.UpdateDagRunStatus(run.ID, models.RunFailed); err != nil {
-			return retries, fmt.Errorf("mark run %s failed: %w", run.ID, err)
-		}
-	} else if allSuccess {
-		log.Printf("Marking run %s as success", run.ID)
-		if err := s.store.UpdateDagRunStatus(run.ID, models.RunSuccess); err != nil {
-			return retries, fmt.Errorf("mark run %s successful: %w", run.ID, err)
-		}
+	if err := s.applyProgressionLocked(run, dag, tasks, now); err != nil {
+		return retries, err
 	}
 	return retries, nil
+}
+
+func progressionInput(run *models.DagRun, dag *models.DAGDef, tasks []models.TaskInstance) runprogression.Input {
+	input := runprogression.Input{RunStatus: run.Status}
+	for _, definition := range dag.Tasks {
+		input.Definitions = append(input.Definitions, runprogression.TaskDefinition{
+			ID: definition.ID, DependsOn: definition.DependsOn,
+		})
+	}
+	for _, task := range tasks {
+		input.Attempts = append(input.Attempts, runprogression.AttemptSnapshot{
+			ID: task.ID, TaskID: task.TaskID, Attempt: task.Attempt, Status: task.Status,
+		})
+	}
+	return input
+}
+
+func (s *Scheduler) applyProgressionLocked(run *models.DagRun, dag *models.DAGDef, tasks []models.TaskInstance, now time.Time) error {
+	plan := runprogression.Evaluate(progressionInput(run, dag, tasks))
+	for _, attemptID := range plan.PromoteAttemptIDs {
+		if _, err := s.lifecycle.Promote(attemptID, now); err != nil {
+			return fmt.Errorf("promote attempt %s: %w", attemptID, err)
+		}
+	}
+	if plan.DesiredRunStatus != nil {
+		if err := s.transitionRunStatusLocked(run.ID, run.Status, *plan.DesiredRunStatus, now); err != nil {
+			return fmt.Errorf("transition run %s from %s to %s: %w",
+				run.ID, run.Status, *plan.DesiredRunStatus, err)
+		}
+	}
+	return nil
 }
 
 func (s *Scheduler) aggregateMapParentsLocked(runID string, dag *models.DAGDef) error {

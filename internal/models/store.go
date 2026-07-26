@@ -372,6 +372,26 @@ func (s *Store) UpdateDagRunStatus(runID string, status RunStatus) error {
 	return err
 }
 
+// CompareAndSetDagRunStatus applies a run transition only when the caller's
+// observed status is still current. Terminal states receive a completion time;
+// returning to running clears it.
+func (s *Store) CompareAndSetDagRunStatus(runID string, observed, desired RunStatus, now time.Time) (bool, error) {
+	var completedAt *time.Time
+	if desired != RunRunning {
+		completed := now.UTC()
+		completedAt = &completed
+	}
+	result, err := s.db.Exec(
+		`UPDATE dag_runs SET status = ?, completed_at = ? WHERE id = ? AND status = ?`,
+		desired, completedAt, runID, observed,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
+}
+
 // buildDagRunsWhere builds a shared WHERE clause for dag_runs queries.
 func buildDagRunsWhere(dagID, status, triggerType string) (string, []interface{}) {
 	var clauses []string
@@ -610,6 +630,27 @@ func (s *Store) CreateTaskInstance(ti *TaskInstance) error {
 	query := `INSERT INTO task_instances (id, run_id, task_id, status, output, item_value, attempt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := s.db.Exec(query, ti.ID, ti.RunID, ti.TaskID, ti.Status, ti.Output, ti.ItemValue, ti.Attempt, ti.CreatedAt, ti.UpdatedAt)
 	return err
+}
+
+// EnsureTaskInstance inserts one deterministic logical attempt. Replays return
+// the existing row without creating a duplicate.
+func (s *Store) EnsureTaskInstance(ti *TaskInstance) (bool, error) {
+	if ti.Attempt == 0 {
+		ti.Attempt = 1
+	}
+	result, err := s.db.Exec(
+		`INSERT INTO task_instances
+		 (id, run_id, task_id, status, output, item_value, attempt, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(run_id, task_id, attempt) DO NOTHING`,
+		ti.ID, ti.RunID, ti.TaskID, ti.Status, ti.Output, ti.ItemValue,
+		ti.Attempt, ti.CreatedAt, ti.UpdatedAt,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
 }
 
 // EnsureMapSetup inserts setup metadata once and returns the durable value.
