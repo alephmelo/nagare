@@ -373,17 +373,67 @@ func (s *Store) UpdateDagRunStatus(runID string, status RunStatus) error {
 }
 
 // CompareAndSetDagRunStatus applies a run transition only when the caller's
-// observed status is still current. Terminal states receive a completion time;
-// returning to running clears it.
+// observed status is still current. A completion time is set once when entering
+// a terminal state and is preserved by replays and terminal-to-terminal
+// transitions. Returning to running clears it.
 func (s *Store) CompareAndSetDagRunStatus(runID string, observed, desired RunStatus, now time.Time) (bool, error) {
-	var completedAt *time.Time
-	if desired != RunRunning {
-		completed := now.UTC()
-		completedAt = &completed
+	return compareAndSetDagRunStatusOn(s.db, runID, observed, desired, now)
+}
+
+// CompareAndSetDagRunStatusForTaskSnapshot applies a run transition only when
+// both the run status and its latest task-attempt snapshot remain current.
+// observedTasks must be the complete, unfiltered result of
+// GetLatestTaskAttempts for runID.
+func (s *Store) CompareAndSetDagRunStatusForTaskSnapshot(
+	runID string,
+	observed, desired RunStatus,
+	now time.Time,
+	observedTasks []TaskInstance,
+) (_ bool, err error) {
+	conn, finish, err := s.beginImmediate()
+	if err != nil {
+		return false, err
 	}
-	result, err := s.db.Exec(
-		`UPDATE dag_runs SET status = ?, completed_at = ? WHERE id = ? AND status = ?`,
-		desired, completedAt, runID, observed,
+	defer finish(&err)
+
+	currentTasks, err := getLatestTaskAttemptsOn(conn, runID)
+	if err != nil {
+		return false, err
+	}
+	if !sameTaskAttemptSnapshot(runID, observedTasks, currentTasks) {
+		return false, nil
+	}
+	return compareAndSetDagRunStatusOn(conn, runID, observed, desired, now)
+}
+
+type contextExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func compareAndSetDagRunStatusOn(
+	q contextExecer,
+	runID string,
+	observed, desired RunStatus,
+	now time.Time,
+) (bool, error) {
+	completedAt := now.UTC()
+	result, err := q.ExecContext(
+		context.Background(),
+		`UPDATE dag_runs
+		 SET status = ?,
+		     completed_at = CASE
+		       WHEN status = ? THEN completed_at
+		       WHEN ? = ? THEN NULL
+		       WHEN status = ? THEN ?
+		       ELSE COALESCE(completed_at, ?)
+		     END
+		 WHERE id = ? AND status = ?`,
+		desired,
+		desired,
+		desired, RunRunning,
+		RunRunning, completedAt,
+		completedAt,
+		runID, observed,
 	)
 	if err != nil {
 		return false, err
@@ -490,7 +540,15 @@ func (s *Store) GetTaskInstancesByRun(runID string) ([]TaskInstance, error) {
 
 // GetLatestTaskAttempts returns the most recent attempt for each task in a run.
 func (s *Store) GetLatestTaskAttempts(runID string) ([]TaskInstance, error) {
-	query := `
+	return getLatestTaskAttemptsOn(s.db, runID)
+}
+
+type rowsQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func getLatestTaskAttemptsOn(q rowsQueryer, runID string) ([]TaskInstance, error) {
+	rows, err := q.QueryContext(context.Background(), `
 		SELECT id, run_id, task_id, status, COALESCE(output,''), item_value, attempt, created_at, updated_at, started_at
 		FROM task_instances
 		WHERE run_id = ?
@@ -500,13 +558,69 @@ func (s *Store) GetLatestTaskAttempts(runID string) ([]TaskInstance, error) {
 			WHERE t2.run_id = task_instances.run_id
 			  AND t2.task_id = task_instances.task_id
 		  )
-		ORDER BY created_at ASC`
-	rows, err := s.db.Query(query, runID)
+		ORDER BY created_at ASC`, runID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return s.scanTaskInstances(rows)
+
+	var tasks []TaskInstance
+	for rows.Next() {
+		var task TaskInstance
+		if err := rows.Scan(
+			&task.ID, &task.RunID, &task.TaskID, &task.Status, &task.Output,
+			&task.ItemValue, &task.Attempt, &task.CreatedAt, &task.UpdatedAt,
+			&task.StartedAt,
+		); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func sameTaskAttemptSnapshot(runID string, observed, current []TaskInstance) bool {
+	if len(observed) != len(current) {
+		return false
+	}
+	observedByTask := make(map[string]TaskInstance, len(observed))
+	for _, task := range observed {
+		if task.RunID != runID {
+			return false
+		}
+		if _, duplicate := observedByTask[task.TaskID]; duplicate {
+			return false
+		}
+		observedByTask[task.TaskID] = task
+	}
+	for _, currentTask := range current {
+		observedTask, ok := observedByTask[currentTask.TaskID]
+		if !ok || !sameTaskAttempt(observedTask, currentTask) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameTaskAttempt(a, b TaskInstance) bool {
+	return a.ID == b.ID &&
+		a.RunID == b.RunID &&
+		a.TaskID == b.TaskID &&
+		a.Status == b.Status &&
+		a.Output == b.Output &&
+		sameOptionalString(a.ItemValue, b.ItemValue) &&
+		a.Attempt == b.Attempt &&
+		a.CreatedAt.Equal(b.CreatedAt) &&
+		a.UpdatedAt.Equal(b.UpdatedAt) &&
+		sameOptionalTime(a.StartedAt, b.StartedAt)
+}
+
+func sameOptionalString(a, b *string) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
+func sameOptionalTime(a, b *time.Time) bool {
+	return a == nil && b == nil || a != nil && b != nil && a.Equal(*b)
 }
 
 // GetAllTaskAttemptsByRun returns every persisted attempt in a run. It is used
@@ -634,11 +748,18 @@ func (s *Store) CreateTaskInstance(ti *TaskInstance) error {
 
 // EnsureTaskInstance inserts one deterministic logical attempt. Replays return
 // the existing row without creating a duplicate.
-func (s *Store) EnsureTaskInstance(ti *TaskInstance) (bool, error) {
+func (s *Store) EnsureTaskInstance(ti *TaskInstance) (_ bool, err error) {
 	if ti.Attempt == 0 {
 		ti.Attempt = 1
 	}
-	result, err := s.db.Exec(
+	conn, finish, err := s.beginImmediate()
+	if err != nil {
+		return false, err
+	}
+	defer finish(&err)
+
+	result, err := conn.ExecContext(
+		context.Background(),
 		`INSERT INTO task_instances
 		 (id, run_id, task_id, status, output, item_value, attempt, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -650,7 +771,32 @@ func (s *Store) EnsureTaskInstance(ti *TaskInstance) (bool, error) {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
-	return affected == 1, err
+	if err != nil {
+		return false, err
+	}
+	if affected == 1 {
+		return true, nil
+	}
+
+	var existingID string
+	err = conn.QueryRowContext(
+		context.Background(),
+		`SELECT id FROM task_instances
+		 WHERE run_id = ? AND task_id = ? AND attempt = ?`,
+		ti.RunID, ti.TaskID, ti.Attempt,
+	).Scan(&existingID)
+	if err != nil {
+		return false, fmt.Errorf(
+			"verify task instance %s logical-attempt conflict: %w", ti.ID, err,
+		)
+	}
+	if existingID != ti.ID {
+		return false, fmt.Errorf(
+			"task instance %s conflicts with existing identity %s for logical attempt %s/%s/%d",
+			ti.ID, existingID, ti.RunID, ti.TaskID, ti.Attempt,
+		)
+	}
+	return false, nil
 }
 
 // EnsureMapSetup inserts setup metadata once and returns the durable value.
@@ -894,6 +1040,7 @@ func (s *Store) retryCurrentTaskAttempt(runID, taskID string, successorStatus Ta
 
 type immediateConn interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
@@ -1006,7 +1153,7 @@ func (s *Store) InsertTaskMetrics(m *TaskMetrics) error {
 	_, err := s.db.Exec(query,
 		m.TaskInstanceID, m.RunID, m.DAGID, m.TaskID,
 		m.DurationMs, m.CpuUserMs, m.CpuSystemMs, m.PeakMemoryBytes,
-		m.ExitCode, m.ExecutorType, m.CreatedAt,
+		m.ExitCode, m.ExecutorType, m.CreatedAt.UTC(),
 	)
 	return err
 }
@@ -1056,7 +1203,7 @@ func (s *Store) GetMetricsByDAGID(dagID string, limit int) ([]TaskMetrics, error
 // GetAggregateMetrics returns aggregate statistics for a DAG since a given time.
 // Percentile approximations use SQLite's built-in ordering (no extension needed).
 func (s *Store) GetAggregateMetrics(dagID string, since time.Time) (*AggregateMetrics, error) {
-	sinceStr := since.Format(time.RFC3339)
+	since = since.UTC()
 
 	var agg AggregateMetrics
 	agg.DAGID = dagID
@@ -1072,9 +1219,9 @@ func (s *Store) GetAggregateMetrics(dagID string, since time.Time) (*AggregateMe
 			COALESCE(AVG(cpu_user_ms + cpu_system_ms), 0),
 			COALESCE(SUM(CASE WHEN exit_code = 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 0)
 		FROM task_metrics
-		WHERE dag_id = ? AND created_at >= ?`
+		WHERE dag_id = ? AND julianday(created_at) >= julianday(?)`
 
-	err := s.db.QueryRow(baseQuery, dagID, sinceStr).Scan(
+	err := s.db.QueryRow(baseQuery, dagID, since).Scan(
 		&agg.RunCount, &agg.AvgDurationMs, &agg.MaxDurationMs,
 		&agg.AvgMemoryBytes, &agg.MaxMemoryBytes,
 		&agg.AvgCpuMs, &agg.SuccessRate,
@@ -1089,16 +1236,16 @@ func (s *Store) GetAggregateMetrics(dagID string, since time.Time) (*AggregateMe
 
 	// P50 approximation
 	p50Offset := agg.RunCount / 2
-	p50Query := `SELECT duration_ms FROM task_metrics WHERE dag_id = ? AND created_at >= ? ORDER BY duration_ms LIMIT 1 OFFSET ?`
-	_ = s.db.QueryRow(p50Query, dagID, sinceStr, p50Offset).Scan(&agg.P50DurationMs)
+	p50Query := `SELECT duration_ms FROM task_metrics WHERE dag_id = ? AND julianday(created_at) >= julianday(?) ORDER BY duration_ms LIMIT 1 OFFSET ?`
+	_ = s.db.QueryRow(p50Query, dagID, since, p50Offset).Scan(&agg.P50DurationMs)
 
 	// P95 approximation
 	p95Offset := int(float64(agg.RunCount) * 0.95)
 	if p95Offset >= agg.RunCount {
 		p95Offset = agg.RunCount - 1
 	}
-	p95Query := `SELECT duration_ms FROM task_metrics WHERE dag_id = ? AND created_at >= ? ORDER BY duration_ms LIMIT 1 OFFSET ?`
-	_ = s.db.QueryRow(p95Query, dagID, sinceStr, p95Offset).Scan(&agg.P95DurationMs)
+	p95Query := `SELECT duration_ms FROM task_metrics WHERE dag_id = ? AND julianday(created_at) >= julianday(?) ORDER BY duration_ms LIMIT 1 OFFSET ?`
+	_ = s.db.QueryRow(p95Query, dagID, since, p95Offset).Scan(&agg.P95DurationMs)
 
 	return &agg, nil
 }
@@ -1106,7 +1253,7 @@ func (s *Store) GetAggregateMetrics(dagID string, since time.Time) (*AggregateMe
 // GetMetricsTimeSeries returns time-series data points for a DAG (or all DAGs if dagID is empty).
 // Points are ordered chronologically, limited to the given count.
 func (s *Store) GetMetricsTimeSeries(dagID string, since time.Time, limit int) ([]TimeSeriesPoint, error) {
-	sinceStr := since.Format(time.RFC3339)
+	since = since.UTC()
 
 	var rows *sql.Rows
 	var err error
@@ -1116,15 +1263,15 @@ func (s *Store) GetMetricsTimeSeries(dagID string, since time.Time, limit int) (
 			SELECT tm.created_at, tm.duration_ms, tm.peak_memory_bytes, tm.cpu_user_ms+tm.cpu_system_ms, tm.task_id, tm.run_id, ti.status
 			FROM task_metrics tm
 			LEFT JOIN task_instances ti ON ti.id = tm.task_instance_id
-			WHERE tm.created_at >= ?
-			ORDER BY tm.created_at ASC LIMIT ?`, sinceStr, limit)
+			WHERE julianday(tm.created_at) >= julianday(?)
+			ORDER BY tm.created_at ASC LIMIT ?`, since, limit)
 	} else {
 		rows, err = s.db.Query(`
 			SELECT tm.created_at, tm.duration_ms, tm.peak_memory_bytes, tm.cpu_user_ms+tm.cpu_system_ms, tm.task_id, tm.run_id, ti.status
 			FROM task_metrics tm
 			LEFT JOIN task_instances ti ON ti.id = tm.task_instance_id
-			WHERE tm.dag_id = ? AND tm.created_at >= ?
-			ORDER BY tm.created_at ASC LIMIT ?`, dagID, sinceStr, limit)
+			WHERE tm.dag_id = ? AND julianday(tm.created_at) >= julianday(?)
+			ORDER BY tm.created_at ASC LIMIT ?`, dagID, since, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -1148,7 +1295,7 @@ func (s *Store) GetMetricsTimeSeries(dagID string, since time.Time, limit int) (
 
 // GetOverviewMetrics returns system-wide aggregate metrics across all DAGs.
 func (s *Store) GetOverviewMetrics(since time.Time) (map[string]interface{}, error) {
-	sinceStr := since.Format(time.RFC3339)
+	since = since.UTC()
 
 	var totalTasks int
 	var avgDuration, maxMemory, totalCpu float64
@@ -1159,7 +1306,7 @@ func (s *Store) GetOverviewMetrics(since time.Time) (map[string]interface{}, err
 			COALESCE(AVG(duration_ms), 0),
 			COALESCE(MAX(peak_memory_bytes), 0),
 			COALESCE(SUM(cpu_user_ms + cpu_system_ms), 0)
-		FROM task_metrics WHERE created_at >= ?`, sinceStr).Scan(
+		FROM task_metrics WHERE julianday(created_at) >= julianday(?)`, since).Scan(
 		&totalTasks, &avgDuration, &maxMemory, &totalCpu,
 	)
 	if err != nil {
@@ -1170,7 +1317,7 @@ func (s *Store) GetOverviewMetrics(since time.Time) (map[string]interface{}, err
 	if totalTasks > 0 {
 		_ = s.db.QueryRow(`
 			SELECT SUM(CASE WHEN exit_code = 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)
-			FROM task_metrics WHERE created_at >= ?`, sinceStr).Scan(&successRate)
+			FROM task_metrics WHERE julianday(created_at) >= julianday(?)`, since).Scan(&successRate)
 	}
 
 	// Per-DAG aggregates for the table
@@ -1178,8 +1325,8 @@ func (s *Store) GetOverviewMetrics(since time.Time) (map[string]interface{}, err
 		SELECT dag_id, COUNT(*), COALESCE(AVG(duration_ms),0), COALESCE(MAX(duration_ms),0),
 			COALESCE(AVG(peak_memory_bytes),0), COALESCE(MAX(peak_memory_bytes),0),
 			COALESCE(SUM(CASE WHEN exit_code=0 THEN 1 ELSE 0 END)*1.0/COUNT(*),0)
-		FROM task_metrics WHERE created_at >= ?
-		GROUP BY dag_id ORDER BY COUNT(*) DESC`, sinceStr)
+		FROM task_metrics WHERE julianday(created_at) >= julianday(?)
+		GROUP BY dag_id ORDER BY COUNT(*) DESC`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -1207,8 +1354,8 @@ func (s *Store) GetOverviewMetrics(since time.Time) (map[string]interface{}, err
 	// Top 10 slowest tasks
 	slowRows, err := s.db.Query(`
 		SELECT task_instance_id, dag_id, task_id, run_id, duration_ms, peak_memory_bytes, exit_code, created_at
-		FROM task_metrics WHERE created_at >= ?
-		ORDER BY duration_ms DESC LIMIT 10`, sinceStr)
+		FROM task_metrics WHERE julianday(created_at) >= julianday(?)
+		ORDER BY duration_ms DESC LIMIT 10`, since)
 	if err != nil {
 		return nil, err
 	}
