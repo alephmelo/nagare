@@ -63,6 +63,13 @@ type Completion struct {
 	CompletedAt time.Time
 }
 
+// CurrentCancellation identifies the exact attempt atomically selected by a
+// logical-task cancellation and how that cancellation was classified.
+type CurrentCancellation struct {
+	Disposition Disposition
+	AttemptID   string
+}
+
 func (l *Lifecycle) Claim(attemptID string, claimedAt time.Time) (Disposition, error) {
 	attempt, err := l.get(attemptID)
 	if err != nil {
@@ -167,20 +174,27 @@ func (l *Lifecycle) CancelAttempt(attemptID string, cancelledAt time.Time) (Disp
 
 // CancelCurrent cancels the current attempt of one logical task.
 func (l *Lifecycle) CancelCurrent(runID, taskID string, cancelledAt time.Time) (Disposition, error) {
+	result, err := l.CancelCurrentAttempt(runID, taskID, cancelledAt)
+	return result.Disposition, err
+}
+
+// CancelCurrentAttempt atomically selects and cancels the current attempt of
+// one logical task, returning the exact attempt selected by the store.
+func (l *Lifecycle) CancelCurrentAttempt(runID, taskID string, cancelledAt time.Time) (CurrentCancellation, error) {
 	result, err := l.store.CancelCurrentTaskAttempt(runID, taskID, cancelledAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, &MissingAttemptError{AttemptID: runID + "/" + taskID}
+		return CurrentCancellation{}, &MissingAttemptError{AttemptID: runID + "/" + taskID}
 	}
 	if err != nil {
-		return 0, err
+		return CurrentCancellation{}, err
 	}
 	if result.Applied {
-		return Applied, nil
+		return CurrentCancellation{Disposition: Applied, AttemptID: result.Attempt.ID}, nil
 	}
 	if result.Attempt.Status == models.TaskCancelled {
-		return AlreadyApplied, nil
+		return CurrentCancellation{Disposition: AlreadyApplied, AttemptID: result.Attempt.ID}, nil
 	}
-	return 0, invalid(result.Attempt, "cancel")
+	return CurrentCancellation{}, invalid(result.Attempt, "cancel")
 }
 
 // RetryCurrent creates one queued successor for the current retryable attempt.
