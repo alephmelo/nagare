@@ -79,20 +79,7 @@ func (c *Coordinator) completeRemote(result TaskResult, completedAt time.Time) (
 			Retries: ownership.retries, CompletedAt: completedAt,
 		})
 	case "cancelled":
-		attempt, getErr := c.store.GetTaskInstance(result.TaskInstanceID)
-		if getErr != nil {
-			err = getErr
-		} else if attempt.Status == models.TaskCancelled {
-			// Complete recognizes cancellation as authoritative and classifies
-			// the late owned report without mutating the current attempt.
-			disposition, err = c.lifecycle.Complete(tasklifecycle.Completion{
-				AttemptID: result.TaskInstanceID, CompletedAt: completedAt,
-			})
-		} else if attempt.Status != models.TaskRunning {
-			err = fmt.Errorf("cannot cancel completed task attempt")
-		} else {
-			disposition, err = c.lifecycle.CancelCurrent(ownership.runID, ownership.taskID, completedAt)
-		}
+		disposition, err = c.lifecycle.CancelAttempt(result.TaskInstanceID, completedAt)
 	case "up_for_retry":
 		// Complete owns persisted completion validity. An explicit retry outcome
 		// is intentionally retryable independently of the automatic retry policy.

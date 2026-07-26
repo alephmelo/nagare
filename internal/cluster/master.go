@@ -15,6 +15,12 @@ import (
 	"github.com/alephmelo/nagare/internal/worker"
 )
 
+type attemptLifecycle interface {
+	Claim(string, time.Time) (tasklifecycle.Disposition, error)
+	Complete(tasklifecycle.Completion) (tasklifecycle.Disposition, error)
+	CancelAttempt(string, time.Time) (tasklifecycle.Disposition, error)
+}
+
 // Coordinator manages remote worker connections on the master node.
 // It handles worker registration, task polling, result reporting,
 // and log forwarding.
@@ -26,7 +32,7 @@ type Coordinator struct {
 	workerTimeout time.Duration // marks workers offline after this idle period
 	mu            sync.RWMutex
 	workers       map[string]*WorkerInfo // keyed by WorkerID
-	lifecycle     *tasklifecycle.Lifecycle
+	lifecycle     attemptLifecycle
 	assignments   map[string]*remoteAssignment
 
 	// autoscaler is optional; when set, the coordinator notifies it on
