@@ -26,8 +26,13 @@ type Input struct {
 	// takes effect when Attempts proves that a durable current retry successor
 	// exists; ordinary and automatic reconciliation must leave it false.
 	AllowCancelledReopen bool
-	Definitions          []TaskDefinition
-	Attempts             []AttemptSnapshot
+	// AllowChainRootPromotion is reserved for run initialization and its
+	// recovery. It lets Evaluate queue pending roots that feed dependency
+	// chains after every static attempt has been durably materialized.
+	// Ordinary reconciliation must leave it false.
+	AllowChainRootPromotion bool
+	Definitions             []TaskDefinition
+	Attempts                []AttemptSnapshot
 }
 
 type Plan struct {
@@ -81,13 +86,14 @@ func Evaluate(input Input) Plan {
 		if !exists || attempt.Status != models.TaskPending {
 			continue
 		}
-		// Roots that feed a dependency chain are queued by run materialization,
-		// not dependency progression. Keeping that initialization boundary
-		// explicit prevents a blocked downstream check from also reporting its
-		// pending prerequisite as newly runnable. Independent roots remain valid
-		// progression candidates.
+		// Chain roots are normally outside ordinary dependency progression.
+		// Initialization opts in only after all static attempts are durable,
+		// preventing a blocked downstream check from also reporting its pending
+		// prerequisite as newly runnable. Independent roots remain valid
+		// ordinary progression candidates.
 		if len(definition.DependsOn) == 0 {
-			if _, initializesChain := requiredPredecessors[taskID]; initializesChain {
+			if _, initializesChain := requiredPredecessors[taskID]; initializesChain &&
+				!input.AllowChainRootPromotion {
 				continue
 			}
 		}
