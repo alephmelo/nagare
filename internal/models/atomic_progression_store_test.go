@@ -660,6 +660,323 @@ func TestStartMapSetupForRunSnapshotRejectsConflictingBinding(t *testing.T) {
 	}
 }
 
+func TestEnsureTaskInstanceForRunSnapshotAppliesAndReplays(t *testing.T) {
+	store := newRunProgressionStore(t)
+	now := time.Date(2026, time.July, 27, 16, 20, 0, 0, time.UTC)
+	parent, startedAt, snapshot := createGuardedChildParent(
+		t, store, "child-replay", now,
+	)
+	item := "bound"
+	child := TaskInstance{
+		ID: "child-replay_map[0]", RunID: parent.RunID, TaskID: "map[0]",
+		Status: TaskPending, ItemValue: &item,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	result, err := store.EnsureTaskInstanceForRunSnapshot(
+		parent.RunID, parent.ID, startedAt, RunRunning, snapshot, &child,
+	)
+	if err != nil || result != GuardedTaskPromotionApplied {
+		t.Fatalf("first guarded ensure = (%v, %v), want (Applied, nil)", result, err)
+	}
+	if child.Attempt != 1 {
+		t.Fatalf("default child attempt = %d, want 1", child.Attempt)
+	}
+
+	result, err = store.EnsureTaskInstanceForRunSnapshot(
+		parent.RunID, parent.ID, startedAt, RunRunning, snapshot, &child,
+	)
+	if err != nil || result != GuardedTaskPromotionStale {
+		t.Fatalf("old-snapshot replay = (%v, %v), want (Stale, nil)", result, err)
+	}
+	if err := store.UpdateTaskInstanceStatus(child.ID, TaskQueued); err != nil {
+		t.Fatalf("advance persisted child lifecycle: %v", err)
+	}
+	current, err := store.GetLatestTaskAttempts(parent.RunID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskAttempts: %v", err)
+	}
+	result, err = store.EnsureTaskInstanceForRunSnapshot(
+		parent.RunID, parent.ID, startedAt, RunRunning, current, &child,
+	)
+	if err != nil || result != GuardedTaskPromotionAlreadyApplied {
+		t.Fatalf("exact guarded replay = (%v, %v), want (AlreadyApplied, nil)", result, err)
+	}
+	attempts, err := store.GetTaskAttempts(parent.RunID, child.TaskID)
+	if err != nil || len(attempts) != 1 || attempts[0].ID != child.ID ||
+		attempts[0].ItemValue == nil || *attempts[0].ItemValue != item {
+		t.Fatalf("persisted child = %#v, %v, want one exact item-bound row", attempts, err)
+	}
+}
+
+func TestEnsureTaskInstanceForRunSnapshotRejectsStaleAuthority(t *testing.T) {
+	t.Run("run cancellation leaves no child", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 21, 0, 0, time.UTC)
+		parent, startedAt, snapshot := createGuardedChildParent(
+			t, store, "child-cancel", now,
+		)
+		if applied, err := store.CompareAndSetDagRunStatus(
+			parent.RunID, RunRunning, RunCancelled, now.Add(2*time.Second),
+		); err != nil || !applied {
+			t.Fatalf("cancel run = (%v, %v), want (true, nil)", applied, err)
+		}
+		child := guardedChild(parent.RunID, "child-cancel_map[0]", "map[0]", now)
+
+		result, err := store.EnsureTaskInstanceForRunSnapshot(
+			parent.RunID, parent.ID, startedAt, RunRunning, snapshot, &child,
+		)
+		if err != nil || result != GuardedTaskPromotionStale {
+			t.Fatalf("cancelled-run ensure = (%v, %v), want (Stale, nil)", result, err)
+		}
+		assertNoTaskInstance(t, store, child.ID)
+	})
+
+	t.Run("parent retry leaves no child", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 22, 0, 0, time.UTC)
+		parent, startedAt, snapshot := createGuardedChildParent(
+			t, store, "child-parent-retry", now,
+		)
+		if err := store.CreateTaskInstance(&TaskInstance{
+			ID: "child-parent-retry_map_2", RunID: parent.RunID, TaskID: parent.TaskID,
+			Status: TaskPending, Attempt: 2,
+			CreatedAt: now.Add(2 * time.Second), UpdatedAt: now.Add(2 * time.Second),
+		}); err != nil {
+			t.Fatalf("create parent retry: %v", err)
+		}
+		child := guardedChild(
+			parent.RunID, "child-parent-retry_map[0]@g1", "map[0]@g1", now,
+		)
+
+		result, err := store.EnsureTaskInstanceForRunSnapshot(
+			parent.RunID, parent.ID, startedAt, RunRunning, snapshot, &child,
+		)
+		if err != nil || result != GuardedTaskPromotionStale {
+			t.Fatalf("retried-parent ensure = (%v, %v), want (Stale, nil)", result, err)
+		}
+		assertNoTaskInstance(t, store, child.ID)
+	})
+}
+
+func TestEnsureTaskInstanceForRunSnapshotRejectsInvalidParentAndChild(t *testing.T) {
+	t.Run("ownership watermark mismatch", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 23, 0, 0, time.UTC)
+		parent, startedAt, snapshot := createGuardedChildParent(
+			t, store, "child-watermark", now,
+		)
+		child := guardedChild(parent.RunID, "child-watermark_map[0]", "map[0]", now)
+
+		result, err := store.EnsureTaskInstanceForRunSnapshot(
+			parent.RunID, parent.ID, startedAt.Add(time.Second),
+			RunRunning, snapshot, &child,
+		)
+		if err != nil || result != GuardedTaskPromotionInvalid {
+			t.Fatalf("wrong-watermark ensure = (%v, %v), want (Invalid, nil)", result, err)
+		}
+		assertNoTaskInstance(t, store, child.ID)
+	})
+
+	t.Run("running parent without ownership watermark", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 24, 0, 0, time.UTC)
+		createRunProgressionRun(t, store, "child-unowned", RunRunning, now)
+		parent := TaskInstance{
+			ID: "child-unowned_map", RunID: "child-unowned", TaskID: "map",
+			Status: TaskRunning, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := store.CreateTaskInstance(&parent); err != nil {
+			t.Fatalf("CreateTaskInstance(parent): %v", err)
+		}
+		snapshot, err := store.GetLatestTaskAttempts(parent.RunID)
+		if err != nil {
+			t.Fatalf("GetLatestTaskAttempts: %v", err)
+		}
+		child := guardedChild(parent.RunID, "child-unowned_map[0]", "map[0]", now)
+
+		result, err := store.EnsureTaskInstanceForRunSnapshot(
+			parent.RunID, parent.ID, now, RunRunning, snapshot, &child,
+		)
+		if err != nil || result != GuardedTaskPromotionInvalid {
+			t.Fatalf("unowned-parent ensure = (%v, %v), want (Invalid, nil)", result, err)
+		}
+		assertNoTaskInstance(t, store, child.ID)
+	})
+
+	t.Run("foreign child run", func(t *testing.T) {
+		store := newRunProgressionStore(t)
+		now := time.Date(2026, time.July, 27, 16, 25, 0, 0, time.UTC)
+		parent, startedAt, snapshot := createGuardedChildParent(
+			t, store, "child-foreign", now,
+		)
+		child := guardedChild("different-run", "foreign_map[0]", "map[0]", now)
+
+		result, err := store.EnsureTaskInstanceForRunSnapshot(
+			parent.RunID, parent.ID, startedAt, RunRunning, snapshot, &child,
+		)
+		if err != nil || result != GuardedTaskPromotionInvalid {
+			t.Fatalf("foreign-child ensure = (%v, %v), want (Invalid, nil)", result, err)
+		}
+		assertNoTaskInstance(t, store, child.ID)
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*TaskInstance, time.Time)
+	}{
+		{
+			name: "queued child",
+			mutate: func(child *TaskInstance, _ time.Time) {
+				child.Status = TaskQueued
+			},
+		},
+		{
+			name: "prestarted child",
+			mutate: func(child *TaskInstance, now time.Time) {
+				child.StartedAt = &now
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newRunProgressionStore(t)
+			now := time.Date(2026, time.July, 27, 16, 25, 30, 0, time.UTC)
+			parent, startedAt, snapshot := createGuardedChildParent(
+				t, store, "child-invalid-state", now,
+			)
+			child := guardedChild(
+				parent.RunID, "child-invalid-state_map[0]", "map[0]", now,
+			)
+			test.mutate(&child, now)
+
+			result, err := store.EnsureTaskInstanceForRunSnapshot(
+				parent.RunID, parent.ID, startedAt, RunRunning, snapshot, &child,
+			)
+			if err != nil || result != GuardedTaskPromotionInvalid {
+				t.Fatalf("invalid child ensure = (%v, %v), want (Invalid, nil)", result, err)
+			}
+			assertNoTaskInstance(t, store, child.ID)
+		})
+	}
+}
+
+func TestEnsureTaskInstanceForRunSnapshotRejectsConflictWithoutMutation(t *testing.T) {
+	store := newRunProgressionStore(t)
+	now := time.Date(2026, time.July, 27, 16, 26, 0, 0, time.UTC)
+	parent, startedAt, _ := createGuardedChildParent(
+		t, store, "child-conflict", now,
+	)
+	item := "bound"
+	existing := TaskInstance{
+		ID: "child-conflict_existing", RunID: parent.RunID, TaskID: "map[0]",
+		Status: TaskPending, ItemValue: &item, Attempt: 1,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateTaskInstance(&existing); err != nil {
+		t.Fatalf("CreateTaskInstance(existing): %v", err)
+	}
+	snapshot, err := store.GetLatestTaskAttempts(parent.RunID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskAttempts: %v", err)
+	}
+	requested := existing
+	requested.ID = "child-conflict_requested"
+
+	result, err := store.EnsureTaskInstanceForRunSnapshot(
+		parent.RunID, parent.ID, startedAt, RunRunning, snapshot, &requested,
+	)
+	if err == nil || result != 0 || !strings.Contains(err.Error(), "existing identity") {
+		t.Fatalf("conflicting ensure = (%v, %v), want explicit identity error", result, err)
+	}
+	assertNoTaskInstance(t, store, requested.ID)
+	persisted, err := store.GetTaskInstance(existing.ID)
+	if err != nil || persisted.ItemValue == nil || *persisted.ItemValue != item {
+		t.Fatalf("existing conflict row = %#v, %v, want unchanged", persisted, err)
+	}
+}
+
+func TestEnsureTaskInstanceForRunSnapshotRollsBackInsertError(t *testing.T) {
+	store := newRunProgressionStore(t)
+	now := time.Date(2026, time.July, 27, 16, 27, 0, 0, time.UTC)
+	parent, startedAt, snapshot := createGuardedChildParent(
+		t, store, "child-rollback", now,
+	)
+	child := guardedChild(parent.RunID, "child-rollback_map[0]", "map[0]", now)
+	if _, err := store.db.Exec(`
+		CREATE TRIGGER reject_guarded_child
+		AFTER INSERT ON task_instances
+		WHEN NEW.id = 'child-rollback_map[0]'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced guarded child failure');
+		END
+	`); err != nil {
+		t.Fatalf("create rejection trigger: %v", err)
+	}
+
+	result, err := store.EnsureTaskInstanceForRunSnapshot(
+		parent.RunID, parent.ID, startedAt, RunRunning, snapshot, &child,
+	)
+	if err == nil || result != 0 ||
+		!strings.Contains(err.Error(), "forced guarded child failure") {
+		t.Fatalf("failing ensure = (%v, %v), want trigger error", result, err)
+	}
+	assertNoTaskInstance(t, store, child.ID)
+	reloaded, err := store.GetTaskInstance(parent.ID)
+	if err != nil || reloaded.Status != TaskRunning || reloaded.StartedAt == nil ||
+		!reloaded.StartedAt.Equal(startedAt) {
+		t.Fatalf("parent after rollback = %#v, %v, want unchanged owner", reloaded, err)
+	}
+}
+
+func createGuardedChildParent(
+	t *testing.T,
+	store *Store,
+	runID string,
+	now time.Time,
+) (TaskInstance, time.Time, []TaskInstance) {
+	t.Helper()
+	createRunProgressionRun(t, store, runID, RunRunning, now)
+	parent := TaskInstance{
+		ID: runID + "_map", RunID: runID, TaskID: "map",
+		Status: TaskPending, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateTaskInstance(&parent); err != nil {
+		t.Fatalf("CreateTaskInstance(parent): %v", err)
+	}
+	startedAt := now.Add(time.Second)
+	applied, err := store.CompareAndSetTaskAttemptForRunStatus(
+		parent.ID, TaskPending, RunRunning, TaskAttemptMutation{
+			Status: TaskRunning, UpdatedAt: startedAt, StartedAt: &startedAt,
+		},
+	)
+	if err != nil || !applied {
+		t.Fatalf("start parent = (%v, %v), want (true, nil)", applied, err)
+	}
+	parent.Status = TaskRunning
+	parent.UpdatedAt = startedAt
+	parent.StartedAt = &startedAt
+	snapshot, err := store.GetLatestTaskAttempts(runID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskAttempts: %v", err)
+	}
+	return parent, startedAt, snapshot
+}
+
+func guardedChild(runID, id, taskID string, now time.Time) TaskInstance {
+	item := "item"
+	return TaskInstance{
+		ID: id, RunID: runID, TaskID: taskID, Status: TaskPending,
+		ItemValue: &item, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	}
+}
+
+func assertNoTaskInstance(t *testing.T, store *Store, attemptID string) {
+	t.Helper()
+	if _, err := store.GetTaskInstance(attemptID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetTaskInstance(%s) error = %v, want sql.ErrNoRows", attemptID, err)
+	}
+}
+
 func TestStartMapSetupForRunSnapshotRollsBackBindingOnTransitionError(t *testing.T) {
 	store := newRunProgressionStore(t)
 	now := time.Date(2026, time.July, 27, 16, 13, 0, 0, time.UTC)

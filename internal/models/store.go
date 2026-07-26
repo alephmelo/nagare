@@ -537,6 +537,64 @@ func (s *Store) PromoteTaskAttemptForRunSnapshot(
 	return GuardedTaskPromotionApplied, nil
 }
 
+// EnsureTaskInstanceForRunSnapshot atomically inserts one deterministic child
+// attempt only while the observed running run, its complete latest-attempt
+// snapshot, and the exact current running parent remain authoritative.
+//
+// Applied means the child was inserted. AlreadyApplied means the same logical
+// attempt already has the requested identity and immutable item binding. Stale
+// requires a full reload; Invalid means the current snapshot cannot authorize
+// this parent/child relationship.
+func (s *Store) EnsureTaskInstanceForRunSnapshot(
+	runID, parentAttemptID string,
+	expectedParentStartedAt time.Time,
+	observedRunStatus RunStatus,
+	observedTasks []TaskInstance,
+	child *TaskInstance,
+) (_ GuardedTaskPromotionResult, err error) {
+	if child == nil {
+		return GuardedTaskPromotionInvalid, nil
+	}
+	if child.Attempt == 0 {
+		child.Attempt = 1
+	}
+
+	conn, finish, err := s.beginImmediate()
+	if err != nil {
+		return 0, err
+	}
+	defer finish(&err)
+
+	parent, classification, err := guardedSnapshotTaskOn(
+		conn, runID, parentAttemptID, observedRunStatus, observedTasks,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if classification != 0 {
+		return classification, nil
+	}
+	if parent.Status != TaskRunning || parent.StartedAt == nil ||
+		expectedParentStartedAt.IsZero() ||
+		!parent.StartedAt.Equal(expectedParentStartedAt) {
+		return GuardedTaskPromotionInvalid, nil
+	}
+	if child.RunID != runID || child.ID == "" || child.TaskID == "" ||
+		child.Attempt < 1 || child.Status != TaskPending ||
+		child.StartedAt != nil {
+		return GuardedTaskPromotionInvalid, nil
+	}
+
+	created, err := ensureTaskInstanceOn(conn, *child)
+	if err != nil {
+		return 0, err
+	}
+	if !created {
+		return GuardedTaskPromotionAlreadyApplied, nil
+	}
+	return GuardedTaskPromotionApplied, nil
+}
+
 // StartMapSetupForRunSnapshot atomically persists or verifies a map binding,
 // verifies a running run and its complete latest-attempt snapshot, and takes
 // scheduler setup ownership of one exact current pending or queued attempt. A
@@ -1051,7 +1109,11 @@ func (s *Store) EnsureTaskInstance(ti *TaskInstance) (_ bool, err error) {
 	}
 	defer finish(&err)
 
-	result, err := conn.ExecContext(
+	return ensureTaskInstanceOn(conn, *ti)
+}
+
+func ensureTaskInstanceOn(q immediateConn, ti TaskInstance) (bool, error) {
+	result, err := q.ExecContext(
 		context.Background(),
 		`INSERT INTO task_instances
 		 (id, run_id, task_id, status, output, item_value, attempt, created_at, updated_at)
@@ -1073,7 +1135,7 @@ func (s *Store) EnsureTaskInstance(ti *TaskInstance) (_ bool, err error) {
 
 	var existingID string
 	var existingItem sql.NullString
-	err = conn.QueryRowContext(
+	err = q.QueryRowContext(
 		context.Background(),
 		`SELECT id, item_value FROM task_instances
 		 WHERE run_id = ? AND task_id = ? AND attempt = ?`,
