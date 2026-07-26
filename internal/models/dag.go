@@ -10,6 +10,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var reservedMapGenerationID = regexp.MustCompile(`^.+\[[0-9]+\]@g([2-9]|[1-9][0-9]+)$`)
+
 // ResourcesDef declares CPU, memory, and GPU limits for a container task.
 // Values mirror Docker's --cpus, --memory, and --gpus flags.
 //
@@ -212,6 +214,9 @@ func (d *DAGDef) Validate() error {
 	for _, t := range d.Tasks {
 		if t.ID == "" {
 			return fmt.Errorf("DAG %s contains a task with an empty ID", d.ID)
+		}
+		if reservedMapGenerationID.MatchString(t.ID) {
+			return fmt.Errorf("task ID %q uses the reserved map-generation namespace", t.ID)
 		}
 		if t.Type == "map" && t.MapOver == "" {
 			return fmt.Errorf("task %s is type 'map' but missing 'map_over' property", t.ID)

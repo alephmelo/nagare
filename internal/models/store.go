@@ -130,6 +130,16 @@ type TaskInstance struct {
 	StartedAt *time.Time
 }
 
+// MapSetup durably binds one map-parent attempt to the exact upstream attempt
+// and output used to expand it. StartedAt is also the lifecycle watermark used
+// to prove that the scheduler, rather than a worker, owns a running setup.
+type MapSetup struct {
+	ParentAttemptID   string
+	UpstreamAttemptID string
+	UpstreamOutput    string
+	StartedAt         time.Time
+}
+
 // TaskAttemptMutation describes the fields changed by one persisted lifecycle
 // transition. Output is optional because claims and promotions preserve it.
 type TaskAttemptMutation struct {
@@ -231,6 +241,15 @@ func (s *Store) InitSchema() error {
 		FOREIGN KEY(task_instance_id) REFERENCES task_instances(id)
 	);`
 
+	mapSetupsSchema := `
+	CREATE TABLE IF NOT EXISTS map_setups (
+		parent_attempt_id   TEXT PRIMARY KEY,
+		upstream_attempt_id TEXT NOT NULL,
+		upstream_output     TEXT NOT NULL,
+		started_at          DATETIME NOT NULL,
+		FOREIGN KEY(parent_attempt_id) REFERENCES task_instances(id)
+	);`
+
 	cloudInstancesSchema := `
 	CREATE TABLE IF NOT EXISTS cloud_instances (
 		id              TEXT PRIMARY KEY,
@@ -260,6 +279,9 @@ func (s *Store) InitSchema() error {
 		return err
 	}
 	if _, err := s.db.Exec(taskMetricsSchema); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(mapSetupsSchema); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(cloudInstancesSchema); err != nil {
@@ -549,6 +571,54 @@ func (s *Store) CreateTaskInstance(ti *TaskInstance) error {
 	query := `INSERT INTO task_instances (id, run_id, task_id, status, output, item_value, attempt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := s.db.Exec(query, ti.ID, ti.RunID, ti.TaskID, ti.Status, ti.Output, ti.ItemValue, ti.Attempt, ti.CreatedAt, ti.UpdatedAt)
 	return err
+}
+
+// EnsureMapSetup inserts setup metadata once and returns the durable value.
+// The returned boolean is true only for the caller that created the binding.
+func (s *Store) EnsureMapSetup(setup MapSetup) (MapSetup, bool, error) {
+	result, err := s.db.Exec(
+		`INSERT INTO map_setups (
+			parent_attempt_id, upstream_attempt_id, upstream_output, started_at
+		) VALUES (?, ?, ?, ?)
+		ON CONFLICT(parent_attempt_id) DO NOTHING`,
+		setup.ParentAttemptID,
+		setup.UpstreamAttemptID,
+		setup.UpstreamOutput,
+		setup.StartedAt.UTC(),
+	)
+	if err != nil {
+		return MapSetup{}, false, fmt.Errorf("persist map setup %s: %w", setup.ParentAttemptID, err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return MapSetup{}, false, fmt.Errorf("inspect map setup insert %s: %w", setup.ParentAttemptID, err)
+	}
+	persisted, err := s.GetMapSetup(setup.ParentAttemptID)
+	if err != nil {
+		return MapSetup{}, false, err
+	}
+	return *persisted, rowsAffected == 1, nil
+}
+
+// GetMapSetup returns the durable expansion binding for a map-parent attempt.
+func (s *Store) GetMapSetup(parentAttemptID string) (*MapSetup, error) {
+	var setup MapSetup
+	err := s.db.QueryRow(
+		`SELECT parent_attempt_id, upstream_attempt_id, upstream_output, started_at
+		 FROM map_setups
+		 WHERE parent_attempt_id = ?`,
+		parentAttemptID,
+	).Scan(
+		&setup.ParentAttemptID,
+		&setup.UpstreamAttemptID,
+		&setup.UpstreamOutput,
+		&setup.StartedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &setup, nil
 }
 
 // GetTasksByStatus retrieves all TaskInstances with a specific status

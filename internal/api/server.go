@@ -428,13 +428,14 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 		if resolveErr == nil && resolvedID != t.TaskID {
 			continue
 		}
-		t.TaskID = publicID
-		cmd := s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue)
+		storageTask := t
 		m, _ := s.store.GetTaskMetrics(t.ID)
+		t = scheduler.ProjectTaskInstance(t)
+		cmd := s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue)
 		enriched = append(enriched, enrichedTask{
 			TaskInstance: t,
 			Command:      cmd,
-			Metrics:      m,
+			Metrics:      projectTaskMetrics(m, storageTask),
 		})
 	}
 
@@ -473,7 +474,7 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 
 	var enriched []enrichedTask
 	for _, t := range attempts {
-		t.TaskID = scheduler.PublicTaskID(t.TaskID)
+		t = scheduler.ProjectTaskInstance(t)
 		enriched = append(enriched, enrichedTask{
 			TaskInstance: t,
 			Command:      s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue),
@@ -490,8 +491,11 @@ func (s *Server) resolveTaskCommand(dag *models.DAGDef, dagFound bool, taskID st
 	if !dagFound || dag == nil {
 		return ""
 	}
-	baseID := models.BaseTaskID(taskID)
-	if td := dag.FindTask(baseID); td != nil {
+	td := dag.FindTask(taskID)
+	if td == nil {
+		td = dag.FindTask(models.BaseTaskID(taskID))
+	}
+	if td != nil {
 		cmd := td.Command
 		if itemValue != nil {
 			cmd = strings.ReplaceAll(cmd, "{{item}}", *itemValue)
@@ -695,6 +699,14 @@ func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskInstanceID := parts[5]
+	if s.scheduler != nil {
+		resolvedID, err := s.scheduler.ResolveTaskInstanceID(parts[3], taskInstanceID)
+		if err != nil {
+			http.Error(w, "Task not found", http.StatusNotFound)
+			return
+		}
+		taskInstanceID = resolvedID
+	}
 
 	inst, err := s.store.GetTaskInstance(taskInstanceID)
 	if err != nil {
@@ -762,6 +774,10 @@ func (s *Server) handleGetTaskMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Metrics not found", http.StatusNotFound)
 		return
 	}
+	task, taskErr := s.store.GetTaskInstance(m.TaskInstanceID)
+	if taskErr == nil {
+		m = projectTaskMetrics(m, *task)
+	}
 	writeJSON(w, m)
 }
 
@@ -781,7 +797,21 @@ func (s *Server) handleGetRunMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, metrics)
+	projected := make([]models.TaskMetrics, 0, len(metrics))
+	for i := range metrics {
+		publicID := scheduler.PublicTaskID(metrics[i].TaskID)
+		if s.scheduler != nil {
+			resolvedID, resolveErr := s.scheduler.ResolveTaskID(runID, publicID)
+			if resolveErr == nil && resolvedID != metrics[i].TaskID {
+				continue
+			}
+		}
+		task := models.TaskInstance{
+			ID: metrics[i].TaskInstanceID, RunID: metrics[i].RunID, TaskID: metrics[i].TaskID,
+		}
+		projected = append(projected, *projectTaskMetrics(&metrics[i], task))
+	}
+	writeJSON(w, projected)
 }
 
 // handleGetDAGMetrics returns recent task metrics and aggregate stats for a DAG.
@@ -809,6 +839,7 @@ func (s *Server) handleGetDAGMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	series = s.projectCurrentTimeSeries(series)
 	response := map[string]interface{}{
 		"aggregate":   agg,
 		"time_series": series,
@@ -840,7 +871,37 @@ func (s *Server) handleGetMetricsTimeSeries(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	series = s.projectCurrentTimeSeries(series)
 	writeJSON(w, series)
+}
+
+func projectTaskMetrics(metrics *models.TaskMetrics, storageTask models.TaskInstance) *models.TaskMetrics {
+	if metrics == nil {
+		return nil
+	}
+	projected := *metrics
+	identity := storageTask
+	identity.ID = metrics.TaskInstanceID
+	publicTask := scheduler.ProjectTaskInstance(identity)
+	projected.TaskInstanceID = publicTask.ID
+	projected.TaskID = scheduler.PublicTaskID(metrics.TaskID)
+	return &projected
+}
+
+func (s *Server) projectCurrentTimeSeries(series []models.TimeSeriesPoint) []models.TimeSeriesPoint {
+	projected := make([]models.TimeSeriesPoint, 0, len(series))
+	for _, point := range series {
+		publicID := scheduler.PublicTaskID(point.TaskID)
+		if s.scheduler != nil {
+			resolvedID, resolveErr := s.scheduler.ResolveTaskID(point.RunID, publicID)
+			if resolveErr == nil && resolvedID != point.TaskID {
+				continue
+			}
+		}
+		point.TaskID = publicID
+		projected = append(projected, point)
+	}
+	return projected
 }
 
 // handleAutoscalerStatus returns a snapshot of the autoscaler's current state.
