@@ -24,7 +24,10 @@ type Input struct {
 	RunStatus models.RunStatus
 	// AllowCancelledReopen is reserved for an explicit manual retry. It only
 	// takes effect when Attempts proves that a durable current retry successor
-	// exists; ordinary and automatic reconciliation must leave it false.
+	// exists; ordinary and automatic reconciliation must leave it false. When
+	// definitions are unavailable, this authorization applies to every
+	// non-running terminal status because no authoritative task state exists
+	// from which to derive a more specific transition.
 	AllowCancelledReopen bool
 	// AllowChainRootPromotion is reserved for run initialization and its
 	// recovery. It lets Evaluate queue pending roots that feed dependency
@@ -47,30 +50,26 @@ func Evaluate(input Input) Plan {
 		definitions[definition.ID] = definition
 	}
 
-	latest := make(map[string]AttemptSnapshot, len(definitions))
-	for _, attempt := range input.Attempts {
-		if _, authoritative := definitions[attempt.TaskID]; !authoritative {
-			continue
-		}
-		current, exists := latest[attempt.TaskID]
-		if !exists || attempt.Attempt > current.Attempt ||
-			(attempt.Attempt == current.Attempt && attempt.ID < current.ID) {
-			latest[attempt.TaskID] = attempt
-		}
-	}
-
 	plan := Plan{}
-	if len(definitions) > 0 {
-		desiredRunStatus, terminal := deriveRunStatus(
+	if len(definitions) == 0 {
+		plan.DesiredRunStatus = deriveDefinitionlessRunStatus(
 			input.RunStatus,
 			input.AllowCancelledReopen,
-			definitions,
-			latest,
+			latestAttempts(input.Attempts, nil),
 		)
-		plan.DesiredRunStatus = desiredRunStatus
-		if terminal {
-			return plan
-		}
+		return plan
+	}
+
+	latest := latestAttempts(input.Attempts, definitions)
+	desiredRunStatus, terminal := deriveRunStatus(
+		input.RunStatus,
+		input.AllowCancelledReopen,
+		definitions,
+		latest,
+	)
+	plan.DesiredRunStatus = desiredRunStatus
+	if terminal {
+		return plan
 	}
 
 	requiredPredecessors := make(map[string]struct{})
@@ -115,6 +114,41 @@ func Evaluate(input Input) Plan {
 	}
 	sort.Strings(plan.PromoteAttemptIDs)
 	return plan
+}
+
+func latestAttempts(
+	attempts []AttemptSnapshot,
+	authoritativeDefinitions map[string]TaskDefinition,
+) map[string]AttemptSnapshot {
+	latest := make(map[string]AttemptSnapshot, len(attempts))
+	for _, attempt := range attempts {
+		if authoritativeDefinitions != nil {
+			if _, authoritative := authoritativeDefinitions[attempt.TaskID]; !authoritative {
+				continue
+			}
+		}
+		current, exists := latest[attempt.TaskID]
+		if !exists || attempt.Attempt > current.Attempt ||
+			(attempt.Attempt == current.Attempt && attempt.ID < current.ID) {
+			latest[attempt.TaskID] = attempt
+		}
+	}
+	return latest
+}
+
+func deriveDefinitionlessRunStatus(
+	current models.RunStatus,
+	allowManualReopen bool,
+	latest map[string]AttemptSnapshot,
+) *models.RunStatus {
+	if current == models.RunRunning ||
+		!allowManualReopen ||
+		!hasDurableRetrySuccessor(latest) {
+		return nil
+	}
+
+	running := models.RunRunning
+	return &running
 }
 
 func deriveRunStatus(
