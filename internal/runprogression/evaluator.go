@@ -21,9 +21,13 @@ type AttemptSnapshot struct {
 }
 
 type Input struct {
-	RunStatus   models.RunStatus
-	Definitions []TaskDefinition
-	Attempts    []AttemptSnapshot
+	RunStatus models.RunStatus
+	// AllowCancelledReopen is reserved for an explicit manual retry. It only
+	// takes effect when Attempts proves that a durable current retry successor
+	// exists; ordinary and automatic reconciliation must leave it false.
+	AllowCancelledReopen bool
+	Definitions          []TaskDefinition
+	Attempts             []AttemptSnapshot
 }
 
 type Plan struct {
@@ -50,11 +54,42 @@ func Evaluate(input Input) Plan {
 		}
 	}
 
+	plan := Plan{}
+	if len(definitions) > 0 {
+		desiredRunStatus, terminal := deriveRunStatus(
+			input.RunStatus,
+			input.AllowCancelledReopen,
+			definitions,
+			latest,
+		)
+		plan.DesiredRunStatus = desiredRunStatus
+		if terminal {
+			return plan
+		}
+	}
+
+	requiredPredecessors := make(map[string]struct{})
+	for _, definition := range definitions {
+		for _, predecessorID := range definition.DependsOn {
+			requiredPredecessors[predecessorID] = struct{}{}
+		}
+	}
+
 	promotions := make(map[string]struct{})
 	for taskID, definition := range definitions {
 		attempt, exists := latest[taskID]
 		if !exists || attempt.Status != models.TaskPending {
 			continue
+		}
+		// Roots that feed a dependency chain are queued by run materialization,
+		// not dependency progression. Keeping that initialization boundary
+		// explicit prevents a blocked downstream check from also reporting its
+		// pending prerequisite as newly runnable. Independent roots remain valid
+		// progression candidates.
+		if len(definition.DependsOn) == 0 {
+			if _, initializesChain := requiredPredecessors[taskID]; initializesChain {
+				continue
+			}
 		}
 		ready := true
 		for _, predecessorID := range definition.DependsOn {
@@ -69,15 +104,24 @@ func Evaluate(input Input) Plan {
 		}
 	}
 
-	plan := Plan{}
 	for attemptID := range promotions {
 		plan.PromoteAttemptIDs = append(plan.PromoteAttemptIDs, attemptID)
 	}
 	sort.Strings(plan.PromoteAttemptIDs)
+	return plan
+}
 
-	if len(definitions) == 0 {
-		return plan
+func deriveRunStatus(
+	current models.RunStatus,
+	allowCancelledReopen bool,
+	definitions map[string]TaskDefinition,
+	latest map[string]AttemptSnapshot,
+) (*models.RunStatus, bool) {
+	if current == models.RunCancelled &&
+		(!allowCancelledReopen || !hasDurableRetrySuccessor(latest)) {
+		return nil, true
 	}
+
 	allSuccess := true
 	anyFailed := false
 	anyCancelled := false
@@ -108,19 +152,28 @@ func Evaluate(input Input) Plan {
 		desired = models.RunFailed
 	case allSuccess:
 		desired = models.RunSuccess
-	case input.RunStatus != models.RunRunning && input.RunStatus != models.RunCancelled:
+	case current != models.RunRunning:
 		desired = models.RunRunning
 	default:
-		if input.RunStatus == models.RunCancelled {
-			plan.PromoteAttemptIDs = nil
+		return nil, false
+	}
+
+	terminal := desired != models.RunRunning
+	if desired == current {
+		return nil, terminal
+	}
+	return &desired, terminal
+}
+
+func hasDurableRetrySuccessor(latest map[string]AttemptSnapshot) bool {
+	for _, attempt := range latest {
+		if attempt.Attempt <= 1 {
+			continue
 		}
-		return plan
+		switch attempt.Status {
+		case models.TaskPending, models.TaskQueued, models.TaskRunning:
+			return true
+		}
 	}
-	if desired != input.RunStatus {
-		plan.DesiredRunStatus = &desired
-	}
-	if desired == models.RunFailed || desired == models.RunCancelled || desired == models.RunSuccess {
-		plan.PromoteAttemptIDs = nil
-	}
-	return plan
+	return false
 }
