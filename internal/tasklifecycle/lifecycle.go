@@ -46,6 +46,8 @@ func (e *ConflictError) Error() string {
 type store interface {
 	GetTaskInstance(string) (*models.TaskInstance, error)
 	CompareAndSetTaskAttempt(string, models.TaskStatus, models.TaskAttemptMutation) (bool, error)
+	CancelCurrentTaskAttempt(string, string, time.Time) (models.CurrentAttemptResult, error)
+	RetryCurrentTaskAttempt(string, string, time.Time) (models.CurrentAttemptResult, error)
 }
 
 type Lifecycle struct{ store store }
@@ -131,6 +133,45 @@ func (l *Lifecycle) Complete(input Completion) (Disposition, error) {
 		return 0, err
 	}
 	return l.completeObserved(attempt, input)
+}
+
+// CancelCurrent cancels the current attempt of one logical task.
+func (l *Lifecycle) CancelCurrent(runID, taskID string, cancelledAt time.Time) (Disposition, error) {
+	result, err := l.store.CancelCurrentTaskAttempt(runID, taskID, cancelledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, &MissingAttemptError{AttemptID: runID + "/" + taskID}
+	}
+	if err != nil {
+		return 0, err
+	}
+	if result.Applied {
+		return Applied, nil
+	}
+	if result.Attempt.Status == models.TaskCancelled {
+		return AlreadyApplied, nil
+	}
+	return 0, invalid(result.Attempt, "cancel")
+}
+
+// RetryCurrent creates one queued successor for the current retryable attempt.
+func (l *Lifecycle) RetryCurrent(runID, taskID string, retriedAt time.Time) (Disposition, error) {
+	result, err := l.store.RetryCurrentTaskAttempt(runID, taskID, retriedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, &MissingAttemptError{AttemptID: runID + "/" + taskID}
+	}
+	if err != nil {
+		return 0, err
+	}
+	if result.Applied {
+		return Applied, nil
+	}
+	if result.Replay {
+		return AlreadyApplied, nil
+	}
+	if result.Attempt.Status == models.TaskCancelled {
+		return AlreadyApplied, nil
+	}
+	return 0, invalid(result.Attempt, "retry")
 }
 
 func (l *Lifecycle) completeObserved(attempt *models.TaskInstance, input Completion) (Disposition, error) {

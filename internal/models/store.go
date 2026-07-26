@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -139,6 +140,14 @@ type TaskAttemptMutation struct {
 	StartedAt *time.Time
 }
 
+// CurrentAttemptResult describes the row resolved by an atomic logical-task
+// operation. Applied is false when the resolved row was not changed.
+type CurrentAttemptResult struct {
+	Attempt *TaskInstance
+	Applied bool
+	Replay  bool
+}
+
 // Store handles all database operations for the scheduler
 type Store struct {
 	db *sql.DB
@@ -266,8 +275,13 @@ func (s *Store) InitSchema() error {
 	_, _ = s.db.Exec(`ALTER TABLE task_instances ADD COLUMN attempt INT NOT NULL DEFAULT 1`)
 	_, _ = s.db.Exec(`ALTER TABLE task_instances ADD COLUMN item_value TEXT`)
 	_, _ = s.db.Exec(`ALTER TABLE task_instances ADD COLUMN started_at DATETIME`)
+	_, _ = s.db.Exec(`ALTER TABLE task_instances ADD COLUMN manual_retry_of TEXT`)
+	_, _ = s.db.Exec(`ALTER TABLE task_instances ADD COLUMN lifecycle_serialized_at INTEGER`)
 
-	return nil
+	_, err := s.db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS task_instances_logical_attempt
+		ON task_instances(run_id, task_id, attempt)`)
+	return err
 }
 
 // SetDAGPaused persists the paused/active state for a DAG.
@@ -618,6 +632,144 @@ func (s *Store) CompareAndSetTaskAttempt(id string, expected TaskStatus, mutatio
 		return false, err
 	}
 	return affected == 1, nil
+}
+
+// CancelCurrentTaskAttempt atomically resolves and cancels the latest eligible
+// attempt for a logical task.
+func (s *Store) CancelCurrentTaskAttempt(runID, taskID string, cancelledAt time.Time) (_ CurrentAttemptResult, err error) {
+	conn, finish, err := s.beginImmediate()
+	if err != nil {
+		return CurrentAttemptResult{}, err
+	}
+	defer finish(&err)
+
+	current, retryOf, err := getCurrentTaskAttemptOn(conn, runID, taskID)
+	if err != nil {
+		return CurrentAttemptResult{}, err
+	}
+	if current.Status == TaskCancelled {
+		return CurrentAttemptResult{Attempt: current}, nil
+	}
+	switch current.Status {
+	case TaskPending, TaskQueued, TaskRunning, TaskUpForRetry:
+	default:
+		return CurrentAttemptResult{Attempt: current, Replay: retryOf.Valid}, nil
+	}
+	sqlResult, err := conn.ExecContext(context.Background(), `
+		UPDATE task_instances
+		SET status = ?, updated_at = ?, lifecycle_serialized_at = ?
+		WHERE id = ? AND status = ?`,
+		TaskCancelled, cancelledAt, cancelledAt.UnixNano(), current.ID, current.Status,
+	)
+	if err != nil {
+		return CurrentAttemptResult{}, err
+	}
+	affected, err := sqlResult.RowsAffected()
+	if err != nil {
+		return CurrentAttemptResult{}, err
+	}
+	current.Status, current.UpdatedAt = TaskCancelled, cancelledAt
+	return CurrentAttemptResult{Attempt: current, Applied: affected == 1}, nil
+}
+
+// RetryCurrentTaskAttempt atomically inserts a queued successor when the
+// latest attempt remains retryable. A cancellation at the same logical instant
+// wins over a racing retry; a later explicit retry of a cancelled task remains
+// eligible.
+func (s *Store) RetryCurrentTaskAttempt(runID, taskID string, retriedAt time.Time) (_ CurrentAttemptResult, err error) {
+	conn, finish, err := s.beginImmediate()
+	if err != nil {
+		return CurrentAttemptResult{}, err
+	}
+	defer finish(&err)
+
+	current, retryOf, err := getCurrentTaskAttemptOn(conn, runID, taskID)
+	if err != nil {
+		return CurrentAttemptResult{}, err
+	}
+	if current.Status == TaskQueued && retryOf.Valid {
+		return CurrentAttemptResult{Attempt: current, Replay: true}, nil
+	}
+	switch current.Status {
+	case TaskPending, TaskUpForRetry, TaskFailed, TaskSuccess:
+	case TaskCancelled:
+		var serializedAt sql.NullInt64
+		if err = conn.QueryRowContext(context.Background(),
+			`SELECT lifecycle_serialized_at FROM task_instances WHERE id = ?`, current.ID,
+		).Scan(&serializedAt); err != nil {
+			return CurrentAttemptResult{}, err
+		}
+		if serializedAt.Valid && serializedAt.Int64 >= retriedAt.UnixNano() {
+			return CurrentAttemptResult{Attempt: current}, nil
+		}
+	default:
+		return CurrentAttemptResult{Attempt: current}, nil
+	}
+
+	sqlResult, err := conn.ExecContext(context.Background(), `
+		INSERT INTO task_instances
+			(id, run_id, task_id, status, item_value, attempt, created_at, updated_at, manual_retry_of)
+		SELECT run_id || '_' || task_id || '_' || (attempt + 1),
+			run_id, task_id, ?, item_value, attempt + 1, ?, ?, id
+		FROM task_instances
+		WHERE id = ?
+		ON CONFLICT(run_id, task_id, attempt) DO NOTHING`,
+		TaskQueued, retriedAt, retriedAt, current.ID,
+	)
+	if err != nil {
+		return CurrentAttemptResult{}, err
+	}
+	affected, err := sqlResult.RowsAffected()
+	if err != nil {
+		return CurrentAttemptResult{}, err
+	}
+	current, retryOf, err = getCurrentTaskAttemptOn(conn, runID, taskID)
+	if err != nil {
+		return CurrentAttemptResult{}, err
+	}
+	return CurrentAttemptResult{Attempt: current, Applied: affected == 1, Replay: affected == 0 && retryOf.Valid}, nil
+}
+
+type immediateConn interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *Store) beginImmediate() (*sql.Conn, func(*error), error) {
+	conn, err := s.db.Conn(context.Background())
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err = conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	finish := func(operationErr *error) {
+		if *operationErr != nil {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		} else if _, commitErr := conn.ExecContext(context.Background(), `COMMIT`); commitErr != nil {
+			*operationErr = commitErr
+		}
+		_ = conn.Close()
+	}
+	return conn, finish, nil
+}
+
+func getCurrentTaskAttemptOn(q immediateConn, runID, taskID string) (*TaskInstance, sql.NullString, error) {
+	row := q.QueryRowContext(context.Background(), `
+		SELECT id, run_id, task_id, status, COALESCE(output,''), item_value,
+			attempt, created_at, updated_at, started_at, manual_retry_of
+		FROM task_instances
+		WHERE run_id = ? AND task_id = ?
+		ORDER BY attempt DESC LIMIT 1`, runID, taskID)
+	var attempt TaskInstance
+	var retryOf sql.NullString
+	err := row.Scan(
+		&attempt.ID, &attempt.RunID, &attempt.TaskID, &attempt.Status,
+		&attempt.Output, &attempt.ItemValue, &attempt.Attempt,
+		&attempt.CreatedAt, &attempt.UpdatedAt, &attempt.StartedAt, &retryOf,
+	)
+	return &attempt, retryOf, err
 }
 
 // GetDagRun retrieves a DagRun by ID
