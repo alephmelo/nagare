@@ -39,6 +39,11 @@ type queuedAttempt struct {
 	control *localAttempt
 }
 
+const (
+	lifecyclePersistenceAttempts = 6
+	lifecyclePersistenceBackoff  = 10 * time.Millisecond
+)
+
 // Pool manages groups of worker goroutines across different task queues.
 type Pool struct {
 	store       *models.Store
@@ -199,12 +204,12 @@ func (p *Pool) drainUndispatched(queue chan queuedAttempt) {
 		select {
 		case work := <-queue:
 			work.control.gate.Lock()
-			disposition, err := p.cancelAttempt(work.ti, time.Now())
+			disposition, err := p.cancelAttemptDuringShutdown(work.ti, time.Now())
 			if err != nil {
 				work.control.gate.Unlock()
 				p.cleanupBroker(work.ti.ID)
 				queue <- work
-				p.recordError(err)
+				p.recordError(fmt.Errorf("cancel task attempt %q during shutdown: %w", work.ti.ID, err))
 				return
 			}
 			if disposition == tasklifecycle.Applied || disposition == tasklifecycle.AlreadyApplied {
@@ -221,7 +226,12 @@ func (p *Pool) drainUndispatched(queue chan queuedAttempt) {
 
 func (p *Pool) executeTask(ctx context.Context, work queuedAttempt, workerID int, poolName string) {
 	ti, control := work.ti, work.control
-	defer p.finishLocal(control)
+	releaseLocal := true
+	defer func() {
+		if releaseLocal {
+			p.finishLocal(control)
+		}
+	}()
 	defer p.cleanupBroker(ti.ID)
 
 	run, err := p.store.GetDagRun(ti.RunID)
@@ -238,10 +248,14 @@ func (p *Pool) executeTask(ctx context.Context, work queuedAttempt, workerID int
 
 	control.gate.Lock()
 	if ctx.Err() != nil {
-		disposition, cancelErr := p.cancelAttempt(ti, time.Now())
+		disposition, cancelErr := p.cancelAttemptDuringShutdown(ti, time.Now())
 		if cancelErr != nil {
+			// Keep the attempt and admission token owned until process exit:
+			// releasing either would make a still-running persisted row look
+			// available after shutdown cancellation failed.
+			releaseLocal = false
 			control.gate.Unlock()
-			p.recordError(cancelErr)
+			p.recordError(fmt.Errorf("cancel task attempt %q during shutdown: %w", ti.ID, cancelErr))
 			return
 		}
 		if disposition == tasklifecycle.Applied || disposition == tasklifecycle.AlreadyApplied {
@@ -400,6 +414,26 @@ func (p *Pool) KillTask(taskInstanceID string) error {
 // lifecycle boundary.
 func (p *Pool) cancelAttempt(ti models.TaskInstance, cancelledAt time.Time) (tasklifecycle.Disposition, error) {
 	return p.lifecycle.CancelAttempt(ti.ID, cancelledAt)
+}
+
+func (p *Pool) cancelAttemptDuringShutdown(ti models.TaskInstance, cancelledAt time.Time) (tasklifecycle.Disposition, error) {
+	var disposition tasklifecycle.Disposition
+	var err error
+	for attempt := 0; attempt < lifecyclePersistenceAttempts; attempt++ {
+		disposition, err = p.cancelAttempt(ti, cancelledAt)
+		if err == nil || !isTransientPersistenceError(err) {
+			return disposition, err
+		}
+		if attempt+1 < lifecyclePersistenceAttempts {
+			time.Sleep(lifecyclePersistenceBackoff)
+		}
+	}
+	return disposition, err
+}
+
+func isTransientPersistenceError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "locked") || strings.Contains(message, "busy")
 }
 
 func (p *Pool) finishLocal(control *localAttempt) {
