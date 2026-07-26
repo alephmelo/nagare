@@ -72,7 +72,7 @@ func (s *Scheduler) promoteAndRecover() error {
 			}
 			continue
 		}
-		invalidDefinition, err := s.quarantineUndefinedPendingTasksLocked(dag, tasks)
+		invalidDefinition, err := s.detectUndefinedPersistedTasksLocked(dag, tasks)
 		if err != nil {
 			return err
 		}
@@ -230,22 +230,23 @@ func (s *Scheduler) failInvalidDefinitionTaskLocked(task models.TaskInstance) er
 	return nil
 }
 
-func (s *Scheduler) quarantineUndefinedPendingTasksLocked(
+func (s *Scheduler) detectUndefinedPersistedTasksLocked(
 	dag *models.DAGDef,
 	tasks []models.TaskInstance,
 ) (bool, error) {
-	quarantined := false
+	undefined := false
 	for _, task := range tasks {
-		if task.Status != models.TaskPending || dag.FindTask(task.TaskID) != nil ||
-			s.isStoredMapChild(dag, task.TaskID) {
+		if dag.FindTask(task.TaskID) != nil || s.isStoredMapChild(dag, task.TaskID) {
 			continue
 		}
-		if err := s.failInvalidDefinitionTaskLocked(task); err != nil {
-			return false, err
+		undefined = true
+		if task.Status == models.TaskPending {
+			if err := s.failInvalidDefinitionTaskLocked(task); err != nil {
+				return false, err
+			}
 		}
-		quarantined = true
 	}
-	return quarantined, nil
+	return undefined, nil
 }
 
 func (s *Scheduler) reconcileMapParentLocked(parent models.TaskInstance, taskDef *models.TaskDef) error {
@@ -486,8 +487,8 @@ func (s *Scheduler) reconcileMapChildrenLocked(parent models.TaskInstance, items
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		if _, err := s.store.EnsureTaskInstance(child); err != nil {
-			return fmt.Errorf("ensure mapped instance %s: %w", child.ID, err)
+		if err := s.ensureMapChildLocked(parent, child); err != nil {
+			return err
 		}
 	}
 
@@ -507,6 +508,81 @@ func (s *Scheduler) reconcileMapChildrenLocked(parent models.TaskInstance, items
 		}
 	}
 	return nil
+}
+
+func (s *Scheduler) ensureMapChildLocked(
+	parent models.TaskInstance,
+	child *models.TaskInstance,
+) error {
+	const maxSnapshotMisses = 8
+	if parent.StartedAt == nil {
+		return fmt.Errorf(
+			"%w: map parent %s has no setup ownership watermark",
+			errGuardedActionRejected,
+			parent.ID,
+		)
+	}
+	for stale := 0; stale < maxSnapshotMisses; stale++ {
+		run, err := s.store.GetDagRun(parent.RunID)
+		if err != nil {
+			return fmt.Errorf("reload run for mapped instance %s: %w", child.ID, err)
+		}
+		tasks, err := s.store.GetLatestTaskAttempts(parent.RunID)
+		if err != nil {
+			return fmt.Errorf("reload snapshot for mapped instance %s: %w", child.ID, err)
+		}
+		currentParent, ok := exactAttempt(tasks, parent.ID)
+		if run.Status != models.RunRunning ||
+			!ok ||
+			currentParent.TaskID != parent.TaskID ||
+			currentParent.Attempt != parent.Attempt ||
+			currentParent.Status != models.TaskRunning ||
+			currentParent.StartedAt == nil ||
+			!currentParent.StartedAt.Equal(*parent.StartedAt) {
+			return fmt.Errorf(
+				"%w: map parent %s no longer owns child materialization",
+				errGuardedActionRejected,
+				parent.ID,
+			)
+		}
+
+		result, err := s.store.EnsureTaskInstanceForRunSnapshot(
+			parent.RunID,
+			parent.ID,
+			*parent.StartedAt,
+			run.Status,
+			tasks,
+			child,
+		)
+		if err != nil {
+			return fmt.Errorf("ensure mapped instance %s: %w", child.ID, err)
+		}
+		switch result {
+		case models.GuardedTaskPromotionApplied,
+			models.GuardedTaskPromotionAlreadyApplied:
+			return nil
+		case models.GuardedTaskPromotionStale:
+			continue
+		case models.GuardedTaskPromotionInvalid:
+			return fmt.Errorf(
+				"%w: ensure mapped instance %s was invalid",
+				errGuardedActionRejected,
+				child.ID,
+			)
+		default:
+			return fmt.Errorf(
+				"ensure mapped instance %s returned unknown result %d",
+				child.ID,
+				result,
+			)
+		}
+	}
+	return fmt.Errorf(
+		"%w: ensure mapped instance %s did not converge after %d stale snapshots",
+		errGuardedActionRejected,
+		child.ID,
+		maxSnapshotMisses,
+	)
 }
 
 func (s *Scheduler) promoteMapChildLocked(
@@ -704,7 +780,7 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 	if err != nil {
 		return nil, fmt.Errorf("load latest tasks for run %s: %w", run.ID, err)
 	}
-	quarantined, err := s.quarantineUndefinedPendingTasksLocked(dag, tasks)
+	quarantined, err := s.detectUndefinedPersistedTasksLocked(dag, tasks)
 	if err != nil {
 		return nil, fmt.Errorf("quarantine undefined tasks for run %s: %w", run.ID, err)
 	}

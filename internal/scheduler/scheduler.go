@@ -29,6 +29,22 @@ type Scheduler struct {
 	orchestrate sync.Mutex
 }
 
+// RetryKindUnresolvedError means the scheduler cannot prove whether a persisted
+// base task is worker-executed or scheduler-owned map setup work. Retrying such
+// a task must fail closed because a queued successor is visible to workers.
+type RetryKindUnresolvedError struct {
+	RunID  string
+	TaskID string
+}
+
+func (e *RetryKindUnresolvedError) Error() string {
+	return fmt.Sprintf(
+		"retry kind for task %s in run %s is unresolved without an exact DAG definition or durable map setup",
+		e.TaskID,
+		e.RunID,
+	)
+}
+
 type attemptLifecycle interface {
 	PromoteGuarded(
 		models.TaskInstance,
@@ -494,9 +510,34 @@ func (s *Scheduler) retryUsesPendingSuccessor(current models.TaskInstance) (bool
 		// Exact lookup intentionally leaves mapped children as ordinary retry
 		// attempts even though their public IDs are derived from a map parent.
 		def := dag.FindTask(current.TaskID)
-		return def != nil && def.Type == "map", nil
+		if def != nil {
+			return def.Type == "map", nil
+		}
+		if current.TaskID != models.BaseTaskID(current.TaskID) &&
+			s.isStoredMapChild(dag, current.TaskID) {
+			return false, nil
+		}
+		return false, &RetryKindUnresolvedError{
+			RunID: current.RunID, TaskID: current.TaskID,
+		}
 	}
 
+	if current.TaskID != models.BaseTaskID(current.TaskID) {
+		return false, nil
+	}
+	provedMapParent, err := s.hasDurableMapSetupHistory(current)
+	if err != nil {
+		return false, err
+	}
+	if provedMapParent {
+		return true, nil
+	}
+	return false, &RetryKindUnresolvedError{
+		RunID: current.RunID, TaskID: current.TaskID,
+	}
+}
+
+func (s *Scheduler) hasDurableMapSetupHistory(current models.TaskInstance) (bool, error) {
 	attempts, err := s.store.GetTaskAttempts(current.RunID, current.TaskID)
 	if err != nil {
 		return false, err
@@ -512,9 +553,29 @@ func (s *Scheduler) retryUsesPendingSuccessor(current models.TaskInstance) (bool
 			return false, err
 		}
 	}
-	// Without a loaded definition or durable map binding, legacy rows are
-	// ambiguous. Preserve the ordinary queued-successor retry behavior.
 	return false, nil
+}
+
+func (s *Scheduler) cancelledAttemptOwnsMapChildren(
+	current models.TaskInstance,
+) (bool, error) {
+	run, err := s.store.GetDagRun(current.RunID)
+	if err != nil {
+		return false, err
+	}
+	s.mu.RLock()
+	dag := s.dags[run.DAGID]
+	s.mu.RUnlock()
+	if dag != nil {
+		if def := dag.FindTask(current.TaskID); def != nil {
+			return def.Type == "map", nil
+		}
+		if current.TaskID != models.BaseTaskID(current.TaskID) &&
+			s.isStoredMapChild(dag, current.TaskID) {
+			return false, nil
+		}
+	}
+	return s.hasDurableMapSetupHistory(current)
 }
 
 func (s *Scheduler) retryCurrentLocked(
@@ -592,7 +653,7 @@ func (s *Scheduler) cancelTaskLockedDetailed(runID, taskID string, pool interfac
 		followupErrs = append(followupErrs,
 			fmt.Errorf("cancelled attempt %s has authoritative status %s", result.AttemptID, attempt.Status))
 	} else {
-		isMapParent, mapErr := s.retryUsesPendingSuccessor(*attempt)
+		isMapParent, mapErr := s.cancelledAttemptOwnsMapChildren(*attempt)
 		if mapErr != nil {
 			durableErrs = append(durableErrs,
 				fmt.Errorf("resolve mapped children for cancelled attempt %s: %w", result.AttemptID, mapErr))
@@ -649,22 +710,41 @@ func (s *Scheduler) cancelPersistedAttemptLockedDetailed(attempt models.TaskInst
 	return nil, followupErr
 }
 
-// KillDagRun cancels only the latest current attempt of every logical task.
+// KillDagRun cancels the latest current attempt of every logical task. It
+// converges to a fixed point before terminalizing the run so map reconciliation
+// cannot materialize a child after the cancellation enumeration has passed.
 func (s *Scheduler) KillDagRun(runID string, pool interface {
 	KillTask(string) error
 }) error {
 	s.orchestrate.Lock()
 	defer s.orchestrate.Unlock()
-	tasks, err := s.store.GetTaskInstancesByRun(runID)
-	if err != nil {
-		return err
-	}
 
+	const maxCancellationPasses = 4096
+	processed := make(map[string]struct{})
 	var durableErrs []error
 	var followupErrs []error
-	for _, ti := range tasks {
-		switch ti.Status {
-		case models.TaskPending, models.TaskQueued, models.TaskRunning, models.TaskUpForRetry, models.TaskCancelled:
+	for pass := 0; pass < maxCancellationPasses; pass++ {
+		tasks, err := s.store.GetLatestTaskAttempts(runID)
+		if err != nil {
+			durableErrs = append(durableErrs, err)
+			break
+		}
+
+		processedThisPass := false
+		activeRemaining := false
+		for _, ti := range tasks {
+			switch ti.Status {
+			case models.TaskPending, models.TaskQueued, models.TaskRunning, models.TaskUpForRetry:
+				activeRemaining = true
+			case models.TaskCancelled:
+			default:
+				continue
+			}
+			if _, seen := processed[ti.ID]; seen {
+				continue
+			}
+			processed[ti.ID] = struct{}{}
+			processedThisPass = true
 			durableErr, followupErr := s.cancelPersistedAttemptLockedDetailed(ti, pool)
 			if durableErr != nil {
 				durableErrs = append(durableErrs, fmt.Errorf("cancel task %s: %w", ti.TaskID, durableErr))
@@ -673,14 +753,52 @@ func (s *Scheduler) KillDagRun(runID string, pool interface {
 				followupErrs = append(followupErrs, fmt.Errorf("finish cancelling task %s: %w", ti.TaskID, followupErr))
 			}
 		}
-	}
 
-	// Local process cleanup can be retried independently. The run is durably
-	// cancelled once all eligible task lifecycle writes have succeeded.
-	if len(durableErrs) == 0 {
-		if err := s.progressCancellationLocked(runID, time.Now().UTC()); err != nil {
-			durableErrs = append(durableErrs, fmt.Errorf("progress cancelled dag run %s: %w", runID, err))
+		if processedThisPass {
+			// Re-read even after successful writes: another scheduler may have
+			// materialized a child from an observation made before its parent
+			// cancellation committed.
+			continue
 		}
+		if len(durableErrs) != 0 {
+			break
+		}
+		if activeRemaining {
+			durableErrs = append(durableErrs,
+				fmt.Errorf("dag run %s cancellation left an active processed attempt", runID))
+			break
+		}
+
+		run, err := s.store.GetDagRun(runID)
+		if err != nil {
+			durableErrs = append(durableErrs, err)
+			break
+		}
+		if run.Status == models.RunCancelled {
+			return errors.Join(errors.Join(durableErrs...), errors.Join(followupErrs...))
+		}
+		applied, err := s.store.CompareAndSetDagRunStatusForTaskSnapshot(
+			runID,
+			run.Status,
+			models.RunCancelled,
+			time.Now().UTC(),
+			tasks,
+		)
+		if err != nil {
+			durableErrs = append(durableErrs,
+				fmt.Errorf("progress cancelled dag run %s: %w", runID, err))
+			break
+		}
+		if applied {
+			return errors.Join(errors.Join(durableErrs...), errors.Join(followupErrs...))
+		}
+	}
+	if len(durableErrs) == 0 {
+		durableErrs = append(durableErrs, fmt.Errorf(
+			"dag run %s cancellation did not converge after %d passes",
+			runID,
+			maxCancellationPasses,
+		))
 	}
 	return errors.Join(errors.Join(durableErrs...), errors.Join(followupErrs...))
 }

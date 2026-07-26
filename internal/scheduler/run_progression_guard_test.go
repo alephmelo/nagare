@@ -61,6 +61,9 @@ func TestManualRetryReopensCancelledRunWithoutDuplicateSuccessor(t *testing.T) {
 		Status: models.TaskCancelled, Attempt: 1, CreatedAt: now, UpdatedAt: now,
 	})
 	sched := NewScheduler(store)
+	sched.dags["dag"] = &models.DAGDef{
+		ID: "dag", Tasks: []models.TaskDef{{ID: "task", Type: "command"}},
+	}
 
 	if err := sched.RetryTask("run-1", "task"); err != nil {
 		t.Fatalf("RetryTask: %v", err)
@@ -226,17 +229,124 @@ func TestRetryKindUsesExactDefinitionThenDurableMissingDAGProof(t *testing.T) {
 		t.Fatalf("missing-DAG durable retry kind = (%v, %v), want pending", pending, err)
 	}
 
+	child := current
+	child.TaskID = "map[0]"
+	pending, err = sched.retryUsesPendingSuccessor(child)
+	if err != nil || pending {
+		t.Fatalf("missing-DAG mapped-child retry kind = (%v, %v), want ordinary", pending, err)
+	}
+
 	sched.dags["dag"] = &models.DAGDef{
 		ID: "dag",
 		Tasks: []models.TaskDef{{
 			ID: "map", Type: "map", MapOver: "source",
 		}},
 	}
-	child := current
-	child.TaskID = "map[0]"
 	pending, err = sched.retryUsesPendingSuccessor(child)
 	if err != nil || pending {
-		t.Fatalf("mapped-child retry kind = (%v, %v), want ordinary", pending, err)
+		t.Fatalf("loaded-DAG mapped-child retry kind = (%v, %v), want ordinary", pending, err)
+	}
+}
+
+func TestRetryTaskMissingDAGAmbiguousFailsWithoutMutation(t *testing.T) {
+	store := openControlStore(t, t.TempDir()+"/retry-kind-ambiguous.db")
+	now := time.Now().UTC()
+	createControlRun(t, store, "run-1", models.RunFailed, now)
+	createControlAttempt(t, store, models.TaskInstance{
+		ID: "failed", RunID: "run-1", TaskID: "task",
+		Status: models.TaskFailed, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	})
+
+	err := NewScheduler(store).RetryTask("run-1", "task")
+	var unresolved *RetryKindUnresolvedError
+	if !errors.As(err, &unresolved) {
+		t.Fatalf("RetryTask error = %v, want RetryKindUnresolvedError", err)
+	}
+	attempts, loadErr := store.GetTaskAttempts("run-1", "task")
+	if loadErr != nil || len(attempts) != 1 ||
+		attempts[0].Status != models.TaskFailed {
+		t.Fatalf("attempts = %#v, %v, want unchanged failed attempt", attempts, loadErr)
+	}
+	run, loadErr := store.GetDagRun("run-1")
+	if loadErr != nil || run.Status != models.RunFailed {
+		t.Fatalf("run = %#v, %v, want unchanged failed run", run, loadErr)
+	}
+}
+
+func TestRetryTaskMissingDAGUsesDurableMapSetupProof(t *testing.T) {
+	store := openControlStore(t, t.TempDir()+"/retry-kind-durable-map.db")
+	now := time.Now().UTC()
+	createControlRun(t, store, "run-1", models.RunFailed, now)
+	failed := models.TaskInstance{
+		ID: "map-1", RunID: "run-1", TaskID: "map",
+		Status: models.TaskFailed, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	createControlAttempt(t, store, failed)
+	if _, _, err := store.EnsureMapSetup(models.MapSetup{
+		ParentAttemptID:   failed.ID,
+		UpstreamAttemptID: failed.ID,
+		UpstreamOutput:    "[]",
+		StartedAt:         now,
+	}); err != nil {
+		t.Fatalf("EnsureMapSetup: %v", err)
+	}
+
+	if err := NewScheduler(store).RetryTask("run-1", "map"); err != nil {
+		t.Fatalf("RetryTask: %v", err)
+	}
+	attempts, err := store.GetTaskAttempts("run-1", "map")
+	if err != nil || len(attempts) != 2 ||
+		attempts[1].Status != models.TaskPending {
+		t.Fatalf("attempts = %#v, %v, want one pending map successor", attempts, err)
+	}
+	run, err := store.GetDagRun("run-1")
+	if err != nil || run.Status != models.RunRunning {
+		t.Fatalf("run = %#v, %v, want reopened running run", run, err)
+	}
+}
+
+func TestAutomaticRetryMissingDAGRecognizesStoredMappedChild(t *testing.T) {
+	store := openControlStore(t, t.TempDir()+"/retry-kind-mapped-child.db")
+	now := time.Now().UTC()
+	createControlRun(t, store, "run-1", models.RunRunning, now)
+	child := models.TaskInstance{
+		ID: "child-1", RunID: "run-1", TaskID: "map[0]@g2",
+		Status: models.TaskUpForRetry, Attempt: 1,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	createControlAttempt(t, store, child)
+
+	if err := NewScheduler(store).RetryTaskAutomatically(child, 0, now); err != nil {
+		t.Fatalf("RetryTaskAutomatically: %v", err)
+	}
+	attempts, err := store.GetTaskAttempts("run-1", child.TaskID)
+	if err != nil || len(attempts) != 2 ||
+		attempts[1].Status != models.TaskQueued {
+		t.Fatalf("attempts = %#v, %v, want one queued mapped-child successor", attempts, err)
+	}
+}
+
+func TestRetryTaskLoadedDAGMissingExactDefinitionFailsWithoutMutation(t *testing.T) {
+	store := openControlStore(t, t.TempDir()+"/retry-kind-missing-definition.db")
+	now := time.Now().UTC()
+	createControlRun(t, store, "run-1", models.RunFailed, now)
+	createControlAttempt(t, store, models.TaskInstance{
+		ID: "failed", RunID: "run-1", TaskID: "removed",
+		Status: models.TaskFailed, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	sched := NewScheduler(store)
+	sched.dags["dag"] = &models.DAGDef{
+		ID: "dag", Tasks: []models.TaskDef{{ID: "known", Type: "command"}},
+	}
+
+	err := sched.RetryTask("run-1", "removed")
+	var unresolved *RetryKindUnresolvedError
+	if !errors.As(err, &unresolved) {
+		t.Fatalf("RetryTask error = %v, want RetryKindUnresolvedError", err)
+	}
+	attempts, loadErr := store.GetTaskAttempts("run-1", "removed")
+	if loadErr != nil || len(attempts) != 1 {
+		t.Fatalf("attempts = %#v, %v, want no successor", attempts, loadErr)
 	}
 }
 
@@ -275,6 +385,56 @@ func TestUndefinedTaskQuarantineLetsConcurrentCancellationWin(t *testing.T) {
 	run, err := store.GetDagRun("run-1")
 	if err != nil || run.Status != models.RunCancelled {
 		t.Fatalf("run = %#v, %v, want cancelled", run, err)
+	}
+}
+
+func TestUndefinedPersistedTaskAlwaysTerminalizesBeforeEvaluation(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		undefinedStatus models.TaskStatus
+		wantRunStatus   models.RunStatus
+	}{
+		{
+			name:            "cancelled undefined task wins",
+			undefinedStatus: models.TaskCancelled,
+			wantRunStatus:   models.RunCancelled,
+		},
+		{
+			name:            "successful undefined task fails run",
+			undefinedStatus: models.TaskSuccess,
+			wantRunStatus:   models.RunFailed,
+		},
+		{
+			name:            "failed undefined task fails run",
+			undefinedStatus: models.TaskFailed,
+			wantRunStatus:   models.RunFailed,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := openControlStore(t, t.TempDir()+"/undefined-terminal.db")
+			now := time.Now().UTC()
+			createControlRun(t, store, "run-1", models.RunRunning, now)
+			createControlAttempt(t, store, models.TaskInstance{
+				ID: "known", RunID: "run-1", TaskID: "known",
+				Status: models.TaskSuccess, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+			})
+			createControlAttempt(t, store, models.TaskInstance{
+				ID: "undefined", RunID: "run-1", TaskID: "undefined",
+				Status: test.undefinedStatus, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+			})
+			sched := NewScheduler(store)
+			sched.dags["dag"] = &models.DAGDef{
+				ID: "dag", Tasks: []models.TaskDef{{ID: "known", Type: "command"}},
+			}
+
+			if err := sched.evaluateRunCompletions(); err != nil {
+				t.Fatalf("evaluateRunCompletions: %v", err)
+			}
+			run, err := store.GetDagRun("run-1")
+			if err != nil || run.Status != test.wantRunStatus {
+				t.Fatalf("run = %#v, %v, want %s", run, err, test.wantRunStatus)
+			}
+		})
 	}
 }
 

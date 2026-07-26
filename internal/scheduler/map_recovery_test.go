@@ -217,6 +217,81 @@ func TestConcurrentMapReconcilersConvergeOnOneChildSet(t *testing.T) {
 	}
 }
 
+func TestGuardedMapChildMaterializationStopsAfterLostParentOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		lose func(*testing.T, *models.Store, *Scheduler, models.TaskInstance)
+	}{
+		{
+			name: "parent cancellation",
+			lose: func(t *testing.T, _ *models.Store, sched *Scheduler, parent models.TaskInstance) {
+				t.Helper()
+				if err := sched.CancelTask(parent.RunID, parent.TaskID, nil); err != nil {
+					t.Fatalf("CancelTask(parent): %v", err)
+				}
+			},
+		},
+		{
+			name: "parent retry successor",
+			lose: func(t *testing.T, store *models.Store, _ *Scheduler, parent models.TaskInstance) {
+				t.Helper()
+				lifecycle := tasklifecycle.New(store)
+				if disposition, err := lifecycle.Complete(tasklifecycle.Completion{
+					AttemptID: parent.ID, CompletedAt: time.Now().UTC(),
+				}); err != nil || disposition != tasklifecycle.Applied {
+					t.Fatalf("Complete(parent) = (%v, %v), want Applied", disposition, err)
+				}
+				if disposition, err := lifecycle.RetryCurrentPending(
+					parent.RunID,
+					parent.TaskID,
+					time.Now().UTC(),
+				); err != nil || disposition != tasklifecycle.Applied {
+					t.Fatalf("RetryCurrentPending(parent) = (%v, %v), want Applied", disposition, err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, sched, runID := newMapTestScheduler(t, 0)
+			source, parent := createSourceAndParent(
+				t,
+				store,
+				runID,
+				`["item"]`,
+				1,
+				models.TaskPending,
+			)
+			setup, _, err := store.EnsureMapSetup(models.MapSetup{
+				ParentAttemptID: parent.ID, UpstreamAttemptID: source.ID,
+				UpstreamOutput: source.Output, StartedAt: time.Now().UTC(),
+			})
+			if err != nil {
+				t.Fatalf("EnsureMapSetup: %v", err)
+			}
+			if disposition, err := tasklifecycle.New(store).StartSetup(
+				parent.ID,
+				setup.StartedAt,
+			); err != nil || disposition != tasklifecycle.Applied {
+				t.Fatalf("StartSetup(parent) = (%v, %v), want Applied", disposition, err)
+			}
+			owned, err := store.GetTaskInstance(parent.ID)
+			if err != nil || owned.StartedAt == nil {
+				t.Fatalf("owned parent = %#v, %v", owned, err)
+			}
+
+			test.lose(t, store, sched, *owned)
+			err = sched.reconcileMapChildrenLocked(*owned, []string{"item"})
+			if !errors.Is(err, errGuardedActionRejected) {
+				t.Fatalf("reconcileMapChildrenLocked error = %v, want guarded rejection", err)
+			}
+			children, err := store.GetTaskAttempts(runID, "map[0]")
+			if err != nil || len(children) != 0 {
+				t.Fatalf("children = %#v, %v, want no materialized row", children, err)
+			}
+		})
+	}
+}
+
 func TestObsoletePendingMapChildIsNotQuarantinedAsUndefined(t *testing.T) {
 	store, sched, runID := newMapTestScheduler(t, 0)
 	createMapTestTask(t, store, models.TaskInstance{

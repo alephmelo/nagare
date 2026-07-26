@@ -22,6 +22,9 @@ func TestRetryTaskReplayRepairsRunStatusWithoutAnotherSuccessor(t *testing.T) {
 	})
 	delegate := tasklifecycle.New(store)
 	sched := NewScheduler(store)
+	sched.dags["dag"] = &models.DAGDef{
+		ID: "dag", Tasks: []models.TaskDef{{ID: "task", Type: "command"}},
+	}
 	sched.lifecycle = &controlLifecycleFault{
 		delegate: delegate,
 		afterRetry: func() {
@@ -37,6 +40,9 @@ func TestRetryTaskReplayRepairsRunStatusWithoutAnotherSuccessor(t *testing.T) {
 
 	reopened := openControlStore(t, dbPath)
 	recovery := NewScheduler(reopened)
+	recovery.dags["dag"] = &models.DAGDef{
+		ID: "dag", Tasks: []models.TaskDef{{ID: "task", Type: "command"}},
+	}
 	if err := recovery.RetryTask("run-1", "task"); err != nil {
 		t.Fatalf("replayed RetryTask: %v", err)
 	}
@@ -144,6 +150,9 @@ func TestRetryTaskAutomaticallyUsesExactSnapshotAndDueTime(t *testing.T) {
 	}
 	createControlAttempt(t, store, expected)
 	sched := NewScheduler(store)
+	sched.dags["dag"] = &models.DAGDef{
+		ID: "dag", Tasks: []models.TaskDef{{ID: "task", Type: "command"}},
+	}
 
 	if err := sched.RetryTaskAutomatically(expected, delay, dueAt.Add(-time.Nanosecond)); err != nil {
 		t.Fatalf("RetryTaskAutomatically before due time: %v", err)
@@ -189,6 +198,9 @@ func TestRetryTaskAutomaticallySerializesWithCancellation(t *testing.T) {
 		}
 		createControlAttempt(t, store, expected)
 		sched := NewScheduler(store)
+		sched.dags["dag"] = &models.DAGDef{
+			ID: "dag", Tasks: []models.TaskDef{{ID: "task", Type: "command"}},
+		}
 
 		start := make(chan struct{})
 		errs := make(chan error, 2)
@@ -229,6 +241,9 @@ func TestRetryTaskAutomaticallyPropagatesLifecycleFailure(t *testing.T) {
 	createControlAttempt(t, store, expected)
 	retryErr := errors.New("retry persistence failed")
 	sched := NewScheduler(store)
+	sched.dags["dag"] = &models.DAGDef{
+		ID: "dag", Tasks: []models.TaskDef{{ID: "task", Type: "command"}},
+	}
 	sched.lifecycle = &controlLifecycleFault{
 		delegate: tasklifecycle.New(store),
 		retryErr: retryErr,
@@ -567,6 +582,47 @@ func TestKillDagRunAggregatesDurableCancellationErrorsAndKeepsRunRunning(t *test
 	}
 }
 
+func TestKillDagRunCancelsAttemptsMaterializedDuringEnumeration(t *testing.T) {
+	store := openControlStore(t, filepath.Join(t.TempDir(), "kill-fixed-point.db"))
+	now := time.Date(2026, time.July, 26, 21, 0, 0, 0, time.UTC)
+	createControlRun(t, store, "run-1", models.RunRunning, now)
+	createControlAttempt(t, store, models.TaskInstance{
+		ID: "parent", RunID: "run-1", TaskID: "map",
+		Status: models.TaskRunning, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	item := "late"
+	lateChild := models.TaskInstance{
+		ID: "late-child", RunID: "run-1", TaskID: "map[0]",
+		Status: models.TaskPending, ItemValue: &item, Attempt: 1,
+		CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
+	}
+	faults := &controlLifecycleFault{delegate: tasklifecycle.New(store)}
+	faults.afterExactCancel = func(attemptID string) {
+		if attemptID != "parent" {
+			return
+		}
+		faults.afterExactCancel = nil
+		createControlAttempt(t, store, lateChild)
+	}
+	sched := NewScheduler(store)
+	sched.lifecycle = faults
+
+	if err := sched.KillDagRun("run-1", nil); err != nil {
+		t.Fatalf("KillDagRun: %v", err)
+	}
+	reloaded, err := store.GetTaskInstance(lateChild.ID)
+	if err != nil || reloaded.Status != models.TaskCancelled {
+		t.Fatalf("late child = %#v, %v, want cancelled", reloaded, err)
+	}
+	run, err := store.GetDagRun("run-1")
+	if err != nil || run.Status != models.RunCancelled {
+		t.Fatalf("run = %#v, %v, want cancelled", run, err)
+	}
+	if len(faults.exactCancelCalls) != 2 {
+		t.Fatalf("CancelAttempt calls = %v, want parent and late child", faults.exactCancelCalls)
+	}
+}
+
 type scriptedControlPool struct {
 	mu   sync.Mutex
 	errs []error
@@ -596,6 +652,7 @@ type controlLifecycleFault struct {
 	cancelCalls      []string
 	exactCancelErrs  map[string]error
 	exactCancelCalls []string
+	afterExactCancel func(string)
 }
 
 func (l *controlLifecycleFault) PromoteGuarded(
@@ -640,7 +697,11 @@ func (l *controlLifecycleFault) CancelAttempt(id string, at time.Time) (tasklife
 	if err := l.exactCancelErrs[id]; err != nil {
 		return 0, err
 	}
-	return l.delegate.CancelAttempt(id, at)
+	disposition, err := l.delegate.CancelAttempt(id, at)
+	if err == nil && l.afterExactCancel != nil {
+		l.afterExactCancel(id)
+	}
+	return disposition, err
 }
 
 func (l *controlLifecycleFault) CancelCurrentAttempt(runID, taskID string, at time.Time) (tasklifecycle.CurrentCancellation, error) {
