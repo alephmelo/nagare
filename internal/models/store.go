@@ -129,6 +129,16 @@ type TaskInstance struct {
 	StartedAt *time.Time
 }
 
+// TaskAttemptMutation describes the fields changed by one persisted lifecycle
+// transition. Output is optional because claims and promotions preserve it.
+type TaskAttemptMutation struct {
+	Status    TaskStatus
+	Output    string
+	SetOutput bool
+	UpdatedAt time.Time
+	StartedAt *time.Time
+}
+
 // Store handles all database operations for the scheduler
 type Store struct {
 	db *sql.DB
@@ -582,6 +592,32 @@ func (s *Store) GetTaskInstance(id string) (*TaskInstance, error) {
 		return nil, err
 	}
 	return &ti, nil
+}
+
+// CompareAndSetTaskAttempt atomically applies a lifecycle mutation only while
+// the attempt remains in the status observed by the caller.
+func (s *Store) CompareAndSetTaskAttempt(id string, expected TaskStatus, mutation TaskAttemptMutation) (bool, error) {
+	result, err := s.db.Exec(`
+		UPDATE task_instances
+		SET status = ?,
+			output = CASE WHEN ? THEN ? ELSE output END,
+			updated_at = ?,
+			started_at = CASE WHEN ? THEN ? ELSE started_at END
+		WHERE id = ? AND status = ?`,
+		mutation.Status,
+		mutation.SetOutput, mutation.Output,
+		mutation.UpdatedAt,
+		mutation.StartedAt != nil, mutation.StartedAt,
+		id, expected,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
 }
 
 // GetDagRun retrieves a DagRun by ID
