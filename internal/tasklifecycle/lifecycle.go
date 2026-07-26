@@ -135,6 +135,36 @@ func (l *Lifecycle) Complete(input Completion) (Disposition, error) {
 	return l.completeObserved(attempt, input)
 }
 
+// CancelAttempt cancels one exact persisted attempt. It never resolves the
+// logical task's current attempt, so a stale caller cannot cancel a successor.
+func (l *Lifecycle) CancelAttempt(attemptID string, cancelledAt time.Time) (Disposition, error) {
+	for {
+		attempt, err := l.get(attemptID)
+		if err != nil {
+			return 0, err
+		}
+		if attempt.Status == models.TaskCancelled {
+			return AlreadyApplied, nil
+		}
+		if !isCancellable(attempt.Status) {
+			return 0, invalid(attempt, "cancel")
+		}
+
+		applied, err := l.store.CompareAndSetTaskAttempt(attemptID, attempt.Status, models.TaskAttemptMutation{
+			Status: models.TaskCancelled, UpdatedAt: cancelledAt,
+		})
+		if err != nil {
+			return 0, err
+		}
+		if applied {
+			return Applied, nil
+		}
+		// A concurrent lifecycle transition won the compare-and-set. Observe
+		// its exact row again and either replay, reject, or cancel the still
+		// eligible state without ever selecting a newer attempt.
+	}
+}
+
 // CancelCurrent cancels the current attempt of one logical task.
 func (l *Lifecycle) CancelCurrent(runID, taskID string, cancelledAt time.Time) (Disposition, error) {
 	result, err := l.store.CancelCurrentTaskAttempt(runID, taskID, cancelledAt)
@@ -223,6 +253,15 @@ func completionStatus(attempt int, input Completion) models.TaskStatus {
 func isCompleted(status models.TaskStatus) bool {
 	switch status {
 	case models.TaskSuccess, models.TaskFailed, models.TaskUpForRetry:
+		return true
+	default:
+		return false
+	}
+}
+
+func isCancellable(status models.TaskStatus) bool {
+	switch status {
+	case models.TaskPending, models.TaskQueued, models.TaskRunning, models.TaskUpForRetry:
 		return true
 	default:
 		return false
