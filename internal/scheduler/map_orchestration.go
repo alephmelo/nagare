@@ -87,9 +87,7 @@ func (s *Scheduler) promoteAndRecover() error {
 		if err != nil {
 			return err
 		}
-		if err := s.applyProgressionLocked(
-			run, dag, currentGenerationTasks(dag, tasks), time.Now().UTC(),
-		); err != nil {
+		if err := s.applyProgressionLocked(run, dag, tasks, time.Now().UTC()); err != nil {
 			return err
 		}
 	}
@@ -557,10 +555,10 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 	if err != nil {
 		return nil, fmt.Errorf("load latest tasks for run %s: %w", run.ID, err)
 	}
-	tasks = currentGenerationTasks(dag, tasks)
+	projectedTasks := currentGenerationTasks(dag, tasks)
 
 	var retries []automaticRetryCandidate
-	for _, task := range tasks {
+	for _, task := range projectedTasks {
 		taskDef := taskDefinitionForStoredID(dag, task.TaskID)
 		if task.Status == models.TaskUpForRetry {
 			if taskDef != nil {
@@ -584,19 +582,21 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 
 func progressionInput(run *models.DagRun, dag *models.DAGDef, tasks []models.TaskInstance) runprogression.Input {
 	input := runprogression.Input{RunStatus: run.Status}
-	materialized := make(map[string]struct{}, len(tasks))
-	for _, task := range tasks {
-		if dag.FindTask(task.TaskID) != nil {
-			materialized[task.TaskID] = struct{}{}
+	if dag != nil {
+		materialized := make(map[string]struct{}, len(tasks))
+		for _, task := range tasks {
+			if dag.FindTask(task.TaskID) != nil {
+				materialized[task.TaskID] = struct{}{}
+			}
 		}
-	}
-	for _, definition := range dag.Tasks {
-		if _, exists := materialized[definition.ID]; !exists {
-			continue
+		for _, definition := range dag.Tasks {
+			if _, exists := materialized[definition.ID]; !exists {
+				continue
+			}
+			input.Definitions = append(input.Definitions, runprogression.TaskDefinition{
+				ID: definition.ID, DependsOn: definition.DependsOn,
+			})
 		}
-		input.Definitions = append(input.Definitions, runprogression.TaskDefinition{
-			ID: definition.ID, DependsOn: definition.DependsOn,
-		})
 	}
 	for _, task := range tasks {
 		input.Attempts = append(input.Attempts, runprogression.AttemptSnapshot{
@@ -613,50 +613,167 @@ func (s *Scheduler) applyProgressionLocked(run *models.DagRun, dag *models.DAGDe
 func (s *Scheduler) applyProgressionIntentLocked(
 	run *models.DagRun,
 	dag *models.DAGDef,
-	tasks []models.TaskInstance,
+	observedTasks []models.TaskInstance,
 	now time.Time,
 	intent progressionIntent,
 ) error {
-	plan := runprogression.Evaluate(progressionInput(run, dag, tasks))
-	if intent != progressionCancellation {
-		attemptsByID := make(map[string]models.TaskInstance, len(tasks))
-		for _, task := range tasks {
-			attemptsByID[task.ID] = task
-		}
-		for _, attemptID := range plan.PromoteAttemptIDs {
-			task, exists := attemptsByID[attemptID]
-			if !exists {
-				continue
-			}
-			taskDef := dag.FindTask(task.TaskID)
-			if taskDef != nil && taskDef.Type == "map" && taskDef.ID == task.TaskID {
-				// A map parent remains pending until reconcileMapParentLocked
-				// has persisted setup ownership. Queued means worker-claimable.
-				continue
-			}
-			if _, err := s.lifecycle.Promote(attemptID, now); err != nil {
-				return fmt.Errorf("promote attempt %s: %w", attemptID, err)
-			}
-		}
-	}
+	const (
+		maxSnapshotMisses      = 4
+		maxReconciliationSteps = 4096
+	)
+	snapshotMisses := 0
+	for step := 0; step < maxReconciliationSteps; step++ {
+		projectedTasks := progressionTasks(dag, observedTasks)
+		input := progressionInput(run, dag, projectedTasks)
+		input.AllowCancelledReopen = intent == progressionManualRetry
+		plan := runprogression.Evaluate(input)
+		promotions := progressionPromotions(dag, projectedTasks, plan, intent)
+		desired := progressionDesiredStatus(input, plan, intent)
 
-	desired := plan.DesiredRunStatus
-	switch intent {
-	case progressionManualRetry:
-		status := models.RunRunning
-		desired = &status
-	case progressionCancellation:
-		status := models.RunCancelled
-		desired = &status
-	}
-	if desired != nil && *desired != run.Status {
-		if err := s.transitionRunStatusLocked(run.ID, run.Status, *desired, now); err != nil {
-			return fmt.Errorf("transition run %s from %s to %s: %w",
-				run.ID, run.Status, *desired, err)
+		// A same-status guarded write makes a promotion-only plan prove that
+		// its complete task snapshot is still current. Desired status is always
+		// guarded before promotion because promotion mutates that snapshot.
+		if desired == nil && len(promotions) == 0 {
+			return nil
 		}
-		run.Status = *desired
+		guardedStatus := run.Status
+		if desired != nil {
+			guardedStatus = *desired
+		}
+		applied, err := s.store.CompareAndSetDagRunStatusForTaskSnapshot(
+			run.ID, run.Status, guardedStatus, now, observedTasks,
+		)
+		if err != nil {
+			return fmt.Errorf("guard run %s progression: %w", run.ID, err)
+		}
+		if !applied {
+			snapshotMisses++
+			if snapshotMisses >= maxSnapshotMisses {
+				return fmt.Errorf(
+					"run %s progression did not converge after %d stale snapshots",
+					run.ID, snapshotMisses,
+				)
+			}
+			var reloadErr error
+			run, dag, observedTasks, reloadErr = s.reloadProgressionSnapshotLocked(run.ID)
+			if reloadErr != nil {
+				return reloadErr
+			}
+			continue
+		}
+		snapshotMisses = 0
+		if desired != nil {
+			run.Status = *desired
+		}
+		if len(promotions) == 0 {
+			return nil
+		}
+
+		// Apply exactly one promotion. It changes the guarded snapshot, so the
+		// next candidate must be derived from a fresh snapshot and plan.
+		if _, err := s.lifecycle.Promote(promotions[0], now); err != nil {
+			var invalid *tasklifecycle.InvalidTransitionError
+			if !errors.As(err, &invalid) {
+				return fmt.Errorf("promote attempt %s: %w", promotions[0], err)
+			}
+		}
+		var reloadErr error
+		run, dag, observedTasks, reloadErr = s.reloadProgressionSnapshotLocked(run.ID)
+		if reloadErr != nil {
+			return reloadErr
+		}
 	}
-	return nil
+	return fmt.Errorf(
+		"run %s progression exceeded %d reconciliation steps",
+		run.ID, maxReconciliationSteps,
+	)
+}
+
+func progressionTasks(dag *models.DAGDef, observedTasks []models.TaskInstance) []models.TaskInstance {
+	if dag == nil {
+		return observedTasks
+	}
+	return currentGenerationTasks(dag, observedTasks)
+}
+
+func progressionPromotions(
+	dag *models.DAGDef,
+	tasks []models.TaskInstance,
+	plan runprogression.Plan,
+	intent progressionIntent,
+) []string {
+	if dag == nil || intent == progressionCancellation {
+		return nil
+	}
+	attemptsByID := make(map[string]models.TaskInstance, len(tasks))
+	for _, task := range tasks {
+		attemptsByID[task.ID] = task
+	}
+	promotions := make([]string, 0, len(plan.PromoteAttemptIDs))
+	for _, attemptID := range plan.PromoteAttemptIDs {
+		task, exists := attemptsByID[attemptID]
+		if !exists {
+			continue
+		}
+		taskDef := dag.FindTask(task.TaskID)
+		if taskDef != nil && taskDef.Type == "map" && taskDef.ID == task.TaskID {
+			// A map parent remains pending until reconcileMapParentLocked has
+			// persisted setup ownership. Queued means worker-claimable.
+			continue
+		}
+		promotions = append(promotions, attemptID)
+	}
+	return promotions
+}
+
+func progressionDesiredStatus(
+	input runprogression.Input,
+	plan runprogression.Plan,
+	intent progressionIntent,
+) *models.RunStatus {
+	if intent == progressionCancellation {
+		status := models.RunCancelled
+		return &status
+	}
+	if intent == progressionManualRetry &&
+		len(input.Definitions) == 0 &&
+		hasDurableRetrySuccessor(input.Attempts) {
+		// Missing definitions cannot derive a run state, but the exact current
+		// snapshot can still prove that explicit retry materialized a successor.
+		status := models.RunRunning
+		return &status
+	}
+	return plan.DesiredRunStatus
+}
+
+func hasDurableRetrySuccessor(attempts []runprogression.AttemptSnapshot) bool {
+	for _, attempt := range attempts {
+		if attempt.Attempt <= 1 {
+			continue
+		}
+		switch attempt.Status {
+		case models.TaskPending, models.TaskQueued, models.TaskRunning:
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scheduler) reloadProgressionSnapshotLocked(
+	runID string,
+) (*models.DagRun, *models.DAGDef, []models.TaskInstance, error) {
+	run, err := s.store.GetDagRun(runID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("reload run %s progression: %w", runID, err)
+	}
+	tasks, err := s.store.GetLatestTaskAttempts(runID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("reload run %s task snapshot: %w", runID, err)
+	}
+	s.mu.RLock()
+	dag := s.dags[run.DAGID]
+	s.mu.RUnlock()
+	return run, dag, tasks, nil
 }
 
 func (s *Scheduler) aggregateMapParentsLocked(runID string, dag *models.DAGDef) error {

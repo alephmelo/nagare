@@ -326,11 +326,42 @@ func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate t
 }
 
 func (s *Scheduler) containRunMaterializationFailureLocked(run *models.DagRun, now time.Time) error {
-	if err := s.transitionRunStatusLocked(run.ID, run.Status, models.RunFailed, now.UTC()); err != nil {
-		return fmt.Errorf("contain partially materialized run %s: %w", run.ID, err)
+	const maxSnapshotMisses = 4
+	for miss := 0; miss < maxSnapshotMisses; miss++ {
+		tasks, err := s.store.GetLatestTaskAttempts(run.ID)
+		if err != nil {
+			return fmt.Errorf("load partial run %s task snapshot: %w", run.ID, err)
+		}
+		applied, err := s.store.CompareAndSetDagRunStatusForTaskSnapshot(
+			run.ID, run.Status, models.RunFailed, now.UTC(), tasks,
+		)
+		if err != nil {
+			return fmt.Errorf("contain partially materialized run %s: %w", run.ID, err)
+		}
+		if applied {
+			run.Status = models.RunFailed
+			return nil
+		}
+		current, err := s.store.GetDagRun(run.ID)
+		if err != nil {
+			return fmt.Errorf("reload partial run %s: %w", run.ID, err)
+		}
+		switch current.Status {
+		case models.RunFailed, models.RunCancelled:
+			run.Status = current.Status
+			return nil
+		case models.RunRunning:
+			run = current
+		default:
+			return fmt.Errorf(
+				"partial run %s concurrently reached %s", run.ID, current.Status,
+			)
+		}
 	}
-	run.Status = models.RunFailed
-	return nil
+	return fmt.Errorf(
+		"contain partially materialized run %s: task snapshot stayed stale after %d attempts",
+		run.ID, maxSnapshotMisses,
+	)
 }
 
 // RetryTask creates a new attempt for a failed/succeeded task rather than
@@ -467,16 +498,10 @@ func (s *Scheduler) progressRetryLocked(runID string, now time.Time, manual bool
 	if manual {
 		intent = progressionManualRetry
 	}
-	if dag == nil {
-		// An explicit retry is itself durable authority to reopen a run. The
-		// missing definition only prevents dependency-derived promotion.
-		return s.applyProgressionIntentLocked(run, &models.DAGDef{}, nil, now, intent)
-	}
 	tasks, err := s.store.GetLatestTaskAttempts(runID)
 	if err != nil {
 		return err
 	}
-	tasks = currentGenerationTasks(dag, tasks)
 	return s.applyProgressionIntentLocked(run, dag, tasks, now, intent)
 }
 
@@ -681,39 +706,11 @@ func (s *Scheduler) progressCancellationLocked(runID string, now time.Time) erro
 	s.mu.RLock()
 	dag := s.dags[run.DAGID]
 	s.mu.RUnlock()
-	if dag == nil {
-		return s.applyProgressionIntentLocked(
-			run, &models.DAGDef{}, nil, now, progressionCancellation,
-		)
-	}
 	tasks, err := s.store.GetLatestTaskAttempts(runID)
 	if err != nil {
 		return err
 	}
 	return s.applyProgressionIntentLocked(
-		run, dag, currentGenerationTasks(dag, tasks), now, progressionCancellation,
+		run, dag, tasks, now, progressionCancellation,
 	)
-}
-
-func (s *Scheduler) transitionRunStatusLocked(
-	runID string,
-	observed models.RunStatus,
-	desired models.RunStatus,
-	now time.Time,
-) error {
-	applied, err := s.store.CompareAndSetDagRunStatus(runID, observed, desired, now)
-	if err != nil {
-		return err
-	}
-	if applied {
-		return nil
-	}
-	current, err := s.store.GetDagRun(runID)
-	if err != nil {
-		return fmt.Errorf("reload run after concurrent status transition: %w", err)
-	}
-	if current.Status == desired {
-		return nil
-	}
-	return fmt.Errorf("concurrent status transition changed run to %s", current.Status)
 }
