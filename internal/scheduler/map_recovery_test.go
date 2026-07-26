@@ -27,8 +27,6 @@ func newMapTestScheduler(t *testing.T, retries int) (*models.Store, *Scheduler, 
 		Tasks: []models.TaskDef{
 			{ID: "source", Type: "command"},
 			{ID: "map", Type: "map", MapOver: "source", DependsOn: []string{"source"}, Retries: retries},
-			{ID: "publish@g2", Type: "command"},
-			{ID: "foo[bar]", Type: "command"},
 		},
 	}
 	runID := "map_run"
@@ -99,6 +97,11 @@ func TestMapIdentityParsingPreservesLegitimateIDsAndGenerationOne(t *testing.T) 
 
 func TestResolveTaskIDDoesNotInterpretOrdinarySuffixesOrBrackets(t *testing.T) {
 	store, sched, runID := newMapTestScheduler(t, 0)
+	sched.dags["map_dag"].Tasks = append(
+		sched.dags["map_dag"].Tasks,
+		models.TaskDef{ID: "publish@g2", Type: "command"},
+		models.TaskDef{ID: "foo[bar]", Type: "command"},
+	)
 	createMapTestTask(t, store, models.TaskInstance{
 		ID: runID + "_map", RunID: runID, TaskID: "map", Status: models.TaskRunning, Attempt: 2,
 	})
@@ -126,7 +129,7 @@ func TestMapSetupRecoveryReconcilesCompleteSetFromDurableBinding(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("EnsureMapSetup() = created %v, err %v", created, err)
 	}
-	if _, err := sched.lifecycle.StartSetup(parent.ID, setup.StartedAt); err != nil {
+	if _, err := tasklifecycle.New(store).StartSetup(parent.ID, setup.StartedAt); err != nil {
 		t.Fatalf("StartSetup: %v", err)
 	}
 	item := "a"
@@ -174,7 +177,77 @@ func TestMapSetupRecoveryReconcilesCompleteSetFromDurableBinding(t *testing.T) {
 	}
 }
 
-func TestPendingMapSetupResumesItsBindingAfterUpstreamChanges(t *testing.T) {
+func TestConcurrentMapReconcilersConvergeOnOneChildSet(t *testing.T) {
+	store, first, runID := newMapTestScheduler(t, 0)
+	_, parent := createSourceAndParent(t, store, runID, `["a","b"]`, 1, models.TaskPending)
+	second := NewScheduler(store)
+	second.dags["map_dag"] = first.dags["map_dag"]
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, sched := range []*Scheduler{first, second} {
+		go func(sched *Scheduler) {
+			<-start
+			results <- sched.PromotePendingTasks()
+		}(sched)
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent PromotePendingTasks: %v", err)
+		}
+	}
+
+	reloaded, err := store.GetTaskInstance(parent.ID)
+	if err != nil || reloaded.Status != models.TaskRunning || reloaded.StartedAt == nil {
+		t.Fatalf("parent = %#v, %v, want one running setup owner", reloaded, err)
+	}
+	setup, err := store.GetMapSetup(parent.ID)
+	if err != nil || !reloaded.StartedAt.Equal(setup.StartedAt) {
+		t.Fatalf("setup = %#v, %v, want exact ownership watermark", setup, err)
+	}
+	for index, item := range []string{"a", "b"} {
+		taskID := "map[" + strconv.Itoa(index) + "]"
+		attempts, err := store.GetTaskAttempts(runID, taskID)
+		if err != nil || len(attempts) != 1 ||
+			attempts[0].Status != models.TaskQueued ||
+			attempts[0].ItemValue == nil || *attempts[0].ItemValue != item {
+			t.Fatalf("%s attempts = %#v, %v, want one queued child", taskID, attempts, err)
+		}
+	}
+}
+
+func TestObsoletePendingMapChildIsNotQuarantinedAsUndefined(t *testing.T) {
+	store, sched, runID := newMapTestScheduler(t, 0)
+	createMapTestTask(t, store, models.TaskInstance{
+		ID: runID + "_source", RunID: runID, TaskID: "source",
+		Status: models.TaskSuccess, Output: `["current"]`, Attempt: 1,
+	})
+	createMapTestTask(t, store, models.TaskInstance{
+		ID: runID + "_map_2", RunID: runID, TaskID: "map",
+		Status: models.TaskRunning, Attempt: 2,
+	})
+	oldItem := "old"
+	obsolete := models.TaskInstance{
+		ID: runID + "_map[0]", RunID: runID, TaskID: "map[0]",
+		Status: models.TaskPending, ItemValue: &oldItem, Attempt: 1,
+	}
+	createMapTestTask(t, store, obsolete)
+
+	if err := sched.PromotePendingTasks(); err != nil {
+		t.Fatalf("PromotePendingTasks: %v", err)
+	}
+	reloaded, err := store.GetTaskInstance(obsolete.ID)
+	if err != nil || reloaded.Status != models.TaskPending {
+		t.Fatalf("obsolete child = %#v, %v, want ignored pending row", reloaded, err)
+	}
+	run, err := store.GetDagRun(runID)
+	if err != nil || run.Status != models.RunRunning {
+		t.Fatalf("run = %#v, %v, want running", run, err)
+	}
+}
+
+func TestPendingMapSetupDoesNotBypassEvaluatorAfterUpstreamChanges(t *testing.T) {
 	store, sched, runID := newMapTestScheduler(t, 0)
 	source, parent := createSourceAndParent(t, store, runID, `["bound"]`, 1, models.TaskPending)
 	if _, _, err := store.EnsureMapSetup(models.MapSetup{
@@ -192,28 +265,31 @@ func TestPendingMapSetupResumesItsBindingAfterUpstreamChanges(t *testing.T) {
 		t.Fatalf("PromotePendingTasks: %v", err)
 	}
 	child, err := store.GetTaskAttempts(runID, "map[0]")
-	if err != nil || len(child) != 1 || child[0].ItemValue == nil ||
-		*child[0].ItemValue != "bound" || child[0].Status != models.TaskQueued {
-		t.Fatalf("recovered bound child = %+v, %v", child, err)
+	if err != nil || len(child) != 0 {
+		t.Fatalf("children = %+v, %v, want evaluator to block stale readiness", child, err)
+	}
+	reloaded, err := store.GetTaskInstance(parent.ID)
+	if err != nil || reloaded.Status != models.TaskPending {
+		t.Fatalf("parent = %+v, %v, want pending", reloaded, err)
 	}
 }
 
-func TestQueuedMapParentIsRecoveredIntoSetup(t *testing.T) {
+func TestQueuedMapParentWithoutDurableSetupIsNotRecovered(t *testing.T) {
 	store, sched, runID := newMapTestScheduler(t, 0)
 	_, parent := createSourceAndParent(t, store, runID, `["a"]`, 1, models.TaskQueued)
 	if err := sched.PromotePendingTasks(); err != nil {
 		t.Fatalf("PromotePendingTasks: %v", err)
 	}
 	reloaded, _ := store.GetTaskInstance(parent.ID)
-	if reloaded.Status != models.TaskRunning || reloaded.StartedAt == nil {
-		t.Fatalf("queued parent was not claimed for setup: %+v", reloaded)
+	if reloaded.Status != models.TaskQueued || reloaded.StartedAt != nil {
+		t.Fatalf("queued parent changed without durable setup: %+v", reloaded)
 	}
 	children, err := store.GetTaskAttempts(runID, "map[0]")
-	if err != nil || len(children) != 1 || children[0].Status != models.TaskQueued {
-		t.Fatalf("queued-parent children = %+v, %v", children, err)
+	if err != nil || len(children) != 0 {
+		t.Fatalf("queued-parent children = %+v, %v, want none", children, err)
 	}
-	if _, err := store.GetMapSetup(parent.ID); err != nil {
-		t.Fatalf("queued-parent binding missing: %v", err)
+	if _, err := store.GetMapSetup(parent.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("queued-parent binding error = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -258,7 +334,7 @@ func TestMapSetupConflictCancelsChildrenAndAppliesParentRetryPolicy(t *testing.T
 	if err != nil {
 		t.Fatalf("EnsureMapSetup: %v", err)
 	}
-	if _, err := sched.lifecycle.StartSetup(parent.ID, setup.StartedAt); err != nil {
+	if _, err := tasklifecycle.New(store).StartSetup(parent.ID, setup.StartedAt); err != nil {
 		t.Fatalf("StartSetup: %v", err)
 	}
 	wrongItem := "conflict"
@@ -340,7 +416,7 @@ func TestMapAggregationRequiresFullCardinalityAndIgnoresObsoleteGeneration(t *te
 		if err != nil {
 			t.Fatalf("EnsureMapSetup: %v", err)
 		}
-		if _, err := sched.lifecycle.StartSetup(parent.ID, setup.StartedAt); err != nil {
+		if _, err := tasklifecycle.New(store).StartSetup(parent.ID, setup.StartedAt); err != nil {
 			t.Fatalf("StartSetup: %v", err)
 		}
 		item := "a"
@@ -402,7 +478,7 @@ func TestMapChildFailureCancelsActiveSiblingsBeforeParentFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureMapSetup: %v", err)
 	}
-	if _, err := sched.lifecycle.StartSetup(parent.ID, setup.StartedAt); err != nil {
+	if _, err := tasklifecycle.New(store).StartSetup(parent.ID, setup.StartedAt); err != nil {
 		t.Fatalf("StartSetup: %v", err)
 	}
 	failedItem, activeItem := "failed", "active"

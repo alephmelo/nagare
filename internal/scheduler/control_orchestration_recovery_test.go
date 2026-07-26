@@ -590,17 +590,44 @@ type controlLifecycleFault struct {
 	beforeRetry      func()
 	afterRetry       func()
 	retryErr         error
+	promoteErr       error
+	startSetup       func() (tasklifecycle.Disposition, error)
 	cancelErrs       map[string]error
 	cancelCalls      []string
 	exactCancelErrs  map[string]error
 	exactCancelCalls []string
 }
 
-func (l *controlLifecycleFault) Promote(id string, at time.Time) (tasklifecycle.Disposition, error) {
-	return l.delegate.Promote(id, at)
+func (l *controlLifecycleFault) PromoteGuarded(
+	target models.TaskInstance,
+	status models.RunStatus,
+	tasks []models.TaskInstance,
+	at time.Time,
+) (tasklifecycle.Disposition, error) {
+	if l.promoteErr != nil {
+		return 0, l.promoteErr
+	}
+	return l.delegate.PromoteGuarded(target, status, tasks, at)
 }
 
-func (l *controlLifecycleFault) StartSetup(id string, at time.Time) (tasklifecycle.Disposition, error) {
+func (l *controlLifecycleFault) StartSetupGuarded(
+	target models.TaskInstance,
+	status models.RunStatus,
+	tasks []models.TaskInstance,
+	setup models.MapSetup,
+) (tasklifecycle.Disposition, error) {
+	return l.delegate.StartSetupGuarded(target, status, tasks, setup)
+}
+
+func (l *controlLifecycleFault) StartSetup(
+	id string,
+	at time.Time,
+) (tasklifecycle.Disposition, error) {
+	if l.startSetup != nil {
+		start := l.startSetup
+		l.startSetup = nil
+		return start()
+	}
 	return l.delegate.StartSetup(id, at)
 }
 

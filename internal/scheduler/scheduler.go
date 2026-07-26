@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -29,7 +30,20 @@ type Scheduler struct {
 }
 
 type attemptLifecycle interface {
-	Promote(string, time.Time) (tasklifecycle.Disposition, error)
+	PromoteGuarded(
+		models.TaskInstance,
+		models.RunStatus,
+		[]models.TaskInstance,
+		time.Time,
+	) (tasklifecycle.Disposition, error)
+	StartSetupGuarded(
+		models.TaskInstance,
+		models.RunStatus,
+		[]models.TaskInstance,
+		models.MapSetup,
+	) (tasklifecycle.Disposition, error)
+	// StartSetup is reserved for quarantining a persisted task that has no
+	// valid definition. Evaluator-authorized plan work must use guarded APIs.
 	StartSetup(string, time.Time) (tasklifecycle.Disposition, error)
 	Complete(tasklifecycle.Completion) (tasklifecycle.Disposition, error)
 	CancelAttempt(string, time.Time) (tasklifecycle.Disposition, error)
@@ -293,75 +307,28 @@ func (s *Scheduler) createRun(dag *models.DAGDef, triggerType string, execDate t
 		CreatedAt:   now,
 	}
 
-	if err := s.store.CreateDagRun(run); err != nil {
-		return nil, fmt.Errorf("failed to create DagRun for %s: %v", dag.ID, err)
-	}
-
+	tasks := make([]models.TaskInstance, 0, len(dag.Tasks))
 	for _, tDef := range dag.Tasks {
-		status := models.TaskPending
-		if len(tDef.DependsOn) == 0 {
-			status = models.TaskQueued
-		}
-
-		ti := &models.TaskInstance{
+		tasks = append(tasks, models.TaskInstance{
 			ID:        fmt.Sprintf("%s_%s", run.ID, tDef.ID),
 			RunID:     run.ID,
 			TaskID:    tDef.ID,
-			Status:    status,
+			Status:    models.TaskPending,
+			Attempt:   1,
 			CreatedAt: now,
 			UpdatedAt: now,
-		}
-		created, err := s.store.EnsureTaskInstance(ti)
-		if err != nil {
-			materializeErr := fmt.Errorf("create task instance %s: %w", ti.ID, err)
-			return nil, errors.Join(materializeErr, s.containRunMaterializationFailureLocked(run, now))
-		}
-		if !created {
-			materializeErr := fmt.Errorf("create task instance %s: logical attempt already exists", ti.ID)
-			return nil, errors.Join(materializeErr, s.containRunMaterializationFailureLocked(run, now))
-		}
+		})
+	}
+	if err := s.store.CreateDagRunWithTasks(run, tasks); err != nil {
+		return nil, fmt.Errorf("materialize DagRun %s: %w", dag.ID, err)
+	}
+	if err := s.applyProgressionIntentLocked(
+		run, dag, tasks, now.UTC(), progressionInitialization,
+	); err != nil {
+		return nil, fmt.Errorf("initialize DagRun %s: %w", run.ID, err)
 	}
 
 	return run, nil
-}
-
-func (s *Scheduler) containRunMaterializationFailureLocked(run *models.DagRun, now time.Time) error {
-	const maxSnapshotMisses = 4
-	for miss := 0; miss < maxSnapshotMisses; miss++ {
-		tasks, err := s.store.GetLatestTaskAttempts(run.ID)
-		if err != nil {
-			return fmt.Errorf("load partial run %s task snapshot: %w", run.ID, err)
-		}
-		applied, err := s.store.CompareAndSetDagRunStatusForTaskSnapshot(
-			run.ID, run.Status, models.RunFailed, now.UTC(), tasks,
-		)
-		if err != nil {
-			return fmt.Errorf("contain partially materialized run %s: %w", run.ID, err)
-		}
-		if applied {
-			run.Status = models.RunFailed
-			return nil
-		}
-		current, err := s.store.GetDagRun(run.ID)
-		if err != nil {
-			return fmt.Errorf("reload partial run %s: %w", run.ID, err)
-		}
-		switch current.Status {
-		case models.RunFailed, models.RunCancelled:
-			run.Status = current.Status
-			return nil
-		case models.RunRunning:
-			run = current
-		default:
-			return fmt.Errorf(
-				"partial run %s concurrently reached %s", run.ID, current.Status,
-			)
-		}
-	}
-	return fmt.Errorf(
-		"contain partially materialized run %s: task snapshot stayed stale after %d attempts",
-		run.ID, maxSnapshotMisses,
-	)
 }
 
 // RetryTask creates a new attempt for a failed/succeeded task rather than
@@ -389,7 +356,7 @@ func (s *Scheduler) RetryTask(runID, taskID string) error {
 		return fmt.Errorf("cannot retry task %s from its initial %s attempt", taskID, current.Status)
 	}
 
-	pendingSuccessor, err := s.retryUsesPendingSuccessor(runID, taskID)
+	pendingSuccessor, err := s.retryUsesPendingSuccessor(current)
 	if err != nil {
 		return fmt.Errorf("resolve retry kind for task %s: %w", taskID, err)
 	}
@@ -458,7 +425,7 @@ func (s *Scheduler) RetryTaskAutomatically(expected models.TaskInstance, retryDe
 		return nil
 	}
 
-	pendingSuccessor, err := s.retryUsesPendingSuccessor(expected.RunID, expected.TaskID)
+	pendingSuccessor, err := s.retryUsesPendingSuccessor(expected)
 	if err != nil {
 		return fmt.Errorf("resolve automatic retry kind for task %s: %w", expected.TaskID, err)
 	}
@@ -515,19 +482,39 @@ func sameAutomaticRetryObservation(persisted *models.TaskInstance, expected mode
 		persisted.UpdatedAt.Equal(expected.UpdatedAt)
 }
 
-func (s *Scheduler) retryUsesPendingSuccessor(runID, taskID string) (bool, error) {
-	run, err := s.store.GetDagRun(runID)
+func (s *Scheduler) retryUsesPendingSuccessor(current models.TaskInstance) (bool, error) {
+	run, err := s.store.GetDagRun(current.RunID)
 	if err != nil {
 		return false, err
 	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	dag := s.dags[run.DAGID]
-	if dag == nil {
-		return false, nil
+	s.mu.RUnlock()
+	if dag != nil {
+		// Exact lookup intentionally leaves mapped children as ordinary retry
+		// attempts even though their public IDs are derived from a map parent.
+		def := dag.FindTask(current.TaskID)
+		return def != nil && def.Type == "map", nil
 	}
-	def := dag.FindTask(models.BaseTaskID(taskID))
-	return def != nil && def.Type == "map" && taskID == models.BaseTaskID(taskID), nil
+
+	attempts, err := s.store.GetTaskAttempts(current.RunID, current.TaskID)
+	if err != nil {
+		return false, err
+	}
+	for index := len(attempts) - 1; index >= 0; index-- {
+		_, err := s.store.GetMapSetup(attempts[index].ID)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		default:
+			return false, err
+		}
+	}
+	// Without a loaded definition or durable map binding, legacy rows are
+	// ambiguous. Preserve the ordinary queued-successor retry behavior.
+	return false, nil
 }
 
 func (s *Scheduler) retryCurrentLocked(
@@ -605,7 +592,7 @@ func (s *Scheduler) cancelTaskLockedDetailed(runID, taskID string, pool interfac
 		followupErrs = append(followupErrs,
 			fmt.Errorf("cancelled attempt %s has authoritative status %s", result.AttemptID, attempt.Status))
 	} else {
-		isMapParent, mapErr := s.retryUsesPendingSuccessor(runID, taskID)
+		isMapParent, mapErr := s.retryUsesPendingSuccessor(*attempt)
 		if mapErr != nil {
 			durableErrs = append(durableErrs,
 				fmt.Errorf("resolve mapped children for cancelled attempt %s: %w", result.AttemptID, mapErr))

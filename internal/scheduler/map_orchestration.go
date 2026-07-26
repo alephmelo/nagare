@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"sort"
 	"time"
 
@@ -14,12 +13,17 @@ import (
 	"github.com/alephmelo/nagare/internal/tasklifecycle"
 )
 
-var errMapSetupNotOwned = errors.New("map setup is not scheduler-owned")
+var (
+	errMapSetupNotOwned      = errors.New("map setup is not scheduler-owned")
+	errGuardedActionRejected = errors.New("guarded progression action rejected")
+)
 
 type progressionIntent uint8
 
 const (
 	progressionObserved progressionIntent = iota
+	progressionInitialization
+	progressionRecovery
 	progressionAutomaticRetry
 	progressionManualRetry
 	progressionCancellation
@@ -34,75 +38,66 @@ func (s *Scheduler) promoteAndRecover() error {
 		return err
 	}
 
-	var mapParents []models.TaskInstance
-	seenMapParents := make(map[string]bool)
-	ordinaryRunIDs := make(map[string]struct{})
+	runSet := make(map[string]struct{})
 	for _, task := range pending {
-		run, dag, err := s.runAndDAG(task.RunID)
-		if err != nil {
-			log.Printf("Failed to resolve DAG for pending task %s: %v", task.ID, err)
-			if failErr := s.failUnresolvablePendingLocked(task); failErr != nil {
-				return errors.Join(err, failErr)
-			}
-			continue
-		}
-		if run.Status != models.RunRunning {
-			continue
-		}
-
-		taskDef := dag.FindTask(task.TaskID)
-		if taskDef == nil {
-			if s.isStoredMapChild(dag, task.TaskID) {
-				// Reconciliation promotes map children only after it has proved
-				// that the complete expected set exists.
-				continue
-			}
-			if err := s.failUnresolvablePendingLocked(task); err != nil {
-				return err
-			}
-			continue
-		}
-		if taskDef.Type == "map" {
-			if !s.mapSetupCanResume(task, taskDef) {
-				continue
-			}
-			mapParents = append(mapParents, task)
-			seenMapParents[task.ID] = true
-			continue
-		}
-		ordinaryRunIDs[task.RunID] = struct{}{}
+		runSet[task.RunID] = struct{}{}
 	}
 
-	runIDs := make([]string, 0, len(ordinaryRunIDs))
-	for runID := range ordinaryRunIDs {
+	runIDs := make([]string, 0, len(runSet))
+	for runID := range runSet {
 		runIDs = append(runIDs, runID)
 	}
 	sort.Strings(runIDs)
 	for _, runID := range runIDs {
-		run, dag, err := s.runAndDAG(runID)
-		if err != nil || run.Status != models.RunRunning {
+		run, err := s.store.GetDagRun(runID)
+		if err != nil {
+			return err
+		}
+		if run.Status != models.RunRunning {
 			continue
 		}
 		tasks, err := s.store.GetLatestTaskAttempts(runID)
 		if err != nil {
 			return err
 		}
-		if err := s.applyProgressionLocked(run, dag, tasks, time.Now().UTC()); err != nil {
+		s.mu.RLock()
+		dag := s.dags[run.DAGID]
+		s.mu.RUnlock()
+		if dag == nil {
+			continue
+		}
+		if err := dag.Validate(); err != nil {
+			if terminalErr := s.terminalizeUnresolvableRunLocked(run.ID, time.Now().UTC()); terminalErr != nil {
+				return errors.Join(err, terminalErr)
+			}
+			continue
+		}
+		invalidDefinition, err := s.quarantineUndefinedPendingTasksLocked(dag, tasks)
+		if err != nil {
+			return err
+		}
+		if invalidDefinition {
+			if err := s.terminalizeUnresolvableRunLocked(run.ID, time.Now().UTC()); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := s.applyProgressionIntentLocked(
+			run, dag, tasks, time.Now().UTC(), progressionRecovery,
+		); err != nil {
 			return err
 		}
 	}
 
-	// A crash may leave a map parent queued before setup ownership, or running
-	// after setup ownership. Enumerate both so either phase can be replayed.
+	// Narrow recovery for a crash after durable setup exists. Pending parents
+	// are handled only by the evaluator above; queued legacy and running
+	// parents may resume solely from their exact persisted binding.
 	for _, status := range []models.TaskStatus{models.TaskQueued, models.TaskRunning} {
 		tasks, err := s.store.GetTasksByStatus(status)
 		if err != nil {
 			return err
 		}
 		for _, task := range tasks {
-			if seenMapParents[task.ID] {
-				continue
-			}
 			run, dag, err := s.runAndDAG(task.RunID)
 			if err != nil || run.Status != models.RunRunning {
 				continue
@@ -111,31 +106,16 @@ func (s *Scheduler) promoteAndRecover() error {
 			if taskDef == nil || taskDef.Type != "map" || taskDef.ID != task.TaskID {
 				continue
 			}
-			if status != models.TaskRunning && !s.mapSetupCanResume(task, taskDef) {
+			resumable, err := s.mapSetupCanResume(task)
+			if err != nil {
+				return err
+			}
+			if !resumable {
 				continue
 			}
-			mapParents = append(mapParents, task)
-			seenMapParents[task.ID] = true
-		}
-	}
-
-	sort.Slice(mapParents, func(i, j int) bool {
-		if mapParents[i].CreatedAt.Equal(mapParents[j].CreatedAt) {
-			return mapParents[i].ID < mapParents[j].ID
-		}
-		return mapParents[i].CreatedAt.Before(mapParents[j].CreatedAt)
-	})
-	for _, parent := range mapParents {
-		_, dag, err := s.runAndDAG(parent.RunID)
-		if err != nil {
-			return err
-		}
-		taskDef := dag.FindTask(parent.TaskID)
-		if taskDef == nil || taskDef.Type != "map" {
-			continue
-		}
-		if err := s.reconcileMapParentLocked(parent, taskDef); err != nil {
-			return err
+			if err := s.reconcileMapParentLocked(task, taskDef); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -155,53 +135,18 @@ func (s *Scheduler) runAndDAG(runID string) (*models.DagRun, *models.DAGDef, err
 	return run, dag, nil
 }
 
-func (s *Scheduler) failUnresolvablePendingLocked(task models.TaskInstance) error {
-	disposition, err := s.lifecycle.StartSetup(task.ID, time.Now().UTC())
+func (s *Scheduler) mapSetupCanResume(task models.TaskInstance) (bool, error) {
+	setup, err := s.store.GetMapSetup(task.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if disposition != tasklifecycle.Applied {
-		return nil
+	if task.Status == models.TaskRunning {
+		return task.StartedAt != nil && task.StartedAt.Equal(setup.StartedAt), nil
 	}
-	_, err = s.lifecycle.Complete(tasklifecycle.Completion{
-		AttemptID: task.ID, CompletedAt: time.Now().UTC(),
-	})
-	return err
-}
-
-func (s *Scheduler) dependenciesSucceeded(runID string, taskDef *models.TaskDef) bool {
-	run, dag, err := s.runAndDAG(runID)
-	if err != nil {
-		return false
-	}
-	tasks, err := s.store.GetLatestTaskAttempts(runID)
-	if err != nil {
-		return false
-	}
-	for index := range tasks {
-		if tasks[index].TaskID == taskDef.ID {
-			tasks[index].Status = models.TaskPending
-		}
-	}
-	plan := runprogression.Evaluate(progressionInput(run, dag, tasks))
-	for _, attemptID := range plan.PromoteAttemptIDs {
-		for _, task := range tasks {
-			if task.TaskID == taskDef.ID && task.ID == attemptID {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (s *Scheduler) mapSetupCanResume(task models.TaskInstance, taskDef *models.TaskDef) bool {
-	if _, err := s.store.GetMapSetup(task.ID); err == nil {
-		return true
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		// Let reconciliation surface the storage failure.
-		return true
-	}
-	return s.dependenciesSucceeded(task.RunID, taskDef)
+	return task.Status == models.TaskQueued, nil
 }
 
 func (s *Scheduler) isStoredMapChild(dag *models.DAGDef, taskID string) bool {
@@ -214,45 +159,153 @@ func (s *Scheduler) isStoredMapChild(dag *models.DAGDef, taskID string) bool {
 	return taskDef != nil && taskDef.Type == "map"
 }
 
+func (s *Scheduler) failInvalidDefinitionTaskLocked(task models.TaskInstance) error {
+	now := time.Now().UTC()
+	var disposition tasklifecycle.Disposition
+	for stale := 0; stale < 4; stale++ {
+		var err error
+		disposition, err = s.lifecycle.StartSetup(task.ID, now)
+		if err != nil {
+			current, reloadErr := s.store.GetTaskInstance(task.ID)
+			run, runErr := s.store.GetDagRun(task.RunID)
+			if reloadErr == nil && runErr == nil &&
+				(current.Status == models.TaskCancelled || run.Status != models.RunRunning) {
+				return nil
+			}
+			return errors.Join(
+				fmt.Errorf("quarantine undefined task %s: %w", task.ID, err),
+				reloadErr,
+				runErr,
+			)
+		}
+		switch disposition {
+		case tasklifecycle.Applied, tasklifecycle.AlreadyApplied:
+			stale = 4
+		case tasklifecycle.Stale:
+			current, reloadErr := s.store.GetTaskInstance(task.ID)
+			run, runErr := s.store.GetDagRun(task.RunID)
+			if reloadErr == nil && runErr == nil &&
+				(current.Status == models.TaskCancelled || run.Status != models.RunRunning) {
+				return nil
+			}
+			if reloadErr != nil || runErr != nil {
+				return errors.Join(reloadErr, runErr)
+			}
+			continue
+		case tasklifecycle.Invalid:
+			return fmt.Errorf(
+				"quarantine undefined task %s returned invalid disposition",
+				task.ID,
+			)
+		default:
+			return fmt.Errorf(
+				"quarantine undefined task %s returned unknown disposition %d",
+				task.ID, disposition,
+			)
+		}
+	}
+	if disposition != tasklifecycle.Applied && disposition != tasklifecycle.AlreadyApplied {
+		return fmt.Errorf("quarantine undefined task %s did not converge", task.ID)
+	}
+	disposition, err := s.lifecycle.Complete(tasklifecycle.Completion{
+		AttemptID:   task.ID,
+		Output:      "persisted task has no exact loaded DAG definition",
+		CompletedAt: now,
+	})
+	if err != nil {
+		current, reloadErr := s.store.GetTaskInstance(task.ID)
+		run, runErr := s.store.GetDagRun(task.RunID)
+		if reloadErr == nil && runErr == nil &&
+			(current.Status == models.TaskCancelled || run.Status != models.RunRunning) {
+			return nil
+		}
+		return fmt.Errorf("fail undefined task %s: %w", task.ID, err)
+	}
+	if disposition != tasklifecycle.Applied && disposition != tasklifecycle.AlreadyApplied {
+		return fmt.Errorf(
+			"fail undefined task %s returned disposition %d",
+			task.ID, disposition,
+		)
+	}
+	return nil
+}
+
+func (s *Scheduler) quarantineUndefinedPendingTasksLocked(
+	dag *models.DAGDef,
+	tasks []models.TaskInstance,
+) (bool, error) {
+	quarantined := false
+	for _, task := range tasks {
+		if task.Status != models.TaskPending || dag.FindTask(task.TaskID) != nil ||
+			s.isStoredMapChild(dag, task.TaskID) {
+			continue
+		}
+		if err := s.failInvalidDefinitionTaskLocked(task); err != nil {
+			return false, err
+		}
+		quarantined = true
+	}
+	return quarantined, nil
+}
+
 func (s *Scheduler) reconcileMapParentLocked(parent models.TaskInstance, taskDef *models.TaskDef) error {
-	attempts, err := s.store.GetTaskAttempts(parent.RunID, parent.TaskID)
+	setup, err := s.store.GetMapSetup(parent.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if len(attempts) == 0 || attempts[len(attempts)-1].ID != parent.ID {
-		return nil
+	owned := parent.Status == models.TaskRunning
+	for stale := 0; stale < 4; stale++ {
+		run, err := s.store.GetDagRun(parent.RunID)
+		if err != nil {
+			return err
+		}
+		tasks, err := s.store.GetLatestTaskAttempts(parent.RunID)
+		if err != nil {
+			return err
+		}
+		current, ok := exactAttempt(tasks, parent.ID)
+		if !ok || current.TaskID != parent.TaskID || current.Attempt != parent.Attempt {
+			return fmt.Errorf("map parent %s is no longer the current exact attempt", parent.ID)
+		}
+		parent = current
+		if parent.Status == models.TaskRunning {
+			owned = true
+			break
+		}
+		disposition, err := s.lifecycle.StartSetupGuarded(parent, run.Status, tasks, *setup)
+		if err != nil {
+			return fmt.Errorf("resume map setup %s: %w", parent.ID, err)
+		}
+		switch disposition {
+		case tasklifecycle.Applied, tasklifecycle.AlreadyApplied:
+			owned = true
+			stale = 4
+		case tasklifecycle.Stale:
+			continue
+		case tasklifecycle.Invalid:
+			return fmt.Errorf(
+				"%w: resume map setup %s was invalid",
+				errGuardedActionRejected, parent.ID,
+			)
+		default:
+			return fmt.Errorf("resume map setup %s returned unknown disposition %d", parent.ID, disposition)
+		}
 	}
-	parent = attempts[len(attempts)-1]
+	if !owned {
+		return fmt.Errorf("resume map setup %s did not converge after stale snapshots", parent.ID)
+	}
+	return s.reconcileOwnedMapParentLocked(parent, taskDef, *setup)
+}
 
-	setup, err := s.ensureMapSetupLocked(parent, taskDef)
-	if errors.Is(err, errMapSetupNotOwned) {
-		return nil
-	}
-	if err != nil {
-		if _, claimErr := s.lifecycle.StartSetup(parent.ID, time.Now().UTC()); claimErr != nil {
-			return errors.Join(err, claimErr)
-		}
-		reloaded, reloadErr := s.store.GetTaskInstance(parent.ID)
-		if reloadErr == nil {
-			parent = *reloaded
-		}
-		if parent.Status == models.TaskCancelled {
-			return nil
-		}
-		return s.failMapParentLocked(parent, taskDef, err)
-	}
-	disposition, err := s.lifecycle.StartSetup(parent.ID, setup.StartedAt)
-	if err != nil {
-		reloaded, reloadErr := s.store.GetTaskInstance(parent.ID)
-		if reloadErr == nil && reloaded.Status == models.TaskCancelled {
-			return nil
-		}
-		return errors.Join(err, reloadErr)
-	}
-	if disposition != tasklifecycle.Applied && disposition != tasklifecycle.AlreadyApplied {
-		return fmt.Errorf("start map setup %s returned unknown disposition %d", parent.ID, disposition)
-	}
-
+func (s *Scheduler) reconcileOwnedMapParentLocked(
+	parent models.TaskInstance,
+	taskDef *models.TaskDef,
+	setup models.MapSetup,
+) error {
+	var err error
 	parent, err = s.reloadOwnedMapSetup(parent.ID, setup)
 	if errors.Is(err, errMapSetupNotOwned) {
 		return nil
@@ -268,6 +321,9 @@ func (s *Scheduler) reconcileMapParentLocked(parent models.TaskInstance, taskDef
 		return s.failMapParentLocked(parent, taskDef, err)
 	}
 	if err := s.reconcileMapChildrenLocked(parent, items); err != nil {
+		if errors.Is(err, errGuardedActionRejected) {
+			return err
+		}
 		return s.failMapParentLocked(parent, taskDef, err)
 	}
 
@@ -285,27 +341,27 @@ func (s *Scheduler) reconcileMapParentLocked(parent models.TaskInstance, taskDef
 	return nil
 }
 
-func (s *Scheduler) ensureMapSetupLocked(parent models.TaskInstance, taskDef *models.TaskDef) (models.MapSetup, error) {
-	if setup, err := s.store.GetMapSetup(parent.ID); err == nil {
-		return *setup, nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return models.MapSetup{}, err
-	}
-	if parent.Status == models.TaskRunning {
-		// A worker won the queued-attempt claim before the scheduler durably
-		// bound setup. It is not safe to infer a source or reconcile children.
-		return models.MapSetup{}, errMapSetupNotOwned
-	}
-
+func (s *Scheduler) mapSetupForPromotionLocked(
+	parent models.TaskInstance,
+	taskDef *models.TaskDef,
+	observedTasks []models.TaskInstance,
+	now time.Time,
+) (models.MapSetup, error) {
 	var upstream models.TaskInstance
-	attempts, err := s.store.GetTaskAttempts(parent.RunID, taskDef.MapOver)
-	if err != nil {
-		return models.MapSetup{}, fmt.Errorf("load map source %s: %w", taskDef.MapOver, err)
+	found := false
+	for _, attempt := range observedTasks {
+		if attempt.TaskID != taskDef.MapOver {
+			continue
+		}
+		if !found || attempt.Attempt > upstream.Attempt ||
+			(attempt.Attempt == upstream.Attempt && attempt.ID < upstream.ID) {
+			upstream = attempt
+			found = true
+		}
 	}
-	if len(attempts) == 0 {
-		return models.MapSetup{}, fmt.Errorf("map source %s has no attempts", taskDef.MapOver)
+	if !found {
+		return models.MapSetup{}, fmt.Errorf("map source %s has no current attempt", taskDef.MapOver)
 	}
-	upstream = attempts[len(attempts)-1]
 	if upstream.Status != models.TaskSuccess {
 		return models.MapSetup{}, fmt.Errorf("map source %s is %s, not success", upstream.ID, upstream.Status)
 	}
@@ -314,13 +370,33 @@ func (s *Scheduler) ensureMapSetupLocked(parent models.TaskInstance, taskDef *mo
 		ParentAttemptID:   parent.ID,
 		UpstreamAttemptID: upstream.ID,
 		UpstreamOutput:    upstream.Output,
-		StartedAt:         time.Now().UTC(),
+		StartedAt:         now.UTC(),
 	}
-	persisted, _, err := s.store.EnsureMapSetup(setup)
+	persisted, err := s.store.GetMapSetup(parent.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return setup, nil
+	}
 	if err != nil {
-		return models.MapSetup{}, err
+		return models.MapSetup{}, fmt.Errorf("load map setup %s: %w", parent.ID, err)
 	}
-	return persisted, nil
+	if persisted.ParentAttemptID != setup.ParentAttemptID ||
+		persisted.UpstreamAttemptID != setup.UpstreamAttemptID ||
+		persisted.UpstreamOutput != setup.UpstreamOutput {
+		return models.MapSetup{}, fmt.Errorf(
+			"map setup %s conflicts with the evaluator-observed upstream attempt",
+			parent.ID,
+		)
+	}
+	return *persisted, nil
+}
+
+func exactAttempt(tasks []models.TaskInstance, attemptID string) (models.TaskInstance, bool) {
+	for _, task := range tasks {
+		if task.ID == attemptID {
+			return task, true
+		}
+	}
+	return models.TaskInstance{}, false
 }
 
 func (s *Scheduler) reloadOwnedMapSetup(parentID string, setup models.MapSetup) (models.TaskInstance, error) {
@@ -380,7 +456,6 @@ func (s *Scheduler) reconcileMapChildrenLocked(parent models.TaskInstance, items
 	if err != nil {
 		return err
 	}
-	persisted := make(map[string]models.TaskInstance, len(expected))
 	for _, task := range tasks {
 		if !belongsToMapGeneration(task.TaskID, parent.TaskID, parent.Attempt) {
 			continue
@@ -395,15 +470,11 @@ func (s *Scheduler) reconcileMapChildrenLocked(parent models.TaskInstance, items
 		if task.ID != mapChildAttemptID(parent.RunID, task.TaskID, task.Attempt) {
 			return fmt.Errorf("map child %s has conflicting attempt identity %s", task.TaskID, task.ID)
 		}
-		persisted[task.TaskID] = task
 	}
 
 	now := time.Now().UTC()
 	for index, item := range items {
 		taskID := generationTaskID(fmt.Sprintf("%s[%d]", parent.TaskID, index), parent.Attempt)
-		if _, exists := persisted[taskID]; exists {
-			continue
-		}
 		itemValue := item
 		child := &models.TaskInstance{
 			ID:        mapChildAttemptID(parent.RunID, taskID, 1),
@@ -415,13 +486,9 @@ func (s *Scheduler) reconcileMapChildrenLocked(parent models.TaskInstance, items
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		if err := s.store.CreateTaskInstance(child); err != nil {
-			return fmt.Errorf("create mapped instance %s: %w", child.ID, err)
+		if _, err := s.store.EnsureTaskInstance(child); err != nil {
+			return fmt.Errorf("ensure mapped instance %s: %w", child.ID, err)
 		}
-		persisted[taskID] = *child
-	}
-	if len(persisted) != len(expected) {
-		return fmt.Errorf("map parent %s expected %d children, found %d", parent.ID, len(expected), len(persisted))
 	}
 
 	taskIDs := make([]string, 0, len(expected))
@@ -430,15 +497,81 @@ func (s *Scheduler) reconcileMapChildrenLocked(parent models.TaskInstance, items
 	}
 	sort.Strings(taskIDs)
 	for _, taskID := range taskIDs {
-		child := persisted[taskID]
-		if child.Status != models.TaskPending {
-			continue
-		}
-		if _, err := s.lifecycle.Promote(child.ID, time.Now().UTC()); err != nil {
-			return fmt.Errorf("queue mapped instance %s: %w", child.ID, err)
+		if err := s.promoteMapChildLocked(
+			parent,
+			taskID,
+			expected[taskID],
+			time.Now().UTC(),
+		); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (s *Scheduler) promoteMapChildLocked(
+	parent models.TaskInstance,
+	taskID, item string,
+	now time.Time,
+) error {
+	const maxSnapshotMisses = 8
+	initialID := mapChildAttemptID(parent.RunID, taskID, 1)
+	for stale := 0; stale < maxSnapshotMisses; stale++ {
+		run, err := s.store.GetDagRun(parent.RunID)
+		if err != nil {
+			return fmt.Errorf("reload run for mapped instance %s: %w", initialID, err)
+		}
+		tasks, err := s.store.GetLatestTaskAttempts(parent.RunID)
+		if err != nil {
+			return fmt.Errorf("reload snapshot for mapped instance %s: %w", initialID, err)
+		}
+		var child models.TaskInstance
+		ok := false
+		for _, task := range tasks {
+			if task.TaskID == taskID {
+				child, ok = task, true
+				break
+			}
+		}
+		if !ok {
+			return fmt.Errorf("mapped instance %s disappeared after ensure", initialID)
+		}
+		if child.RunID != parent.RunID ||
+			child.ID != mapChildAttemptID(parent.RunID, taskID, child.Attempt) ||
+			child.ItemValue == nil || *child.ItemValue != item {
+			return fmt.Errorf("mapped instance %s has conflicting identity or item binding", child.ID)
+		}
+		switch child.Status {
+		case models.TaskRunning, models.TaskSuccess, models.TaskFailed,
+			models.TaskCancelled, models.TaskUpForRetry:
+			return nil
+		case models.TaskPending, models.TaskQueued:
+		default:
+			return fmt.Errorf("mapped instance %s has unknown status %s", child.ID, child.Status)
+		}
+
+		disposition, err := s.lifecycle.PromoteGuarded(child, run.Status, tasks, now)
+		if err != nil {
+			return fmt.Errorf("queue mapped instance %s: %w", child.ID, err)
+		}
+		switch disposition {
+		case tasklifecycle.Applied, tasklifecycle.AlreadyApplied:
+			return nil
+		case tasklifecycle.Stale:
+			continue
+		case tasklifecycle.Invalid:
+			return fmt.Errorf(
+				"%w: queue mapped instance %s was invalid",
+				errGuardedActionRejected, child.ID,
+			)
+		default:
+			return fmt.Errorf("queue mapped instance %s returned unknown disposition %d", child.ID, disposition)
+		}
+	}
+	return fmt.Errorf(
+		"%w: queue mapped instance %s did not converge after %d stale snapshots",
+		errGuardedActionRejected, initialID, maxSnapshotMisses,
+	)
 }
 
 func mapChildAttemptID(runID, taskID string, attempt int) string {
@@ -542,16 +675,35 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 	dag := s.dags[run.DAGID]
 	s.mu.RUnlock()
 	if dag == nil {
-		// A transient registry miss is not authority for a terminal write. The
-		// next cadence will reconcile after definitions are loaded.
-		log.Printf("DAG %s not found in memory; deferring run %s evaluation", run.DAGID, run.ID)
-		return nil, nil
+		err := s.terminalizeUnresolvableRunLocked(run.ID, now)
+		return nil, errors.Join(
+			fmt.Errorf("DAG %s not found in memory for run %s", run.DAGID, run.ID),
+			err,
+		)
+	}
+	if validationErr := dag.Validate(); validationErr != nil {
+		err := s.terminalizeUnresolvableRunLocked(run.ID, now)
+		return nil, errors.Join(
+			fmt.Errorf("DAG %s is invalid for run %s: %w", run.DAGID, run.ID, validationErr),
+			err,
+		)
 	}
 
+	tasks, err := s.store.GetLatestTaskAttempts(run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load latest tasks for run %s: %w", run.ID, err)
+	}
+	quarantined, err := s.quarantineUndefinedPendingTasksLocked(dag, tasks)
+	if err != nil {
+		return nil, fmt.Errorf("quarantine undefined tasks for run %s: %w", run.ID, err)
+	}
+	if quarantined {
+		return nil, s.terminalizeUnresolvableRunLocked(run.ID, now)
+	}
 	if err := s.aggregateMapParentsLocked(run.ID, dag); err != nil {
 		return nil, fmt.Errorf("aggregate maps for run %s: %w", run.ID, err)
 	}
-	tasks, err := s.store.GetLatestTaskAttempts(run.ID)
+	tasks, err = s.store.GetLatestTaskAttempts(run.ID)
 	if err != nil {
 		return nil, fmt.Errorf("load latest tasks for run %s: %w", run.ID, err)
 	}
@@ -580,19 +732,52 @@ func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) 
 	return retries, nil
 }
 
+func (s *Scheduler) terminalizeUnresolvableRunLocked(runID string, now time.Time) error {
+	const maxSnapshotMisses = 8
+	for stale := 0; stale < maxSnapshotMisses; stale++ {
+		run, err := s.store.GetDagRun(runID)
+		if err != nil {
+			return fmt.Errorf("reload unresolvable run %s: %w", runID, err)
+		}
+		tasks, err := s.store.GetLatestTaskAttempts(runID)
+		if err != nil {
+			return fmt.Errorf("load unresolvable run %s task snapshot: %w", runID, err)
+		}
+		desired := models.RunFailed
+		for _, task := range tasks {
+			if task.Status == models.TaskCancelled {
+				desired = models.RunCancelled
+				break
+			}
+		}
+		if run.Status == desired {
+			return nil
+		}
+		if run.Status != models.RunRunning && desired != models.RunCancelled {
+			// Never replace an independently chosen terminal result with the
+			// missing-definition fallback.
+			return nil
+		}
+		applied, err := s.store.CompareAndSetDagRunStatusForTaskSnapshot(
+			run.ID, run.Status, desired, now, tasks,
+		)
+		if err != nil {
+			return fmt.Errorf("terminalize unresolvable run %s: %w", runID, err)
+		}
+		if applied {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"terminalize unresolvable run %s did not converge after %d stale snapshots",
+		runID, maxSnapshotMisses,
+	)
+}
+
 func progressionInput(run *models.DagRun, dag *models.DAGDef, tasks []models.TaskInstance) runprogression.Input {
 	input := runprogression.Input{RunStatus: run.Status}
 	if dag != nil {
-		materialized := make(map[string]struct{}, len(tasks))
-		for _, task := range tasks {
-			if dag.FindTask(task.TaskID) != nil {
-				materialized[task.TaskID] = struct{}{}
-			}
-		}
 		for _, definition := range dag.Tasks {
-			if _, exists := materialized[definition.ID]; !exists {
-				continue
-			}
 			input.Definitions = append(input.Definitions, runprogression.TaskDefinition{
 				ID: definition.ID, DependsOn: definition.DependsOn,
 			})
@@ -623,36 +808,45 @@ func (s *Scheduler) applyProgressionIntentLocked(
 	)
 	snapshotMisses := 0
 	for step := 0; step < maxReconciliationSteps; step++ {
-		projectedTasks := progressionTasks(dag, observedTasks)
-		input := progressionInput(run, dag, projectedTasks)
+		input := progressionInput(run, dag, observedTasks)
 		input.AllowCancelledReopen = intent == progressionManualRetry
+		input.AllowChainRootPromotion =
+			intent == progressionInitialization || intent == progressionRecovery
 		plan := runprogression.Evaluate(input)
-		promotions := progressionPromotions(dag, projectedTasks, plan, intent)
-		desired := progressionDesiredStatus(input, plan, intent)
-
-		// A same-status guarded write makes a promotion-only plan prove that
-		// its complete task snapshot is still current. Desired status is always
-		// guarded before promotion because promotion mutates that snapshot.
-		if desired == nil && len(promotions) == 0 {
-			return nil
+		desired := plan.DesiredRunStatus
+		if intent == progressionCancellation {
+			cancelled := models.RunCancelled
+			desired = &cancelled
 		}
-		guardedStatus := run.Status
 		if desired != nil {
-			guardedStatus = *desired
-		}
-		applied, err := s.store.CompareAndSetDagRunStatusForTaskSnapshot(
-			run.ID, run.Status, guardedStatus, now, observedTasks,
-		)
-		if err != nil {
-			return fmt.Errorf("guard run %s progression: %w", run.ID, err)
-		}
-		if !applied {
-			snapshotMisses++
-			if snapshotMisses >= maxSnapshotMisses {
-				return fmt.Errorf(
-					"run %s progression did not converge after %d stale snapshots",
-					run.ID, snapshotMisses,
-				)
+			if *desired == run.Status {
+				return nil
+			}
+			applied, err := s.store.CompareAndSetDagRunStatusForTaskSnapshot(
+				run.ID, run.Status, *desired, now, observedTasks,
+			)
+			if err != nil {
+				return fmt.Errorf("transition run %s progression: %w", run.ID, err)
+			}
+			if !applied {
+				snapshotMisses++
+				if snapshotMisses >= maxSnapshotMisses {
+					return fmt.Errorf(
+						"run %s progression did not converge after %d stale snapshots",
+						run.ID, snapshotMisses,
+					)
+				}
+				var reloadErr error
+				run, dag, observedTasks, reloadErr = s.reloadProgressionSnapshotLocked(run.ID)
+				if reloadErr != nil {
+					return reloadErr
+				}
+				continue
+			}
+			run.Status = *desired
+			snapshotMisses = 0
+			if *desired != models.RunRunning {
+				return nil
 			}
 			var reloadErr error
 			run, dag, observedTasks, reloadErr = s.reloadProgressionSnapshotLocked(run.ID)
@@ -661,21 +855,65 @@ func (s *Scheduler) applyProgressionIntentLocked(
 			}
 			continue
 		}
-		snapshotMisses = 0
-		if desired != nil {
-			run.Status = *desired
-		}
-		if len(promotions) == 0 {
+
+		if len(plan.PromoteAttemptIDs) == 0 || intent == progressionCancellation {
 			return nil
 		}
+		attemptID := plan.PromoteAttemptIDs[0]
+		target, ok := exactAttempt(observedTasks, attemptID)
+		if !ok {
+			return fmt.Errorf("progression selected missing attempt %s", attemptID)
+		}
+		taskDef := dag.FindTask(target.TaskID)
+		if taskDef == nil {
+			return fmt.Errorf("progression selected attempt %s without an exact definition", attemptID)
+		}
 
-		// Apply exactly one promotion. It changes the guarded snapshot, so the
-		// next candidate must be derived from a fresh snapshot and plan.
-		if _, err := s.lifecycle.Promote(promotions[0], now); err != nil {
-			var invalid *tasklifecycle.InvalidTransitionError
-			if !errors.As(err, &invalid) {
-				return fmt.Errorf("promote attempt %s: %w", promotions[0], err)
+		var disposition tasklifecycle.Disposition
+		var err error
+		if taskDef.Type == "map" {
+			setup, setupErr := s.mapSetupForPromotionLocked(target, taskDef, observedTasks, now)
+			if setupErr != nil {
+				return fmt.Errorf("derive map setup for %s: %w", target.ID, setupErr)
 			}
+			disposition, err = s.lifecycle.StartSetupGuarded(
+				target, run.Status, observedTasks, setup,
+			)
+			if err == nil &&
+				(disposition == tasklifecycle.Applied || disposition == tasklifecycle.AlreadyApplied) {
+				if err := s.reconcileOwnedMapParentLocked(target, taskDef, setup); err != nil {
+					return err
+				}
+			}
+		} else {
+			disposition, err = s.lifecycle.PromoteGuarded(
+				target, run.Status, observedTasks, now,
+			)
+		}
+		if err != nil {
+			return fmt.Errorf("apply progression action for attempt %s: %w", attemptID, err)
+		}
+		switch disposition {
+		case tasklifecycle.Applied, tasklifecycle.AlreadyApplied:
+			snapshotMisses = 0
+		case tasklifecycle.Stale:
+			snapshotMisses++
+			if snapshotMisses >= maxSnapshotMisses {
+				return fmt.Errorf(
+					"run %s progression did not converge after %d stale snapshots",
+					run.ID, snapshotMisses,
+				)
+			}
+		case tasklifecycle.Invalid:
+			return fmt.Errorf(
+				"%w: attempt %s",
+				errGuardedActionRejected, attemptID,
+			)
+		default:
+			return fmt.Errorf(
+				"progression action for attempt %s returned unknown disposition %d",
+				attemptID, disposition,
+			)
 		}
 		var reloadErr error
 		run, dag, observedTasks, reloadErr = s.reloadProgressionSnapshotLocked(run.ID)
@@ -687,76 +925,6 @@ func (s *Scheduler) applyProgressionIntentLocked(
 		"run %s progression exceeded %d reconciliation steps",
 		run.ID, maxReconciliationSteps,
 	)
-}
-
-func progressionTasks(dag *models.DAGDef, observedTasks []models.TaskInstance) []models.TaskInstance {
-	if dag == nil {
-		return observedTasks
-	}
-	return currentGenerationTasks(dag, observedTasks)
-}
-
-func progressionPromotions(
-	dag *models.DAGDef,
-	tasks []models.TaskInstance,
-	plan runprogression.Plan,
-	intent progressionIntent,
-) []string {
-	if dag == nil || intent == progressionCancellation {
-		return nil
-	}
-	attemptsByID := make(map[string]models.TaskInstance, len(tasks))
-	for _, task := range tasks {
-		attemptsByID[task.ID] = task
-	}
-	promotions := make([]string, 0, len(plan.PromoteAttemptIDs))
-	for _, attemptID := range plan.PromoteAttemptIDs {
-		task, exists := attemptsByID[attemptID]
-		if !exists {
-			continue
-		}
-		taskDef := dag.FindTask(task.TaskID)
-		if taskDef != nil && taskDef.Type == "map" && taskDef.ID == task.TaskID {
-			// A map parent remains pending until reconcileMapParentLocked has
-			// persisted setup ownership. Queued means worker-claimable.
-			continue
-		}
-		promotions = append(promotions, attemptID)
-	}
-	return promotions
-}
-
-func progressionDesiredStatus(
-	input runprogression.Input,
-	plan runprogression.Plan,
-	intent progressionIntent,
-) *models.RunStatus {
-	if intent == progressionCancellation {
-		status := models.RunCancelled
-		return &status
-	}
-	if intent == progressionManualRetry &&
-		len(input.Definitions) == 0 &&
-		hasDurableRetrySuccessor(input.Attempts) {
-		// Missing definitions cannot derive a run state, but the exact current
-		// snapshot can still prove that explicit retry materialized a successor.
-		status := models.RunRunning
-		return &status
-	}
-	return plan.DesiredRunStatus
-}
-
-func hasDurableRetrySuccessor(attempts []runprogression.AttemptSnapshot) bool {
-	for _, attempt := range attempts {
-		if attempt.Attempt <= 1 {
-			continue
-		}
-		switch attempt.Status {
-		case models.TaskPending, models.TaskQueued, models.TaskRunning:
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Scheduler) reloadProgressionSnapshotLocked(
