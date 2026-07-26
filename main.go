@@ -20,6 +20,7 @@ import (
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/alephmelo/nagare/internal/scheduler"
+	"github.com/alephmelo/nagare/internal/tasklifecycle"
 	"github.com/alephmelo/nagare/internal/worker"
 )
 
@@ -91,7 +92,8 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) erro
 	defer store.Close()
 
 	// 2. Initialize scheduler and load DAGs.
-	sched := scheduler.NewScheduler(store)
+	lifecycle := tasklifecycle.New(store)
+	sched := scheduler.NewSchedulerWithLifecycle(store, lifecycle)
 	if err := sched.LoadDAGs(dagsDir); err != nil {
 		store.Close()                              //nolint:errcheck // error on close after fatal is non-actionable
 		log.Fatalf("Failed to load DAGs: %v", err) //nolint:gocritic // store.Close() called explicitly above
@@ -105,11 +107,11 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) erro
 	// 3. Initialize log broker and local worker pool.
 	broker := logbroker.NewBroker()
 	sched.SetBroker(broker)
-	pool := worker.NewPool(store, getDAG, sched.TriggerDAG, cfg.WorkerPools, broker)
+	pool := worker.NewPoolWithLifecycle(store, lifecycle, getDAG, sched.TriggerDAG, cfg.WorkerPools, broker)
 
 	// 4. Initialize cluster coordinator (always-on; only used when remote
 	//    workers connect — zero overhead when no workers register).
-	coord := cluster.NewCoordinator(store, getDAG, 60*time.Second, token)
+	coord := cluster.NewCoordinatorWithLifecycle(store, lifecycle, getDAG, 60*time.Second, token)
 	coord.SetBroker(broker)
 
 	// 5. Initialize autoscaler when enabled.

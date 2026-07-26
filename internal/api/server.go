@@ -423,6 +423,12 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 
 	var enriched []enrichedTask
 	for _, t := range tasks {
+		publicID := scheduler.PublicTaskID(t.TaskID)
+		resolvedID, resolveErr := s.scheduler.ResolveTaskID(runID, publicID)
+		if resolveErr == nil && resolvedID != t.TaskID {
+			continue
+		}
+		t.TaskID = publicID
 		cmd := s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue)
 		m, _ := s.store.GetTaskMetrics(t.ID)
 		enriched = append(enriched, enrichedTask{
@@ -444,8 +450,13 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 	}
 	runID := parts[3]
 	taskID := parts[5]
+	storageTaskID, err := s.scheduler.ResolveTaskID(runID, taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	attempts, err := s.store.GetTaskAttempts(runID, taskID)
+	attempts, err := s.store.GetTaskAttempts(runID, storageTaskID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -462,6 +473,7 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 
 	var enriched []enrichedTask
 	for _, t := range attempts {
+		t.TaskID = scheduler.PublicTaskID(t.TaskID)
 		enriched = append(enriched, enrichedTask{
 			TaskInstance: t,
 			Command:      s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue),
@@ -532,10 +544,10 @@ func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// /api/runs/{run_id}/tasks/{task_id}/kill
-	_ = parts[3] // runID
+	runID := parts[3]
 	taskID := parts[5]
 
-	err := s.pool.KillTask(taskID)
+	err := s.scheduler.CancelTask(runID, taskID, s.pool)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
