@@ -43,13 +43,25 @@ type Coordinator struct {
 // NewCoordinator creates a Coordinator. getDAG may be nil if only the HTTP
 // handler is needed without task dispatch (e.g. in tests that don't poll).
 func NewCoordinator(store *models.Store, getDAG func(string) (*models.DAGDef, bool), workerTimeout time.Duration, token string) *Coordinator {
+	return NewCoordinatorWithLifecycle(
+		store,
+		tasklifecycle.New(store),
+		getDAG,
+		workerTimeout,
+		token,
+	)
+}
+
+// NewCoordinatorWithLifecycle creates a Coordinator using the provided
+// task-attempt lifecycle.
+func NewCoordinatorWithLifecycle(store *models.Store, lifecycle *tasklifecycle.Lifecycle, getDAG func(string) (*models.DAGDef, bool), workerTimeout time.Duration, token string) *Coordinator {
 	return &Coordinator{
 		store:         store,
 		getDAG:        getDAG,
 		token:         token,
 		workerTimeout: workerTimeout,
 		workers:       make(map[string]*WorkerInfo),
-		lifecycle:     tasklifecycle.New(store),
+		lifecycle:     lifecycle,
 		assignments:   make(map[string]*remoteAssignment),
 	}
 }
