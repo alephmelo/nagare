@@ -239,6 +239,94 @@ func TestRetryTaskAutomaticallyPropagatesLifecycleFailure(t *testing.T) {
 	}
 }
 
+func TestEvaluateCadenceAutomaticRetryDoesNotOverrideCancellation(t *testing.T) {
+	store := openControlStore(t, filepath.Join(t.TempDir(), "cadence-cancel.db"))
+	observedAt := time.Now().UTC().Add(-time.Minute)
+	createControlRun(t, store, "run-1", models.RunRunning, observedAt)
+	expected := models.TaskInstance{
+		ID: "retryable", RunID: "run-1", TaskID: "task",
+		Status: models.TaskUpForRetry, Attempt: 1, CreatedAt: observedAt, UpdatedAt: observedAt,
+	}
+	createControlAttempt(t, store, expected)
+
+	delegate := tasklifecycle.New(store)
+	var cancellationErr error
+	sched := NewScheduler(store)
+	sched.dags["dag"] = &models.DAGDef{
+		ID: "dag",
+		Tasks: []models.TaskDef{{
+			ID: "task", Retries: 1, RetryDelaySeconds: 0,
+		}},
+	}
+	sched.lifecycle = &controlLifecycleFault{
+		delegate: delegate,
+		beforeRetry: func() {
+			_, cancellationErr = delegate.CancelCurrentAttempt(
+				expected.RunID,
+				expected.TaskID,
+				expected.UpdatedAt.Add(time.Second),
+			)
+		},
+	}
+
+	if err := sched.evaluateRunCompletions(); err != nil {
+		t.Fatalf("evaluateRunCompletions: %v", err)
+	}
+	if cancellationErr != nil {
+		t.Fatalf("injected cancellation: %v", cancellationErr)
+	}
+	attempts, err := store.GetTaskAttempts(expected.RunID, expected.TaskID)
+	if err != nil {
+		t.Fatalf("GetTaskAttempts: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].Status != models.TaskCancelled {
+		t.Fatalf("attempts = %#v, want cadence to preserve exact cancellation", attempts)
+	}
+}
+
+func TestEvaluateRunDoesNotOverwriteKillFromStaleActiveSnapshot(t *testing.T) {
+	store := openControlStore(t, filepath.Join(t.TempDir(), "evaluate-kill.db"))
+	now := time.Date(2026, time.July, 26, 21, 0, 0, 0, time.UTC)
+	createControlRun(t, store, "run-1", models.RunRunning, now)
+	createControlAttempt(t, store, models.TaskInstance{
+		ID: "successful", RunID: "run-1", TaskID: "task",
+		Status: models.TaskSuccess, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	sched := NewScheduler(store)
+	sched.dags["dag"] = &models.DAGDef{
+		ID: "dag", Tasks: []models.TaskDef{{ID: "task"}},
+	}
+	active, err := store.GetActiveDagRuns()
+	if err != nil || len(active) != 1 {
+		t.Fatalf("GetActiveDagRuns = (%#v, %v), want one stale observation", active, err)
+	}
+
+	killDone := make(chan error, 1)
+	go func() {
+		killDone <- sched.KillDagRun("run-1", nil)
+	}()
+	if err := <-killDone; err != nil {
+		t.Fatalf("KillDagRun: %v", err)
+	}
+
+	sched.orchestrate.Lock()
+	retries, evaluateErr := sched.evaluateRunLocked(active[0], now.Add(time.Second))
+	sched.orchestrate.Unlock()
+	if evaluateErr != nil {
+		t.Fatalf("evaluate stale active observation: %v", evaluateErr)
+	}
+	if len(retries) != 0 {
+		t.Fatalf("stale evaluation retries = %#v, want none", retries)
+	}
+	run, err := store.GetDagRun("run-1")
+	if err != nil {
+		t.Fatalf("GetDagRun: %v", err)
+	}
+	if run.Status != models.RunCancelled {
+		t.Fatalf("run status = %q, want cancellation to remain authoritative", run.Status)
+	}
+}
+
 func TestCancelTaskReplayRetriesExactLocalStop(t *testing.T) {
 	store := openControlStore(t, filepath.Join(t.TempDir(), "cancel-replay.db"))
 	now := time.Date(2026, time.July, 26, 21, 0, 0, 0, time.UTC)
@@ -266,6 +354,40 @@ func TestCancelTaskReplayRetriesExactLocalStop(t *testing.T) {
 	}
 	if len(attempts) != 1 || attempts[0].Status != models.TaskCancelled {
 		t.Fatalf("attempts = %#v, want one cancelled exact attempt", attempts)
+	}
+}
+
+func TestCancelMapParentCascadesToCurrentGenerationChildren(t *testing.T) {
+	store := openControlStore(t, filepath.Join(t.TempDir(), "cancel-map-parent.db"))
+	now := time.Date(2026, time.July, 26, 21, 0, 0, 0, time.UTC)
+	createControlRun(t, store, "run-1", models.RunRunning, now)
+	createControlAttempt(t, store, models.TaskInstance{
+		ID: "map-parent", RunID: "run-1", TaskID: "map",
+		Status: models.TaskRunning, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	createControlAttempt(t, store, models.TaskInstance{
+		ID: "map-child", RunID: "run-1", TaskID: "map[0]",
+		Status: models.TaskRunning, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	sched := NewScheduler(store)
+	sched.dags["dag"] = &models.DAGDef{
+		ID: "dag",
+		Tasks: []models.TaskDef{{
+			ID: "map", Type: "map", MapOver: "source",
+		}},
+	}
+
+	if err := sched.CancelTask("run-1", "map", nil); err != nil {
+		t.Fatalf("CancelTask(map parent): %v", err)
+	}
+	for _, attemptID := range []string{"map-parent", "map-child"} {
+		attempt, err := store.GetTaskInstance(attemptID)
+		if err != nil {
+			t.Fatalf("GetTaskInstance(%s): %v", attemptID, err)
+		}
+		if attempt.Status != models.TaskCancelled {
+			t.Fatalf("%s status = %q, want cancelled", attemptID, attempt.Status)
+		}
 	}
 }
 
@@ -305,6 +427,36 @@ func TestKillDagRunContinuesAfterLocalStopFailures(t *testing.T) {
 		if len(attempts) != 1 || attempts[0].Status != models.TaskCancelled {
 			t.Fatalf("%s attempts = %#v, want preserved cancelled attempt", taskID, attempts)
 		}
+	}
+}
+
+func TestKillDagRunReplayRetriesCancelledAttemptLocalStop(t *testing.T) {
+	store := openControlStore(t, filepath.Join(t.TempDir(), "kill-replay-stop.db"))
+	now := time.Date(2026, time.July, 26, 21, 0, 0, 0, time.UTC)
+	createControlRun(t, store, "run-1", models.RunRunning, now)
+	createControlAttempt(t, store, models.TaskInstance{
+		ID: "exact-attempt", RunID: "run-1", TaskID: "task",
+		Status: models.TaskRunning, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	stopErr := errors.New("first local stop failed")
+	pool := &scriptedControlPool{errs: []error{stopErr, nil}}
+	sched := NewScheduler(store)
+
+	if err := sched.KillDagRun("run-1", pool); !errors.Is(err, stopErr) {
+		t.Fatalf("first KillDagRun error = %v, want local stop failure", err)
+	}
+	if err := sched.KillDagRun("run-1", pool); err != nil {
+		t.Fatalf("replayed KillDagRun: %v", err)
+	}
+	if len(pool.ids) != 2 || pool.ids[0] != "exact-attempt" || pool.ids[1] != "exact-attempt" {
+		t.Fatalf("KillTask IDs = %v, want exact cancelled attempt twice", pool.ids)
+	}
+	attempts, err := store.GetTaskAttempts("run-1", "task")
+	if err != nil {
+		t.Fatalf("GetTaskAttempts: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].Status != models.TaskCancelled {
+		t.Fatalf("attempts = %#v, want one preserved cancelled attempt", attempts)
 	}
 }
 
@@ -366,6 +518,7 @@ func (p *scriptedControlPool) KillTask(attemptID string) error {
 
 type controlLifecycleFault struct {
 	delegate    attemptLifecycle
+	beforeRetry func()
 	afterRetry  func()
 	retryErr    error
 	cancelErrs  map[string]error
@@ -400,6 +553,11 @@ func (l *controlLifecycleFault) RetryCurrent(runID, taskID string, at time.Time)
 	if l.retryErr != nil {
 		return 0, l.retryErr
 	}
+	if l.beforeRetry != nil {
+		before := l.beforeRetry
+		l.beforeRetry = nil
+		before()
+	}
 	disposition, err := l.delegate.RetryCurrent(runID, taskID, at)
 	if l.afterRetry != nil {
 		after := l.afterRetry
@@ -412,6 +570,11 @@ func (l *controlLifecycleFault) RetryCurrent(runID, taskID string, at time.Time)
 func (l *controlLifecycleFault) RetryCurrentPending(runID, taskID string, at time.Time) (tasklifecycle.Disposition, error) {
 	if l.retryErr != nil {
 		return 0, l.retryErr
+	}
+	if l.beforeRetry != nil {
+		before := l.beforeRetry
+		l.beforeRetry = nil
+		before()
 	}
 	disposition, err := l.delegate.RetryCurrentPending(runID, taskID, at)
 	if l.afterRetry != nil {

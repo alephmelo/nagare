@@ -516,6 +516,7 @@ func (s *Scheduler) cancelTaskLockedDetailed(runID, taskID string, pool interfac
 		return fmt.Errorf("cancel task %s returned unknown disposition %d", taskID, result.Disposition), nil
 	}
 
+	var durableErrs []error
 	var followupErrs []error
 	attempt, readErr := s.store.GetTaskInstance(result.AttemptID)
 	if readErr != nil {
@@ -524,6 +525,17 @@ func (s *Scheduler) cancelTaskLockedDetailed(runID, taskID string, pool interfac
 	} else if attempt.Status != models.TaskCancelled {
 		followupErrs = append(followupErrs,
 			fmt.Errorf("cancelled attempt %s has authoritative status %s", result.AttemptID, attempt.Status))
+	} else {
+		isMapParent, mapErr := s.retryUsesPendingSuccessor(runID, taskID)
+		if mapErr != nil {
+			durableErrs = append(durableErrs,
+				fmt.Errorf("resolve mapped children for cancelled attempt %s: %w", result.AttemptID, mapErr))
+		} else if isMapParent {
+			if cascadeErr := s.cancelMapChildrenLocked(runID, taskID, attempt.Attempt); cascadeErr != nil {
+				durableErrs = append(durableErrs,
+					fmt.Errorf("cancel mapped children for attempt %s: %w", result.AttemptID, cascadeErr))
+			}
+		}
 	}
 	if pool != nil {
 		if stopErr := pool.KillTask(result.AttemptID); stopErr != nil {
@@ -531,7 +543,7 @@ func (s *Scheduler) cancelTaskLockedDetailed(runID, taskID string, pool interfac
 				fmt.Errorf("stop cancelled attempt %s: %w", result.AttemptID, stopErr))
 		}
 	}
-	return nil, errors.Join(followupErrs...)
+	return errors.Join(durableErrs...), errors.Join(followupErrs...)
 }
 
 // KillDagRun cancels only the latest current attempt of every logical task.
@@ -558,7 +570,7 @@ func (s *Scheduler) KillDagRun(runID string, pool interface {
 			continue
 		}
 		switch ti.Status {
-		case models.TaskPending, models.TaskQueued, models.TaskRunning, models.TaskUpForRetry:
+		case models.TaskPending, models.TaskQueued, models.TaskRunning, models.TaskUpForRetry, models.TaskCancelled:
 			durableErr, followupErr := s.cancelTaskLockedDetailed(runID, publicID, pool)
 			if durableErr != nil {
 				durableErrs = append(durableErrs, fmt.Errorf("cancel task %s: %w", publicID, durableErr))

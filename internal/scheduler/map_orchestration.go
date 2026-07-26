@@ -430,81 +430,107 @@ func (s *Scheduler) cancelMapChildrenLocked(runID, parentID string, generation i
 	return errors.Join(cancelErrs...)
 }
 
+type automaticRetryCandidate struct {
+	expected models.TaskInstance
+	delay    time.Duration
+	dueAt    time.Time
+}
+
 func (s *Scheduler) evaluateRuns() error {
 	runs, err := s.store.GetActiveDagRuns()
 	if err != nil {
 		return err
 	}
 	var evaluationErrs []error
-	for _, run := range runs {
+	for _, observedRun := range runs {
 		s.orchestrate.Lock()
-		s.mu.RLock()
-		dag := s.dags[run.DAGID]
-		s.mu.RUnlock()
-		if dag == nil {
-			s.orchestrate.Unlock()
-			log.Printf("DAG %s not found in memory. Marking run %s as failed", run.DAGID, run.ID)
-			if err := s.store.UpdateDagRunStatus(run.ID, models.RunFailed); err != nil {
-				evaluationErrs = append(evaluationErrs, err)
-			}
-			continue
-		}
-
-		if err := s.aggregateMapParentsLocked(run.ID, dag); err != nil {
-			s.orchestrate.Unlock()
-			evaluationErrs = append(evaluationErrs, fmt.Errorf("aggregate maps for run %s: %w", run.ID, err))
-			continue
-		}
-		tasks, err := s.store.GetLatestTaskAttempts(run.ID)
-		if err != nil {
-			s.orchestrate.Unlock()
-			evaluationErrs = append(evaluationErrs, err)
-			continue
-		}
-		tasks = currentGenerationTasks(dag, tasks)
-
-		allSuccess := len(tasks) > 0
-		anyFailed := false
-		var retryTaskIDs []string
-		now := time.Now().UTC()
-		for _, task := range tasks {
-			taskDef := taskDefinitionForStoredID(dag, task.TaskID)
-			switch task.Status {
-			case models.TaskUpForRetry:
-				allSuccess = false
-				if taskDef != nil {
-					delay := time.Duration(taskDef.RetryDelaySeconds) * time.Second
-					if !now.Before(task.UpdatedAt.Add(delay)) {
-						retryTaskIDs = append(retryTaskIDs, task.TaskID)
-					}
-				}
-			case models.TaskFailed:
-				anyFailed = true
-			case models.TaskSuccess:
-			default:
-				allSuccess = false
-			}
-		}
-		if anyFailed {
-			log.Printf("Marking run %s as failed", run.ID)
-			if err := s.store.UpdateDagRunStatus(run.ID, models.RunFailed); err != nil {
-				evaluationErrs = append(evaluationErrs, err)
-			}
-		} else if allSuccess {
-			log.Printf("Marking run %s as success", run.ID)
-			if err := s.store.UpdateDagRunStatus(run.ID, models.RunSuccess); err != nil {
-				evaluationErrs = append(evaluationErrs, err)
-			}
-		}
+		retries, evaluationErr := s.evaluateRunLocked(observedRun, time.Now().UTC())
 		s.orchestrate.Unlock()
+		if evaluationErr != nil {
+			evaluationErrs = append(evaluationErrs, evaluationErr)
+		}
 
-		for _, taskID := range retryTaskIDs {
-			if err := s.RetryTask(run.ID, taskID); err != nil {
-				evaluationErrs = append(evaluationErrs, fmt.Errorf("retry task %s: %w", taskID, err))
+		for _, retry := range retries {
+			if err := s.RetryTaskAutomatically(retry.expected, retry.delay, retry.dueAt); err != nil {
+				evaluationErrs = append(evaluationErrs,
+					fmt.Errorf("automatically retry attempt %s: %w", retry.expected.ID, err))
 			}
 		}
 	}
 	return errors.Join(evaluationErrs...)
+}
+
+// evaluateRunLocked revalidates an active-run observation and evaluates its
+// latest task attempts as one serialized control-plane decision. Callers must
+// hold orchestrate.
+func (s *Scheduler) evaluateRunLocked(observedRun models.DagRun, now time.Time) ([]automaticRetryCandidate, error) {
+	run, err := s.store.GetDagRun(observedRun.ID)
+	if err != nil {
+		return nil, fmt.Errorf("reload run %s for evaluation: %w", observedRun.ID, err)
+	}
+	if run.Status != models.RunRunning {
+		return nil, nil
+	}
+
+	s.mu.RLock()
+	dag := s.dags[run.DAGID]
+	s.mu.RUnlock()
+	if dag == nil {
+		log.Printf("DAG %s not found in memory. Marking run %s as failed", run.DAGID, run.ID)
+		if err := s.store.UpdateDagRunStatus(run.ID, models.RunFailed); err != nil {
+			return nil, fmt.Errorf("mark run %s failed without DAG: %w", run.ID, err)
+		}
+		return nil, nil
+	}
+
+	if err := s.aggregateMapParentsLocked(run.ID, dag); err != nil {
+		return nil, fmt.Errorf("aggregate maps for run %s: %w", run.ID, err)
+	}
+	tasks, err := s.store.GetLatestTaskAttempts(run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load latest tasks for run %s: %w", run.ID, err)
+	}
+	tasks = currentGenerationTasks(dag, tasks)
+
+	allSuccess := len(tasks) > 0
+	anyFailed := false
+	var retries []automaticRetryCandidate
+	for _, task := range tasks {
+		taskDef := taskDefinitionForStoredID(dag, task.TaskID)
+		switch task.Status {
+		case models.TaskUpForRetry:
+			allSuccess = false
+			if taskDef != nil {
+				delay := time.Duration(taskDef.RetryDelaySeconds) * time.Second
+				dueAt := task.UpdatedAt.Add(delay)
+				if !now.Before(dueAt) {
+					retries = append(retries, automaticRetryCandidate{
+						expected: task,
+						delay:    delay,
+						dueAt:    dueAt,
+					})
+				}
+			}
+		case models.TaskFailed:
+			anyFailed = true
+		case models.TaskSuccess:
+		default:
+			allSuccess = false
+		}
+	}
+
+	if anyFailed {
+		log.Printf("Marking run %s as failed", run.ID)
+		if err := s.store.UpdateDagRunStatus(run.ID, models.RunFailed); err != nil {
+			return retries, fmt.Errorf("mark run %s failed: %w", run.ID, err)
+		}
+	} else if allSuccess {
+		log.Printf("Marking run %s as success", run.ID)
+		if err := s.store.UpdateDagRunStatus(run.ID, models.RunSuccess); err != nil {
+			return retries, fmt.Errorf("mark run %s successful: %w", run.ID, err)
+		}
+	}
+	return retries, nil
 }
 
 func (s *Scheduler) aggregateMapParentsLocked(runID string, dag *models.DAGDef) error {
