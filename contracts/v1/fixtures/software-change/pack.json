@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0",
+  "id": "nagare.software-change",
+  "version": "1.0.0",
+  "nagare": {
+    "minimum_version": "0.5.0"
+  },
+  "workflows": [
+    "dags/software-change.yaml"
+  ],
+  "assets": [
+    {
+      "path": "roles/implementer.md",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "bindings": {
+    "source": "fixture-github",
+    "agent": "fixture-agent",
+    "approval": "fixture-ui",
+    "delivery": "fixture-draft-pr"
+  },
+  "secrets": [
+    {
+      "name": "github-token",
+      "required": false,
+      "purpose": "Open a draft pull request outside fixture mode."
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "repository",
+      "access": "read",
+      "constraints": {
+        "repositories": ["configured"]
+      }
+    },
+    {
+      "name": "workspace",
+      "access": "write",
+      "constraints": {
+        "mode": "isolated"
+      }
+    }
+  ],
+  "policy": {
+    "execution_approval": "required",
+    "delivery_approval": "required",
+    "max_parallel_assignments": 4,
+    "max_repair_attempts": 2
+  },
+  "inputs": [
+    {
+      "name": "work-item",
+      "schema": "https://nagare.dev/contracts/examples/work-item.schema.json"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "reviewed-change",
+      "schema": "https://nagare.dev/contracts/examples/reviewed-change.schema.json"
+    }
+  ]
+}

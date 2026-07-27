@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "id": "software-change-execution-approval",
+  "proposal_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "actor": {
+    "id": "fixture-user",
+    "channel": "nagare-ui"
+  },
+  "decision": "approved",
+  "granted_capabilities": [
+    {
+      "name": "repository",
+      "access": "read",
+      "constraints": {
+        "repositories": ["fixture/nagare"]
+      }
+    },
+    {
+      "name": "workspace",
+      "access": "write",
+      "constraints": {
+        "paths": ["internal/example/"]
+      }
+    },
+    {
+      "name": "process",
+      "access": "execute",
+      "constraints": {
+        "commands": ["go test ./internal/example"]
+      }
+    }
+  ],
+  "decided_at": "2026-07-27T14:05:00Z",
+  "expires_at": "2026-07-28T14:05:00Z",
+  "idempotency_key": "software-change-execution-approval-v1"
+}

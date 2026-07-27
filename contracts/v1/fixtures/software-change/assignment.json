@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "id": "software-change-implement",
+  "objective": "Implement the accepted issue while preserving existing public behavior.",
+  "inputs": [
+    {
+      "id": "software-change-issue-context",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "context_refs": [
+    "fixture://github/issues/42",
+    "fixture://repository/commit/0123456789abcdef"
+  ],
+  "owned_paths": [
+    "internal/example/",
+    "internal/example/example_test.go"
+  ],
+  "capabilities": [
+    {
+      "name": "repository",
+      "access": "read",
+      "constraints": {
+        "repositories": ["fixture/nagare"]
+      }
+    },
+    {
+      "name": "workspace",
+      "access": "write",
+      "constraints": {
+        "paths": ["internal/example/"]
+      }
+    },
+    {
+      "name": "process",
+      "access": "execute",
+      "constraints": {
+        "commands": ["go test ./internal/example"]
+      }
+    }
+  ],
+  "budget": {
+    "max_duration_seconds": 1800,
+    "max_attempts": 2,
+    "max_tokens": 80000,
+    "max_cost_microunits": 5000000
+  },
+  "output_contract": {
+    "artifacts": [
+      {
+        "kind": "source-patch",
+        "media_type": "text/x-diff"
+      },
+      {
+        "kind": "test-report",
+        "media_type": "application/json",
+        "schema": "https://nagare.dev/contracts/examples/test-report.schema.json"
+      }
+    ]
+  },
+  "acceptance_criteria": [
+    "A regression test fails on the baseline and passes with the implementation.",
+    "No file outside the owned paths changes.",
+    "The focused Go test suite passes under the race detector."
+  ],
+  "idempotency_key": "software-change-implement-v1"
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "id": "software-change-delivery-receipt",
+  "delivery_id": "software-change-draft-pr",
+  "idempotency_key": "software-change-draft-pr-v1",
+  "outcome": "applied",
+  "artifacts": [
+    {
+      "id": "software-change-patch",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "external_ref": "fixture://github/pulls/101",
+  "message": "Fixture draft pull request recorded without an external write.",
+  "recorded_at": "2026-07-27T14:40:00Z"
+}

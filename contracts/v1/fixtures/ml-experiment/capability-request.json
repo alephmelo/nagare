@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "id": "ml-experiment-capabilities",
+  "subject": {
+    "kind": "assignment",
+    "id": "ml-experiment-evaluate"
+  },
+  "capabilities": [
+    {
+      "name": "dataset",
+      "access": "read",
+      "constraints": {
+        "datasets": ["binary-classification-v1"]
+      }
+    },
+    {
+      "name": "workspace",
+      "access": "write",
+      "constraints": {
+        "paths": ["fixture-output/ml-experiment/"]
+      }
+    },
+    {
+      "name": "process",
+      "access": "execute",
+      "constraints": {
+        "commands": ["python -m fixture.evaluate"]
+      }
+    }
+  ],
+  "requested_at": "2026-07-27T15:00:00Z",
+  "idempotency_key": "ml-experiment-capabilities-v1"
+}

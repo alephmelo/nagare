@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "id": "ml-experiment-delivery-receipt",
+  "delivery_id": "ml-experiment-report-delivery",
+  "idempotency_key": "ml-experiment-report-delivery-v1",
+  "outcome": "applied",
+  "artifacts": [
+    {
+      "id": "ml-experiment-report",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "external_ref": "fixture://reports/ml-experiment/001",
+  "message": "Fixture model-evaluation report recorded without an external write.",
+  "recorded_at": "2026-07-27T15:40:00Z"
+}

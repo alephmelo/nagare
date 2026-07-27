@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nagare.dev/contracts/v1/approval.schema.json",
+  "title": "Nagare Approval v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "proposal_digest",
+    "actor",
+    "decision",
+    "granted_capabilities",
+    "decided_at",
+    "expires_at",
+    "idempotency_key"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schema_version"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "proposal_digest": {
+      "$ref": "common.schema.json#/$defs/digest"
+    },
+    "actor": {
+      "$ref": "common.schema.json#/$defs/actor"
+    },
+    "decision": {
+      "enum": ["approved", "rejected"]
+    },
+    "granted_capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/capability"
+      },
+      "uniqueItems": true
+    },
+    "decided_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 255
+    }
+  }
+}

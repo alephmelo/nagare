@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0",
+  "id": "nagare.ml-experiment",
+  "version": "1.0.0",
+  "nagare": {
+    "minimum_version": "0.5.0"
+  },
+  "workflows": [
+    "dags/ml-experiment.yaml"
+  ],
+  "assets": [
+    {
+      "path": "evals/model-quality.json",
+      "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  ],
+  "bindings": {
+    "source": "fixture-experiment-request",
+    "agent": "fixture-agent",
+    "approval": "fixture-ui",
+    "delivery": "fixture-report"
+  },
+  "secrets": [],
+  "capabilities": [
+    {
+      "name": "dataset",
+      "access": "read",
+      "constraints": {
+        "datasets": ["configured"]
+      }
+    },
+    {
+      "name": "workspace",
+      "access": "write",
+      "constraints": {
+        "mode": "isolated"
+      }
+    },
+    {
+      "name": "process",
+      "access": "execute",
+      "constraints": {
+        "commands": ["configured-evaluator"]
+      }
+    }
+  ],
+  "policy": {
+    "execution_approval": "required",
+    "delivery_approval": "policy",
+    "max_parallel_assignments": 2,
+    "max_repair_attempts": 1
+  },
+  "inputs": [
+    {
+      "name": "experiment-request",
+      "schema": "https://nagare.dev/contracts/examples/experiment-request.schema.json"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "model-recommendation",
+      "schema": "https://nagare.dev/contracts/examples/model-recommendation.schema.json"
+    }
+  ]
+}

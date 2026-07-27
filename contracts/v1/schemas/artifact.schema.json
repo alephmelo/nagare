@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nagare.dev/contracts/v1/artifact.schema.json",
+  "title": "Nagare Artifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "kind",
+    "media_type",
+    "digest",
+    "size_bytes",
+    "producer",
+    "created_at",
+    "location"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schema_version"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "kind": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 255
+    },
+    "digest": {
+      "$ref": "common.schema.json#/$defs/digest"
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 104857600
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "task_attempt_id"],
+      "properties": {
+        "run_id": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        "task_attempt_id": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        "assignment_id": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        }
+      }
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "location": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "content"],
+          "properties": {
+            "kind": {
+              "const": "inline"
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 1048576
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "uri"],
+          "properties": {
+            "kind": {
+              "const": "external"
+            },
+            "uri": {
+              "type": "string",
+              "format": "uri",
+              "maxLength": 2048
+            }
+          }
+        }
+      ]
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "number", "integer", "boolean", "null"]
+      }
+    }
+  }
+}
