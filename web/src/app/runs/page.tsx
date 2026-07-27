@@ -43,45 +43,25 @@ import {
   Handle,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import dagre from "dagre";
 import { PageHeader } from "../../components/ui/PageHeader";
+import { layoutTopologyStages } from "../../components/executionTopologyLayout";
+import {
+  fetchRunInspection,
+  inspectionAttemptDuration,
+  inspectionAttemptLabel,
+  inspectionCurrentTasks,
+  inspectionLogStreamURL,
+  projectInspectionTopology,
+  segmentInspectionTasks,
+  summarizeInspectionTasks,
+  InspectionCurrentTask,
+  InspectionLogs,
+  RunInspection,
+} from "../../lib/runInspection";
 import { StatusIcon } from "../../components/ui/StatusIcon";
 import { getStatusColor, getStatusLabel } from "../../components/ui/StatusBadge";
 import { LogTerminal } from "../../components/blocks/LogTerminal";
 import { RunsTable, Run } from "../../components/blocks/RunsTable";
-
-// DAG definition task — used to derive dependency edges
-interface DagTaskDef {
-  ID: string;
-  Type: string;
-  Command: string;
-  DependsOn: string[] | null;
-  MapOver?: string;
-}
-
-interface DagDef {
-  ID: string;
-  Tasks: DagTaskDef[];
-}
-
-interface RunTask {
-  ID: string;
-  TaskID: string;
-  Status: string;
-  Output: string;
-  Attempt: number;
-  CreatedAt: string;
-  UpdatedAt: string;
-  Command?: string;
-  Metrics?: {
-    DurationMs: number;
-    CpuUserMs: number;
-    CpuSystemMs: number;
-    PeakMemoryBytes: number;
-    ExitCode: number;
-    ExecutorType: string;
-  };
-}
 
 // Formats elapsed time into a human-readable string
 function formatElapsed(seconds: number): string {
@@ -96,6 +76,10 @@ function formatElapsed(seconds: number): string {
     return `${m}m ${s}s`;
   }
   return `${seconds}s`;
+}
+
+function formatDurationMs(durationMs: number): string {
+  return durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`;
 }
 
 // Live ticking elapsed timer for running tasks/runs
@@ -126,6 +110,7 @@ function LiveElapsed({ startedAt }: { startedAt: string }) {
 
 const RUN_NODE_W = 200;
 const RUN_NODE_H = 44;
+const TERMINAL_STATUSES = new Set(["success", "failed", "cancelled"]);
 
 function statusBorderColor(status: string): string {
   switch (status) {
@@ -195,143 +180,14 @@ function RunNodeComponent({
 
 const runNodeTypes = { runNode: RunNodeComponent };
 
-/** Strip [N] suffix to get the base task ID */
-function baseTaskID(taskID: string): string {
-  const idx = taskID.indexOf("[");
-  return idx !== -1 ? taskID.substring(0, idx) : taskID;
-}
-
-/** Build React Flow nodes + edges from DAG definition + runtime task instances */
-function buildRunGraph(
-  dagTasks: DagTaskDef[],
-  runTasks: RunTask[]
-): { nodes: Node[]; edges: Edge[] } {
-  const dagMap = new Map<string, DagTaskDef>();
-  dagTasks.forEach((t) => dagMap.set(t.ID, t));
-
-  // Identify map parents that have ACTUAL children in the runtime list.
-  // A parent without children yet (still pending/running before fan-out)
-  // should be shown as a regular node.
-  const childrenOf = new Map<string, RunTask[]>();
-
-  runTasks.forEach((t) => {
-    const base = baseTaskID(t.TaskID);
-    if (base !== t.TaskID) {
-      if (!childrenOf.has(base)) childrenOf.set(base, []);
-      childrenOf.get(base)!.push(t);
-    }
-  });
-
-  // Only consider a parent "expanded" (hidden in favour of children) if
-  // children actually exist in the task list.
-  const expandedParents = new Set<string>(childrenOf.keys());
-
-  // Build a lookup: taskID -> RunTask (latest attempt only)
-  const instanceOf = new Map<string, RunTask>();
-  runTasks.forEach((t) => instanceOf.set(t.TaskID, t));
-
-  // --- Nodes ---
-  const nodes: Node[] = [];
-  runTasks.forEach((t) => {
-    if (expandedParents.has(t.TaskID)) return; // hide parent — children shown instead
-    nodes.push({
-      id: t.TaskID,
-      type: "runNode",
-      data: {
-        label: t.TaskID,
-        status: t.Status,
-        duration: t.Metrics?.DurationMs,
-      },
-      position: { x: 0, y: 0 },
-    });
-  });
-
-  // --- Edges ---
-  const edges: Edge[] = [];
-  const edgeSet = new Set<string>(); // dedup
-  const addEdge = (src: string, tgt: string) => {
-    const key = `${src}->${tgt}`;
-    if (edgeSet.has(key)) return;
-    edgeSet.add(key);
-    const srcTask = instanceOf.get(src);
-    const color =
-      srcTask?.Status === "success"
-        ? "var(--mantine-color-green-filled)"
-        : srcTask?.Status === "failed"
-          ? "var(--mantine-color-red-filled)"
-          : srcTask?.Status === "running"
-            ? "var(--mantine-color-blue-filled)"
-            : "var(--mantine-color-dimmed)";
-    edges.push({
-      id: `e-${src}-${tgt}`,
-      source: src,
-      target: tgt,
-      animated: srcTask?.Status === "running",
-      style: { stroke: color, strokeWidth: 1.5 },
-      markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
-    });
-  };
-
-  runTasks.forEach((t) => {
-    if (expandedParents.has(t.TaskID)) return;
-
-    const base = baseTaskID(t.TaskID);
-    const isChild = base !== t.TaskID;
-    const dagTask = dagMap.get(base);
-    if (!dagTask) return;
-
-    if (isChild) {
-      // Map child — connect from each dependency of the parent definition
-      dagTask.DependsOn?.forEach((dep) => {
-        if (!expandedParents.has(dep) && instanceOf.has(dep)) {
-          addEdge(dep, t.TaskID);
-        }
-      });
-    } else {
-      // Regular task (or map parent whose children haven't appeared yet)
-      dagTask.DependsOn?.forEach((dep) => {
-        if (expandedParents.has(dep)) {
-          // Dependency is a map parent with children — fan-in from each child
-          childrenOf.get(dep)?.forEach((child) => addEdge(child.TaskID, t.TaskID));
-        } else if (instanceOf.has(dep)) {
-          addEdge(dep, t.TaskID);
-        }
-      });
-    }
-  });
-
-  return { nodes, edges };
-}
-
-/** Dagre auto-layout for run graph */
-function layoutRunGraph(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: Edge[] } {
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: "TB", ranksep: 40, nodesep: 20 });
-
-  nodes.forEach((n) => g.setNode(n.id, { width: RUN_NODE_W, height: RUN_NODE_H }));
-  edges.forEach((e) => g.setEdge(e.source, e.target));
-  dagre.layout(g);
-
-  const layouted = nodes.map((n) => {
-    const pos = g.node(n.id);
-    return {
-      ...n,
-      position: { x: pos.x - RUN_NODE_W / 2, y: pos.y - RUN_NODE_H / 2 },
-      targetPosition: Position.Top,
-      sourcePosition: Position.Bottom,
-    };
-  });
-
-  return { nodes: layouted, edges };
-}
-
 // useSSELogs subscribes to the SSE log stream for a task while it is running.
 // Returns the accumulated live log string (empty string when not streaming).
-function useSSELogs(taskInstanceID: string, runID: string, active: boolean): string {
+function useSSELogs(logs: InspectionLogs, runID: string, active: boolean): string {
   const [lines, setLines] = useState<string[]>([]);
   const esRef = useRef<EventSource | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const taskAttemptID = logs.task_attempt_id;
+  const exact = logs.exact;
 
   useEffect(() => {
     if (!active) {
@@ -347,8 +203,11 @@ function useSSELogs(taskInstanceID: string, runID: string, active: boolean): str
     function connect() {
       if (esRef.current) return; // already connected
       const storedKey = localStorage.getItem("nagare_api_key");
-      const params = storedKey ? `?token=${encodeURIComponent(storedKey)}` : "";
-      const url = `/api/runs/${runID}/tasks/${taskInstanceID}/logs${params}`;
+      const url = inspectionLogStreamURL(
+        runID,
+        { task_attempt_id: taskAttemptID, exact },
+        storedKey
+      );
       const es = new EventSource(url);
       esRef.current = es;
 
@@ -373,7 +232,7 @@ function useSSELogs(taskInstanceID: string, runID: string, active: boolean): str
         esRef.current = null;
       }
     };
-  }, [taskInstanceID, runID, active]);
+  }, [taskAttemptID, exact, runID, active]);
 
   return lines.join("\n");
 }
@@ -388,7 +247,7 @@ function TaskRow({
   taskRef,
   borderless,
 }: {
-  task: RunTask;
+  task: InspectionCurrentTask;
   runID: string;
   expanded: boolean;
   onToggleExpand: () => void;
@@ -397,15 +256,17 @@ function TaskRow({
   taskRef?: React.Ref<HTMLDivElement>;
   borderless?: boolean;
 }) {
+  const current = task.current_attempt;
+  const metrics = current.metrics;
+  const durationMs = inspectionAttemptDuration(current);
   // Only open an SSE stream for tasks that are actively running — queued tasks
   // produce no output yet and each open stream costs a server connection.
-  const isLive = task.Status === "running";
-  const [attempts, setAttempts] = useState<RunTask[]>([]);
-  const [loadingAttempts, setLoadingAttempts] = useState(false);
-  const liveOutput = useSSELogs(task.ID, runID, isLive && expanded);
-  const displayOutput = isLive ? liveOutput : task.Output;
+  const isLive = current.status === "running";
+  const attempts = task.attempts;
+  const liveOutput = useSSELogs(current.logs, runID, isLive && expanded);
+  const displayOutput = isLive ? liveOutput : current.output;
   const hasOutput = displayOutput && displayOutput.trim().length > 0;
-  const hasMultipleAttempts = task.Attempt > 1;
+  const hasMultipleAttempts = attempts.length > 1;
   const logRef = useRef<HTMLElement | null>(null);
 
   // Auto-scroll the log pane to the bottom whenever new output arrives.
@@ -415,24 +276,10 @@ function TaskRow({
     }
   }, [displayOutput]);
 
-  const fetchAttempts = async () => {
-    if (attempts.length > 0 || task.Attempt <= 1) return;
-    setLoadingAttempts(true);
-    try {
-      const res = await apiFetch(`/api/runs/${runID}/tasks/${task.TaskID}/attempts`);
-      if (res.ok) setAttempts(await res.json());
-    } catch {
-      /* noop */
-    } finally {
-      setLoadingAttempts(false);
-    }
-  };
-
-  const isExpandable = isLive || task.Status === "queued" || hasOutput || hasMultipleAttempts;
+  const isExpandable = isLive || current.status === "queued" || hasOutput || hasMultipleAttempts;
 
   const handleExpand = () => {
     if (isExpandable) {
-      if (!expanded) fetchAttempts();
       onToggleExpand();
     }
   };
@@ -446,9 +293,9 @@ function TaskRow({
       style={{
         border: borderless
           ? "none"
-          : task.Status === "failed"
+          : current.status === "failed"
             ? "1px solid var(--mantine-color-red-3)"
-            : task.Status === "up_for_retry"
+            : current.status === "up_for_retry"
               ? "1px solid var(--mantine-color-orange-3)"
               : "1px solid var(--mantine-color-default-border)",
       }}
@@ -461,60 +308,63 @@ function TaskRow({
         onClick={handleExpand}
       >
         <Group gap="sm">
-          <StatusIcon status={task.Status} />
+          <StatusIcon status={current.status} />
           <div>
             <Group gap="xs">
               <Text fw={600} size="sm">
-                {task.TaskID}
+                {task.id}
               </Text>
               {hasMultipleAttempts && (
                 <Badge size="xs" variant="dot" color="orange">
-                  Attempt #{task.Attempt}
+                  {inspectionAttemptLabel(current)}
                 </Badge>
               )}
-              {task.Metrics && task.Metrics.DurationMs > 0 && (
+              {durationMs !== null && durationMs > 0 && (
                 <Badge size="xs" variant="outline" color="gray">
-                  {task.Metrics.DurationMs >= 1000
-                    ? `${(task.Metrics.DurationMs / 1000).toFixed(1)}s`
-                    : `${task.Metrics.DurationMs}ms`}
+                  {formatDurationMs(durationMs)}
                 </Badge>
               )}
-              {task.Metrics && task.Metrics.PeakMemoryBytes > 0 && (
+              {metrics && metrics.peak_memory_bytes > 0 && (
                 <Badge size="xs" variant="outline" color="blue">
-                  {task.Metrics.PeakMemoryBytes >= 1024 * 1024 * 1024
-                    ? `${(task.Metrics.PeakMemoryBytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
-                    : task.Metrics.PeakMemoryBytes >= 1024 * 1024
-                      ? `${(task.Metrics.PeakMemoryBytes / (1024 * 1024)).toFixed(1)} MB`
-                      : `${(task.Metrics.PeakMemoryBytes / 1024).toFixed(0)} KB`}
+                  {metrics.peak_memory_bytes >= 1024 * 1024 * 1024
+                    ? `${(metrics.peak_memory_bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+                    : metrics.peak_memory_bytes >= 1024 * 1024
+                      ? `${(metrics.peak_memory_bytes / (1024 * 1024)).toFixed(1)} MB`
+                      : `${(metrics.peak_memory_bytes / 1024).toFixed(0)} KB`}
                 </Badge>
               )}
-              {task.Metrics && task.Metrics.ExitCode !== undefined && task.Status !== "running" && (
+              {metrics && metrics.exit_code !== undefined && current.status !== "running" && (
                 <Badge
                   size="xs"
                   variant="outline"
-                  color={task.Metrics.ExitCode === 0 ? "green" : "red"}
+                  color={metrics.exit_code === 0 ? "green" : "red"}
                 >
-                  exit {task.Metrics.ExitCode}
+                  exit {metrics.exit_code}
                 </Badge>
               )}
-              {task.Metrics && (task.Metrics.CpuUserMs > 0 || task.Metrics.CpuSystemMs > 0) && (
+              {metrics && (metrics.cpu_user_ms > 0 || metrics.cpu_system_ms > 0) && (
                 <Badge size="xs" variant="outline" color="violet">
-                  CPU {((task.Metrics.CpuUserMs + task.Metrics.CpuSystemMs) / 1000).toFixed(1)}s
+                  CPU {((metrics.cpu_user_ms + metrics.cpu_system_ms) / 1000).toFixed(1)}s
                 </Badge>
               )}
             </Group>
             <Text size="xs" c="dimmed">
-              Last Updated {new Date(task.UpdatedAt).toLocaleTimeString()}
+              Last Updated {new Date(current.updated_at).toLocaleTimeString()}
             </Text>
+            {current.item_value !== null && (
+              <Text size="xs" c="dimmed" lineClamp={1}>
+                Item: {current.item_value}
+              </Text>
+            )}
           </div>
         </Group>
         <Group gap="sm">
-          <Badge color={getStatusColor(task.Status)} variant="light" radius="xl" size="sm">
-            {getStatusLabel(task.Status)}
+          <Badge color={getStatusColor(current.status)} variant="light" radius="xl" size="sm">
+            {getStatusLabel(current.status)}
           </Badge>
-          {(task.Status === "success" ||
-            task.Status === "failed" ||
-            task.Status === "cancelled") && (
+          {(current.status === "success" ||
+            current.status === "failed" ||
+            current.status === "cancelled") && (
             <Tooltip label="Retry Task">
               <ActionIcon
                 variant="light"
@@ -522,14 +372,14 @@ function TaskRow({
                 size="sm"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onRetry(task.TaskID);
+                  onRetry(task.id);
                 }}
               >
                 <IconPlayerPlay size={12} />
               </ActionIcon>
             </Tooltip>
           )}
-          {task.Status === "running" && (
+          {current.status === "running" && (
             <Tooltip label="Kill Task">
               <ActionIcon
                 variant="light"
@@ -537,7 +387,7 @@ function TaskRow({
                 size="sm"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onKill(task.TaskID);
+                  onKill(task.id);
                 }}
               >
                 <IconPlayerStop size={12} />
@@ -554,47 +404,53 @@ function TaskRow({
 
       <Collapse in={expanded}>
         <Divider />
-        {loadingAttempts ? (
-          <Box p="md">
-            <Loader size="xs" />
-          </Box>
-        ) : hasMultipleAttempts && attempts.length > 0 ? (
-          <Tabs
-            defaultValue={String(attempts[attempts.length - 1].Attempt)}
-            style={{ backgroundColor: "var(--log-bg)" }}
-          >
+        {hasMultipleAttempts ? (
+          <Tabs defaultValue={current.id} style={{ backgroundColor: "var(--log-bg)" }}>
             <Tabs.List px="md" pt="xs">
               {attempts.map((a) => (
-                <Tabs.Tab
-                  key={a.Attempt}
-                  value={String(a.Attempt)}
-                  leftSection={<StatusIcon status={a.Status} />}
-                >
+                <Tabs.Tab key={a.id} value={a.id} leftSection={<StatusIcon status={a.status} />}>
                   <Text size="xs" fw={600}>
-                    Attempt #{a.Attempt}
+                    {inspectionAttemptLabel(a)}
                   </Text>
                 </Tabs.Tab>
               ))}
             </Tabs.List>
             {attempts.map((a) => (
-              <Tabs.Panel key={a.Attempt} value={String(a.Attempt)} p="md">
-                <Text size="xs" c="dimmed" mb="xs">
-                  {new Date(a.UpdatedAt).toLocaleString()}
-                </Text>
+              <Tabs.Panel key={a.id} value={a.id} p="md">
+                <Stack gap={2} mb="xs">
+                  <Text size="xs" c="dimmed">
+                    Generation {a.generation} · generation attempt #{a.attempt}
+                  </Text>
+                  <Text size="xs" c="dimmed">
+                    Updated {new Date(a.updated_at).toLocaleString()}
+                    {a.started_at ? ` · Started ${new Date(a.started_at).toLocaleString()}` : ""}
+                    {a.completed_at
+                      ? ` · Completed ${new Date(a.completed_at).toLocaleString()}`
+                      : ""}
+                    {inspectionAttemptDuration(a) !== null
+                      ? ` · ${formatDurationMs(inspectionAttemptDuration(a)!)}`
+                      : ""}
+                  </Text>
+                  {a.item_value !== null && (
+                    <Text size="xs" c="dimmed">
+                      Item: {a.item_value}
+                    </Text>
+                  )}
+                </Stack>
 
-                {a.Command && <LogTerminal label="Command" content={a.Command} />}
+                {a.command && <LogTerminal label="Command" content={a.command} />}
 
                 <LogTerminal
                   label="Output Log"
-                  content={a.Output || "No output for this attempt."}
-                  isFailed={a.Status === "failed"}
+                  content={a.output || "No output for this attempt."}
+                  isFailed={a.status === "failed"}
                 />
               </Tabs.Panel>
             ))}
           </Tabs>
         ) : (
           <Box p="md" style={{ backgroundColor: "var(--log-bg)" }}>
-            {task.Command && <LogTerminal label="Command" content={task.Command} />}
+            {current.command && <LogTerminal label="Command" content={current.command} />}
 
             <LogTerminal
               ref={logRef}
@@ -603,7 +459,7 @@ function TaskRow({
               content={
                 displayOutput || (isLive ? "Waiting for output..." : "No output generated yet.")
               }
-              isFailed={task.Status === "failed"}
+              isFailed={current.status === "failed"}
             />
           </Box>
         )}
@@ -617,10 +473,10 @@ function RunDetailsContent() {
   const id = searchParams.get("id");
   const taskParam = searchParams.get("task");
   const router = useRouter();
-  const [tasks, setTasks] = useState<RunTask[]>([]);
-  const [run, setRun] = useState<Run | null>(null);
-  const [dagDef, setDagDef] = useState<DagTaskDef[]>([]);
+  const [inspection, setInspection] = useState<RunInspection | null>(null);
   const [loading, setLoading] = useState(true);
+  const tasks = useMemo(() => (inspection ? inspectionCurrentTasks(inspection) : []), [inspection]);
+  const run = inspection?.run ?? null;
   // Lifted expanded state keyed by task instance ID — prevents poll-driven
   // re-renders from resetting the open/closed state of each TaskRow.
   const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>({});
@@ -633,72 +489,63 @@ function RunDetailsContent() {
   const [graphEdges, setGraphEdges, onEdgesChange] = useEdgesState<Edge>([]);
   // Track previous node IDs so we only re-layout when structure changes
   const prevNodeIdsRef = useRef<string>("");
-  // Use a ref for dagDef loading guard so it doesn't destabilize fetchTasks
-  const dagDefRef = useRef<DagTaskDef[]>([]);
-
-  const TERMINAL = new Set(["success", "failed", "cancelled"]);
+  const activeRunIDRef = useRef<string | null>(id);
 
   const fetchTasks = useCallback(async () => {
     if (!id) return;
+    const requestedID = id;
     try {
-      const needDagDef = dagDefRef.current.length === 0;
-      const [tasksRes, runRes, dagsRes] = await Promise.all([
-        apiFetch(`/api/runs/${id}/tasks`),
-        apiFetch(`/api/runs/${id}`),
-        needDagDef ? apiFetch("/api/dags") : Promise.resolve(null),
-      ]);
-      if (tasksRes.ok) {
-        const newTasks: RunTask[] = await tasksRes.json();
-        setTasks(newTasks);
-        // Auto-expand running/failed/retry tasks on first load (only when not
-        // already tracked in the map so we don't clobber user-toggled state).
-        // If a &task= param is present, force-expand that task instead.
-        setExpandedMap((prev) => {
-          const next = { ...prev };
-          for (const t of newTasks) {
-            if (!(t.ID in next)) {
-              if (taskParam && t.TaskID === taskParam) {
-                next[t.ID] = true;
-              } else if (!taskParam) {
-                next[t.ID] =
-                  t.Status === "running" ||
-                  t.Status === "queued" ||
-                  t.Status === "failed" ||
-                  t.Status === "up_for_retry";
-              } else {
-                next[t.ID] = false;
-              }
+      const nextInspection = await fetchRunInspection(id, apiFetch);
+      if (activeRunIDRef.current !== requestedID) return;
+      const nextTasks = inspectionCurrentTasks(nextInspection);
+      setInspection(nextInspection);
+      // Auto-expand running/failed/retry tasks on first load (only when not
+      // already tracked in the map so we don't clobber user-toggled state).
+      // If a &task= param is present, force-expand that task instead.
+      setExpandedMap((prev) => {
+        const next = { ...prev };
+        for (const task of nextTasks) {
+          const current = task.current_attempt;
+          if (!(current.id in next)) {
+            if (taskParam && task.id === taskParam) {
+              next[current.id] = true;
+            } else if (!taskParam) {
+              next[current.id] =
+                current.status === "running" ||
+                current.status === "queued" ||
+                current.status === "failed" ||
+                current.status === "up_for_retry";
+            } else {
+              next[current.id] = false;
             }
           }
-          return next;
-        });
-      }
-      let fetchedRun: Run | null = null;
-      if (runRes.ok) {
-        fetchedRun = await runRes.json();
-        setRun(fetchedRun);
-      }
-      // Fetch DAG definition once to get task dependency info
-      if (dagsRes && dagsRes.ok && fetchedRun) {
-        const allDags: DagDef[] = await dagsRes.json();
-        const dag = allDags.find((d) => d.ID === fetchedRun!.DAGID);
-        if (dag?.Tasks) {
-          dagDefRef.current = dag.Tasks;
-          setDagDef(dag.Tasks);
         }
-      }
+        return next;
+      });
     } catch (err) {
       console.error("Failed to fetch tasks", err);
     } finally {
-      setLoading(false);
+      if (activeRunIDRef.current === requestedID) setLoading(false);
     }
   }, [id, taskParam]);
+
+  useEffect(() => {
+    activeRunIDRef.current = id;
+    setInspection(null);
+    setExpandedMap({});
+    setCollapsedGroups({});
+    setGraphNodes([]);
+    setGraphEdges([]);
+    prevNodeIdsRef.current = "";
+    didScrollToTask.current = false;
+    setLoading(true);
+  }, [id, setGraphNodes, setGraphEdges]);
 
   // Poll for task/run updates. useVisibilityPoll pauses when the tab is hidden.
   // Skip the poll once the run reaches a terminal state.
   useVisibilityPoll(
     () => {
-      if (run && TERMINAL.has(run.Status)) return;
+      if (run && TERMINAL_STATUSES.has(run.status)) return;
       fetchTasks();
     },
     5000,
@@ -708,22 +555,59 @@ function RunDetailsContent() {
   // Scroll to the targeted task on first load when &task= is present
   useEffect(() => {
     if (!taskParam || didScrollToTask.current || tasks.length === 0) return;
-    const target = tasks.find((t) => t.TaskID === taskParam);
-    if (target && taskRefs.current[target.ID]) {
+    const target = tasks.find((task) => task.id === taskParam);
+    if (target && taskRefs.current[target.current_attempt.id]) {
       // Small delay to let the Collapse animation open
       setTimeout(() => {
-        taskRefs.current[target.ID]?.scrollIntoView({ behavior: "smooth", block: "start" });
+        taskRefs.current[target.current_attempt.id]?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
       }, 150);
       didScrollToTask.current = true;
     }
   }, [taskParam, tasks]);
 
-  // Build/update graph whenever tasks or DAG definition change.
+  // Build/update graph whenever the inspection read model changes.
   // Only re-layout (dagre) when the set of node IDs changes — on pure status
   // updates we just patch node data to avoid the graph jumping around.
+  const topology = useMemo(
+    () =>
+      inspection ? projectInspectionTopology(inspection) : { nodes: [], edges: [], stages: [] },
+    [inspection]
+  );
+
   useEffect(() => {
-    if (dagDef.length === 0 || tasks.length === 0) return;
-    const { nodes, edges } = buildRunGraph(dagDef, tasks);
+    const nodes: Node[] = topology.nodes.map((node) => ({
+      id: node.id,
+      type: "runNode",
+      data: {
+        label: node.id,
+        status: node.status ?? "pending",
+        duration: node.runtimeTask
+          ? inspectionAttemptDuration(node.runtimeTask.logicalTask.current_attempt)
+          : null,
+      },
+      position: { x: 0, y: 0 },
+    }));
+    const statusByID = new Map(topology.nodes.map((node) => [node.id, node.status]));
+    const edges: Edge[] = topology.edges.map((edge) => {
+      const sourceStatus = statusByID.get(edge.source);
+      const color =
+        sourceStatus === "success"
+          ? "var(--mantine-color-green-filled)"
+          : sourceStatus === "failed"
+            ? "var(--mantine-color-red-filled)"
+            : sourceStatus === "running"
+              ? "var(--mantine-color-blue-filled)"
+              : "var(--mantine-color-dimmed)";
+      return {
+        ...edge,
+        animated: sourceStatus === "running",
+        style: { stroke: color, strokeWidth: 1.5 },
+        markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
+      };
+    });
 
     const nodeIdStr = nodes
       .map((n) => n.id)
@@ -732,9 +616,8 @@ function RunDetailsContent() {
     if (nodeIdStr !== prevNodeIdsRef.current) {
       // Structure changed — full re-layout
       prevNodeIdsRef.current = nodeIdStr;
-      const laid = layoutRunGraph(nodes, edges);
-      setGraphNodes(laid.nodes);
-      setGraphEdges(laid.edges);
+      setGraphNodes(layoutTopologyStages(nodes, topology.stages, RUN_NODE_W, RUN_NODE_H));
+      setGraphEdges(edges);
     } else {
       // Only status/duration changed — patch data in place, keep positions
       setGraphNodes((prev) =>
@@ -745,13 +628,15 @@ function RunDetailsContent() {
       );
       setGraphEdges(edges);
     }
-  }, [dagDef, tasks, setGraphNodes, setGraphEdges]);
+  }, [topology, setGraphNodes, setGraphEdges]);
 
-  // Stable graph height — based on DAG definition task count (doesn't change)
+  // Stable graph height — based on definition count (doesn't change as statuses update).
   const graphHeight = useMemo(() => {
-    if (dagDef.length === 0) return 250;
-    return Math.max(200, Math.min(500, dagDef.length * 80));
-  }, [dagDef]);
+    const definitions =
+      inspection?.logical_tasks.filter((task) => task.kind === "definition").length ?? 0;
+    if (definitions === 0) return 250;
+    return Math.max(200, Math.min(500, definitions * 80));
+  }, [inspection]);
 
   // When the run first enters a terminal state, do one final fetch after a
   // short delay. This catches task output that is written to the DB in the
@@ -760,14 +645,15 @@ function RunDetailsContent() {
   const prevRunStatusRef = useRef<string | null>(null);
   useEffect(() => {
     if (!run) return;
-    const wasTerminal = prevRunStatusRef.current !== null && TERMINAL.has(prevRunStatusRef.current);
-    const isTerminal = TERMINAL.has(run.Status);
+    const wasTerminal =
+      prevRunStatusRef.current !== null && TERMINAL_STATUSES.has(prevRunStatusRef.current);
+    const isTerminal = TERMINAL_STATUSES.has(run.status);
     if (isTerminal && !wasTerminal) {
       const timer = setTimeout(fetchTasks, 500);
-      prevRunStatusRef.current = run.Status;
+      prevRunStatusRef.current = run.status;
       return () => clearTimeout(timer);
     }
-    prevRunStatusRef.current = run.Status;
+    prevRunStatusRef.current = run.status;
   }, [run, fetchTasks]);
 
   const handleRetry = async (taskID: string) => {
@@ -830,43 +716,41 @@ function RunDetailsContent() {
 
   // Compute elapsed time — use LiveElapsed component for running runs
   const staticElapsed = run
-    ? run.CompletedAt
-      ? formatElapsed(
-          Math.max(
-            1,
-            Math.floor(
-              (new Date(run.CompletedAt).getTime() - new Date(run.CreatedAt).getTime()) / 1000
-            )
-          )
-        )
+    ? run.duration_ms !== null
+      ? formatElapsed(Math.max(1, Math.floor(run.duration_ms / 1000)))
       : null
     : null;
 
   // Update the URL &task= param when a task is expanded/collapsed
-  const toggleTask = (task: RunTask) => {
-    const willExpand = !expandedMap[task.ID];
-    setExpandedMap((prev) => ({ ...prev, [task.ID]: willExpand }));
-    const params = new URLSearchParams(window.location.search);
-    if (willExpand) {
-      params.set("task", task.TaskID);
-    } else if (params.get("task") === task.TaskID) {
-      params.delete("task");
-    }
-    router.replace(`/runs?${params.toString()}`, { scroll: false });
-  };
+  const toggleTask = useCallback(
+    (task: InspectionCurrentTask) => {
+      const attemptID = task.current_attempt.id;
+      const willExpand = !expandedMap[attemptID];
+      setExpandedMap((prev) => ({ ...prev, [attemptID]: willExpand }));
+      const params = new URLSearchParams(window.location.search);
+      if (willExpand) {
+        params.set("task", task.id);
+      } else if (params.get("task") === task.id) {
+        params.delete("task");
+      }
+      router.replace(`/runs?${params.toString()}`, { scroll: false });
+    },
+    [expandedMap, router]
+  );
 
   // Handle clicking a node in the graph — expand + scroll to that task
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      const task = tasks.find((t) => t.TaskID === node.id);
+      const task = tasks.find((candidate) => candidate.id === node.id);
       if (!task) return;
+      const attemptID = task.current_attempt.id;
       // Expand if not already
-      if (!expandedMap[task.ID]) {
+      if (!expandedMap[attemptID]) {
         toggleTask(task);
       }
       // Scroll to it
       setTimeout(() => {
-        taskRefs.current[task.ID]?.scrollIntoView({ behavior: "smooth", block: "start" });
+        taskRefs.current[attemptID]?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 150);
     },
     [tasks, expandedMap, toggleTask]
@@ -875,96 +759,8 @@ function RunDetailsContent() {
   // Collapsed state for map groups (keyed by parent taskID)
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
-  // Build structured task segments: groups tasks by DAG definition order,
-  // nests map children under their parent, and computes dependency depth
-  // for stage dividers.
-  type TaskSegment =
-    | { kind: "single"; task: RunTask; depth: number }
-    | { kind: "map-group"; parent: RunTask; children: RunTask[]; depth: number };
-
-  const taskSegments = useMemo((): TaskSegment[] => {
-    if (dagDef.length === 0) {
-      return tasks.map((t) => ({ kind: "single" as const, task: t, depth: 0 }));
-    }
-    // Build a position map from the DAG definition order.
-    const defOrder = new Map<string, number>();
-    dagDef.forEach((d, i) => defOrder.set(d.ID, i));
-
-    // Compute dependency depth per definition task (longest path from root).
-    const dagMap = new Map<string, DagTaskDef>();
-    dagDef.forEach((d) => dagMap.set(d.ID, d));
-    const depthCache = new Map<string, number>();
-    function getDepth(taskId: string): number {
-      if (depthCache.has(taskId)) return depthCache.get(taskId)!;
-      const def = dagMap.get(taskId);
-      if (!def || !def.DependsOn || def.DependsOn.length === 0) {
-        depthCache.set(taskId, 0);
-        return 0;
-      }
-      const d = 1 + Math.max(...def.DependsOn.map(getDepth));
-      depthCache.set(taskId, d);
-      return d;
-    }
-    dagDef.forEach((d) => getDepth(d.ID));
-
-    // Sort tasks by definition order, parent before children, children by index
-    const sorted = [...tasks].sort((a, b) => {
-      const baseA = baseTaskID(a.TaskID);
-      const baseB = baseTaskID(b.TaskID);
-      const posA = defOrder.get(baseA) ?? 999;
-      const posB = defOrder.get(baseB) ?? 999;
-      if (posA !== posB) return posA - posB;
-      const isChildA = baseA !== a.TaskID;
-      const isChildB = baseB !== b.TaskID;
-      if (!isChildA && isChildB) return -1;
-      if (isChildA && !isChildB) return 1;
-      const idxA = parseInt(a.TaskID.match(/\[(\d+)\]/)?.[1] ?? "0", 10);
-      const idxB = parseInt(b.TaskID.match(/\[(\d+)\]/)?.[1] ?? "0", 10);
-      return idxA - idxB;
-    });
-
-    // Group into segments
-    const segments: TaskSegment[] = [];
-    let i = 0;
-    while (i < sorted.length) {
-      const task = sorted[i];
-      const base = baseTaskID(task.TaskID);
-      const depth = depthCache.get(base) ?? 0;
-      const isParent = base === task.TaskID;
-
-      // Check if this is a map parent with children following
-      if (isParent) {
-        const children: RunTask[] = [];
-        let j = i + 1;
-        while (
-          j < sorted.length &&
-          baseTaskID(sorted[j].TaskID) === base &&
-          sorted[j].TaskID !== base
-        ) {
-          children.push(sorted[j]);
-          j++;
-        }
-        if (children.length > 0) {
-          segments.push({ kind: "map-group", parent: task, children, depth });
-          i = j;
-          continue;
-        }
-      }
-      segments.push({ kind: "single", task, depth });
-      i++;
-    }
-    return segments;
-  }, [tasks, dagDef]);
-
-  const successCount = tasks.filter((t) => t.Status === "success").length;
-  const failedCount = tasks.filter((t) => t.Status === "failed").length;
-  const runningCount = tasks.filter((t) => t.Status === "running").length;
-  const retryCount = tasks.filter((t) => t.Status === "up_for_retry").length;
-  const totalTasks = tasks.length;
-  const completedTasks = tasks.filter((t) =>
-    ["success", "failed", "cancelled"].includes(t.Status)
-  ).length;
-  const progressPercent = totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0;
+  const taskSegments = useMemo(() => segmentInspectionTasks(tasks, topology), [tasks, topology]);
+  const taskSummary = useMemo(() => summarizeInspectionTasks(tasks), [tasks]);
 
   if (!id) {
     return (
@@ -982,17 +778,17 @@ function RunDetailsContent() {
         title={id as string}
         showBack
         backTo="/runs"
-        subtitle={run ? `Started at ${new Date(run.CreatedAt).toLocaleString()}` : undefined}
+        subtitle={run ? `Started at ${new Date(run.created_at).toLocaleString()}` : undefined}
         badge={
           run ? (
-            <Badge size="sm" color={getStatusColor(run.Status)} variant="light" radius="xl">
-              {getStatusLabel(run.Status)}
+            <Badge size="sm" color={getStatusColor(run.status)} variant="light" radius="xl">
+              {getStatusLabel(run.status)}
             </Badge>
           ) : undefined
         }
         actions={
           <Group gap="sm">
-            {run && run.Status === "running" && (
+            {run && run.status === "running" && (
               <Button
                 variant="light"
                 color="red"
@@ -1033,9 +829,9 @@ function RunDetailsContent() {
                     textDecoration: "underline",
                     textUnderlineOffset: "3px",
                   }}
-                  onClick={() => router.push(`/dags?id=${run.DAGID}`)}
+                  onClick={() => router.push(`/dags?id=${run.dag_id}`)}
                 >
-                  {run.DAGID}
+                  {run.dag_id}
                 </Text>
               </div>
               <div>
@@ -1043,9 +839,9 @@ function RunDetailsContent() {
                   Trigger
                 </Text>
                 <Text fw={600} size="sm" mt={4}>
-                  {run.TriggerType === "manual"
+                  {run.trigger_type === "manual"
                     ? "Manual"
-                    : run.TriggerType === "scheduled"
+                    : run.trigger_type === "scheduled"
                       ? "Scheduled"
                       : "Triggered"}
                 </Text>
@@ -1055,7 +851,7 @@ function RunDetailsContent() {
                   Started At
                 </Text>
                 <Text fw={600} size="sm" mt={4}>
-                  {new Date(run.CreatedAt).toLocaleString()}
+                  {new Date(run.created_at).toLocaleString()}
                 </Text>
               </div>
               <div>
@@ -1063,8 +859,8 @@ function RunDetailsContent() {
                   Duration
                 </Text>
                 <Box mt={4}>
-                  {run.Status === "running" ? (
-                    <LiveElapsed startedAt={run.CreatedAt} />
+                  {run.status === "running" ? (
+                    <LiveElapsed startedAt={run.created_at} />
                   ) : (
                     <Text fw={600} size="sm">
                       {staticElapsed ?? "—"}
@@ -1077,24 +873,24 @@ function RunDetailsContent() {
                   Tasks
                 </Text>
                 <Group gap={4} mt={4}>
-                  {successCount > 0 && (
+                  {taskSummary.success > 0 && (
                     <Badge size="xs" color="green" variant="light">
-                      {successCount} ok
+                      {taskSummary.success} ok
                     </Badge>
                   )}
-                  {failedCount > 0 && (
+                  {taskSummary.failed > 0 && (
                     <Badge size="xs" color="red" variant="light">
-                      {failedCount} failed
+                      {taskSummary.failed} failed
                     </Badge>
                   )}
-                  {runningCount > 0 && (
+                  {taskSummary.running > 0 && (
                     <Badge size="xs" color="blue" variant="light">
-                      {runningCount} running
+                      {taskSummary.running} running
                     </Badge>
                   )}
-                  {retryCount > 0 && (
+                  {taskSummary.retry > 0 && (
                     <Badge size="xs" color="orange" variant="light">
-                      {retryCount} retry
+                      {taskSummary.retry} retry
                     </Badge>
                   )}
                   {tasks.length === 0 && (
@@ -1106,17 +902,17 @@ function RunDetailsContent() {
               </div>
             </Group>
             {/* Progress bar for running runs */}
-            {run.Status === "running" && totalTasks > 0 && (
+            {run.status === "running" && taskSummary.total > 0 && (
               <Box mt="sm">
                 <Group justify="space-between" mb={4}>
                   <Text size="xs" c="dimmed">
-                    {completedTasks} of {totalTasks} tasks complete
+                    {taskSummary.completed} of {taskSummary.total} tasks complete
                   </Text>
                   <Text size="xs" c="dimmed">
-                    {Math.round(progressPercent)}%
+                    {Math.round(taskSummary.progress_percent)}%
                   </Text>
                 </Group>
-                <Progress value={progressPercent} color="blue" size="sm" radius="xl" />
+                <Progress value={taskSummary.progress_percent} color="blue" size="sm" radius="xl" />
               </Box>
             )}
           </Card>
@@ -1188,8 +984,9 @@ function RunDetailsContent() {
             const showDivider = idx > 0 && seg.depth !== prevDepth;
 
             if (seg.kind === "single") {
+              const attemptID = seg.task.current_attempt.id;
               return (
-                <Box key={seg.task.ID}>
+                <Box key={attemptID}>
                   {showDivider && (
                     <Divider
                       my="sm"
@@ -1201,12 +998,12 @@ function RunDetailsContent() {
                     <TaskRow
                       task={seg.task}
                       runID={id}
-                      expanded={!!expandedMap[seg.task.ID]}
+                      expanded={!!expandedMap[attemptID]}
                       onToggleExpand={() => toggleTask(seg.task)}
                       onRetry={handleRetry}
                       onKill={handleKillTask}
                       taskRef={(el) => {
-                        taskRefs.current[seg.task.ID] = el;
+                        taskRefs.current[attemptID] = el;
                       }}
                     />
                   </Box>
@@ -1216,13 +1013,20 @@ function RunDetailsContent() {
 
             // Map group: parent with collapsible children
             const { parent, children } = seg;
-            const isGroupCollapsed = collapsedGroups[parent.TaskID] ?? true;
-            const childSuccess = children.filter((c) => c.Status === "success").length;
-            const childFailed = children.filter((c) => c.Status === "failed").length;
-            const childRunning = children.filter((c) => c.Status === "running").length;
+            const parentAttemptID = parent.current_attempt.id;
+            const isGroupCollapsed = collapsedGroups[parent.id] ?? true;
+            const childSuccess = children.filter(
+              (child) => child.current_attempt.status === "success"
+            ).length;
+            const childFailed = children.filter(
+              (child) => child.current_attempt.status === "failed"
+            ).length;
+            const childRunning = children.filter(
+              (child) => child.current_attempt.status === "running"
+            ).length;
 
             return (
-              <Box key={parent.ID}>
+              <Box key={parentAttemptID}>
                 {showDivider && (
                   <Divider
                     my="sm"
@@ -1244,12 +1048,12 @@ function RunDetailsContent() {
                   <TaskRow
                     task={parent}
                     runID={id}
-                    expanded={!!expandedMap[parent.ID]}
+                    expanded={!!expandedMap[parentAttemptID]}
                     onToggleExpand={() => toggleTask(parent)}
                     onRetry={handleRetry}
                     onKill={handleKillTask}
                     taskRef={(el) => {
-                      taskRefs.current[parent.ID] = el;
+                      taskRefs.current[parentAttemptID] = el;
                     }}
                     borderless
                   />
@@ -1267,7 +1071,7 @@ function RunDetailsContent() {
                     onClick={() =>
                       setCollapsedGroups((prev) => ({
                         ...prev,
-                        [parent.TaskID]: !isGroupCollapsed,
+                        [parent.id]: !isGroupCollapsed,
                       }))
                     }
                   >
@@ -1308,20 +1112,23 @@ function RunDetailsContent() {
                       }}
                     >
                       <Stack gap={4}>
-                        {children.map((child) => (
-                          <TaskRow
-                            key={child.ID}
-                            task={child}
-                            runID={id}
-                            expanded={!!expandedMap[child.ID]}
-                            onToggleExpand={() => toggleTask(child)}
-                            onRetry={handleRetry}
-                            onKill={handleKillTask}
-                            taskRef={(el) => {
-                              taskRefs.current[child.ID] = el;
-                            }}
-                          />
-                        ))}
+                        {children.map((child) => {
+                          const childAttemptID = child.current_attempt.id;
+                          return (
+                            <TaskRow
+                              key={childAttemptID}
+                              task={child}
+                              runID={id}
+                              expanded={!!expandedMap[childAttemptID]}
+                              onToggleExpand={() => toggleTask(child)}
+                              onRetry={handleRetry}
+                              onKill={handleKillTask}
+                              taskRef={(el) => {
+                                taskRefs.current[childAttemptID] = el;
+                              }}
+                            />
+                          );
+                        })}
                       </Stack>
                     </Box>
                   </Collapse>

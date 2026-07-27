@@ -183,6 +183,9 @@ func TestSchedulerRetryTask(t *testing.T) {
 	defer store.Close()
 
 	sched := NewScheduler(store)
+	sched.dags["some_dag"] = &models.DAGDef{
+		ID: "some_dag", Tasks: []models.TaskDef{{ID: "t2", Type: "command"}},
+	}
 
 	now := time.Now()
 	runID := "run_retry_test"
