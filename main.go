@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -20,6 +22,7 @@ import (
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
 	"github.com/alephmelo/nagare/internal/scheduler"
+	"github.com/alephmelo/nagare/internal/tasklifecycle"
 	"github.com/alephmelo/nagare/internal/worker"
 )
 
@@ -52,12 +55,14 @@ func main() {
 		return
 	}
 
-	runMaster(*port, *masterAddr, *dbPath, *dagsDir, *token, *apiKey)
+	if err := runMaster(*port, *masterAddr, *dbPath, *dagsDir, *token, *apiKey); err != nil {
+		log.Fatalf("Master stopped with error: %v", err)
+	}
 }
 
 // runMaster starts the full Nagare master node: scheduler + local worker pool +
 // optional cluster coordinator for remote workers + HTTP API.
-func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
+func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) error {
 	log.Println("Booting up Nagare: Lean Airflow in Go")
 
 	// Ensure dags directory exists.
@@ -89,7 +94,8 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
 	defer store.Close()
 
 	// 2. Initialize scheduler and load DAGs.
-	sched := scheduler.NewScheduler(store)
+	lifecycle := tasklifecycle.New(store)
+	sched := scheduler.NewSchedulerWithLifecycle(store, lifecycle)
 	if err := sched.LoadDAGs(dagsDir); err != nil {
 		store.Close()                              //nolint:errcheck // error on close after fatal is non-actionable
 		log.Fatalf("Failed to load DAGs: %v", err) //nolint:gocritic // store.Close() called explicitly above
@@ -103,11 +109,11 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
 	// 3. Initialize log broker and local worker pool.
 	broker := logbroker.NewBroker()
 	sched.SetBroker(broker)
-	pool := worker.NewPool(store, getDAG, sched.TriggerDAG, cfg.WorkerPools, broker)
+	pool := worker.NewPoolWithLifecycle(store, lifecycle, getDAG, sched.TriggerDAG, cfg.WorkerPools, broker)
 
 	// 4. Initialize cluster coordinator (always-on; only used when remote
 	//    workers connect — zero overhead when no workers register).
-	coord := cluster.NewCoordinator(store, getDAG, 60*time.Second, token)
+	coord := cluster.NewCoordinatorWithLifecycle(store, lifecycle, getDAG, 60*time.Second, token)
 	coord.SetBroker(broker)
 
 	// 5. Initialize autoscaler when enabled.
@@ -138,13 +144,13 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 7. Reset any tasks left running/queued by a previous process that was killed
-	//    or crashed. Those processes are dead, so the tasks can never complete —
-	//    mark them failed so runs surface as failed in the UI and can be re-triggered.
-	if n, err := store.ResetStaleTasks(); err != nil {
-		log.Printf("Warning: failed to reset stale tasks: %v", err)
+	// 7. Recover persisted orchestration before workers can claim queued work.
+	//    Map setup remains replayable; stale executor-owned running attempts are
+	//    completed through the lifecycle so their configured retry policy wins.
+	if n, err := recoverStartupState(store, lifecycle, sched); err != nil {
+		log.Printf("Warning: startup recovery encountered errors: %v", err)
 	} else if n > 0 {
-		log.Printf("Startup: reset %d stale task(s) from previous run to 'failed'", n)
+		log.Printf("Startup: reconciled %d stale running task attempt(s)", n)
 	}
 
 	// 8. Start local workers, autoscaler, and API server.
@@ -199,9 +205,11 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
 		case <-sigChan:
 			log.Println("Received shutdown signal, terminating workers...")
 			cancel()
-			pool.Stop()
+			if err := pool.Stop(); err != nil {
+				return fmt.Errorf("stop local worker pool: %w", err)
+			}
 			log.Println("Nagare shut down successfully")
-			return
+			return nil
 
 		case <-ticker.C:
 			if err := sched.LoadDAGs(dagsDir); err != nil {
@@ -215,6 +223,69 @@ func runMaster(addr, masterAddr, dbPath, dagsDir, token, apiKeyFlag string) {
 			}
 		}
 	}
+}
+
+func recoverStartupState(
+	store *models.Store,
+	lifecycle *tasklifecycle.Lifecycle,
+	sched *scheduler.Scheduler,
+) (int, error) {
+	running, err := store.GetTasksByStatus(models.TaskRunning)
+	if err != nil {
+		return 0, fmt.Errorf("load stale running attempts: %w", err)
+	}
+
+	reconciled := 0
+	var recoveryErrs []error
+	for _, attempt := range running {
+		run, runErr := store.GetDagRun(attempt.RunID)
+		if runErr != nil {
+			recoveryErrs = append(recoveryErrs,
+				fmt.Errorf("load run for stale attempt %s: %w", attempt.ID, runErr))
+			continue
+		}
+		dag := sched.GetDAGs()[run.DAGID]
+		var taskDef *models.TaskDef
+		if dag != nil {
+			taskDef = dag.FindTaskForInstance(attempt.TaskID)
+		}
+		if taskDef != nil && taskDef.Type == "map" && taskDef.ID == attempt.TaskID {
+			setup, setupErr := store.GetMapSetup(attempt.ID)
+			if setupErr == nil && attempt.StartedAt != nil && attempt.StartedAt.Equal(setup.StartedAt) {
+				// Only a durable binding with the same lifecycle watermark
+				// proves scheduler ownership. It is replayed below.
+				continue
+			}
+			if setupErr != nil && !errors.Is(setupErr, sql.ErrNoRows) {
+				recoveryErrs = append(recoveryErrs,
+					fmt.Errorf("load map setup for stale attempt %s: %w", attempt.ID, setupErr))
+				continue
+			}
+		}
+
+		retries := 0
+		if taskDef != nil {
+			retries = taskDef.Retries
+		}
+		disposition, completeErr := lifecycle.Complete(tasklifecycle.Completion{
+			AttemptID:   attempt.ID,
+			Output:      "task interrupted by master restart",
+			Retries:     retries,
+			CompletedAt: time.Now().UTC(),
+		})
+		if completeErr != nil {
+			recoveryErrs = append(recoveryErrs,
+				fmt.Errorf("complete stale attempt %s: %w", attempt.ID, completeErr))
+			continue
+		}
+		if disposition == tasklifecycle.Applied {
+			reconciled++
+		}
+	}
+	if err := sched.PromotePendingTasks(); err != nil {
+		recoveryErrs = append(recoveryErrs, fmt.Errorf("replay scheduler setup: %w", err))
+	}
+	return reconciled, errors.Join(recoveryErrs...)
 }
 
 // runWorker starts a worker-only node that registers with and polls a master.

@@ -38,7 +38,7 @@ type TaskAssignment struct {
 //
 // Returns an error if the task definition cannot be found in the DAG.
 func PrepareTaskAssignment(run *models.DagRun, ti models.TaskInstance, dag *models.DAGDef) (*TaskAssignment, error) {
-	taskDef := dag.FindTask(models.BaseTaskID(ti.TaskID))
+	taskDef := dag.FindTaskForInstance(ti.TaskID)
 	if taskDef == nil {
 		return nil, fmt.Errorf("task definition %q not found in DAG %q", ti.TaskID, dag.ID)
 	}

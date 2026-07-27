@@ -4,8 +4,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -22,6 +24,7 @@ import (
 	"github.com/alephmelo/nagare/internal/cluster"
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
+	"github.com/alephmelo/nagare/internal/runinspection"
 	"github.com/alephmelo/nagare/internal/scheduler"
 	"github.com/alephmelo/nagare/internal/worker"
 	"github.com/itchyny/gojq"
@@ -163,6 +166,15 @@ type enrichedTask struct {
 	models.TaskInstance
 	Command string              `json:"Command"`
 	Metrics *models.TaskMetrics `json:"Metrics,omitempty"`
+}
+
+type inspectionDefinitions struct {
+	scheduler *scheduler.Scheduler
+}
+
+func (d inspectionDefinitions) DAG(id string) (*models.DAGDef, bool) {
+	dag, ok := d.scheduler.GetDAGs()[id]
+	return dag, ok
 }
 
 func (s *Server) handleGetDAGs(w http.ResponseWriter, r *http.Request) {
@@ -397,6 +409,27 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, run)
 }
 
+// handleGetRunInspection exposes the cohesive lifecycle read used by the run
+// page. Existing run/task endpoints remain as compatibility contracts.
+func (s *Server) handleGetRunInspection(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 5 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	query := runinspection.NewQuery(s.store, inspectionDefinitions{scheduler: s.scheduler})
+	inspection, err := query.Inspect(r.Context(), parts[3])
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, inspection)
+}
+
 func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 	// Simple path parameter extraction (e.g. /api/runs/run_1/tasks)
 	parts := strings.Split(r.URL.Path, "/")
@@ -423,12 +456,19 @@ func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
 
 	var enriched []enrichedTask
 	for _, t := range tasks {
-		cmd := s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue)
+		publicID := scheduler.PublicTaskID(t.TaskID)
+		resolvedID, resolveErr := s.scheduler.ResolveTaskID(runID, publicID)
+		if resolveErr == nil && resolvedID != t.TaskID {
+			continue
+		}
+		storageTask := t
 		m, _ := s.store.GetTaskMetrics(t.ID)
+		t = scheduler.ProjectTaskInstance(t)
+		cmd := s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue)
 		enriched = append(enriched, enrichedTask{
 			TaskInstance: t,
 			Command:      cmd,
-			Metrics:      m,
+			Metrics:      projectTaskMetrics(m, storageTask),
 		})
 	}
 
@@ -444,8 +484,13 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 	}
 	runID := parts[3]
 	taskID := parts[5]
+	storageTaskID, err := s.scheduler.ResolveTaskID(runID, taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	attempts, err := s.store.GetTaskAttempts(runID, taskID)
+	attempts, err := s.store.GetTaskAttempts(runID, storageTaskID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -462,6 +507,7 @@ func (s *Server) handleGetTaskAttempts(w http.ResponseWriter, r *http.Request) {
 
 	var enriched []enrichedTask
 	for _, t := range attempts {
+		t = scheduler.ProjectTaskInstance(t)
 		enriched = append(enriched, enrichedTask{
 			TaskInstance: t,
 			Command:      s.resolveTaskCommand(dag, ok, t.TaskID, t.ItemValue),
@@ -478,8 +524,11 @@ func (s *Server) resolveTaskCommand(dag *models.DAGDef, dagFound bool, taskID st
 	if !dagFound || dag == nil {
 		return ""
 	}
-	baseID := models.BaseTaskID(taskID)
-	if td := dag.FindTask(baseID); td != nil {
+	td := dag.FindTask(taskID)
+	if td == nil {
+		td = dag.FindTask(models.BaseTaskID(taskID))
+	}
+	if td != nil {
 		cmd := td.Command
 		if itemValue != nil {
 			cmd = strings.ReplaceAll(cmd, "{{item}}", *itemValue)
@@ -532,10 +581,10 @@ func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// /api/runs/{run_id}/tasks/{task_id}/kill
-	_ = parts[3] // runID
+	runID := parts[3]
 	taskID := parts[5]
 
-	err := s.pool.KillTask(taskID)
+	err := s.scheduler.CancelTask(runID, taskID, s.pool)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -682,12 +731,31 @@ func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
+	runID := parts[3]
 	taskInstanceID := parts[5]
 
-	inst, err := s.store.GetTaskInstance(taskInstanceID)
-	if err != nil {
-		http.Error(w, "Task not found", http.StatusNotFound)
-		return
+	var inst *models.TaskInstance
+	var err error
+	if r.URL.Query().Get("exact") == "true" {
+		inst, err = s.store.GetTaskInstance(taskInstanceID)
+		if err != nil || inst.RunID != runID {
+			http.Error(w, "Task not found", http.StatusNotFound)
+			return
+		}
+	} else {
+		if s.scheduler != nil {
+			resolvedID, resolveErr := s.scheduler.ResolveTaskInstanceID(runID, taskInstanceID)
+			if resolveErr != nil {
+				http.Error(w, "Task not found", http.StatusNotFound)
+				return
+			}
+			taskInstanceID = resolvedID
+		}
+		inst, err = s.store.GetTaskInstance(taskInstanceID)
+		if err != nil {
+			http.Error(w, "Task not found", http.StatusNotFound)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -744,11 +812,35 @@ func (s *Server) handleGetTaskMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskInstanceID := parts[4]
+	if s.scheduler != nil {
+		runIDs, resolveErr := s.store.GetRunIDsForTaskInstanceID(taskInstanceID)
+		if resolveErr != nil {
+			http.Error(w, "Metrics not found", http.StatusNotFound)
+			return
+		}
+		resolved := false
+		for _, runID := range runIDs {
+			storageID, err := s.scheduler.ResolveTaskInstanceID(runID, taskInstanceID)
+			if err == nil {
+				taskInstanceID = storageID
+				resolved = true
+				break
+			}
+		}
+		if len(runIDs) > 0 && !resolved {
+			http.Error(w, "Metrics not found", http.StatusNotFound)
+			return
+		}
+	}
 
 	m, err := s.store.GetTaskMetrics(taskInstanceID)
 	if err != nil {
 		http.Error(w, "Metrics not found", http.StatusNotFound)
 		return
+	}
+	task, taskErr := s.store.GetTaskInstance(m.TaskInstanceID)
+	if taskErr == nil {
+		m = projectTaskMetrics(m, *task)
 	}
 	writeJSON(w, m)
 }
@@ -769,7 +861,21 @@ func (s *Server) handleGetRunMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, metrics)
+	projected := make([]models.TaskMetrics, 0, len(metrics))
+	for i := range metrics {
+		publicID := scheduler.PublicTaskID(metrics[i].TaskID)
+		if s.scheduler != nil {
+			resolvedID, resolveErr := s.scheduler.ResolveTaskID(runID, publicID)
+			if resolveErr == nil && resolvedID != metrics[i].TaskID {
+				continue
+			}
+		}
+		task := models.TaskInstance{
+			ID: metrics[i].TaskInstanceID, RunID: metrics[i].RunID, TaskID: metrics[i].TaskID,
+		}
+		projected = append(projected, *projectTaskMetrics(&metrics[i], task))
+	}
+	writeJSON(w, projected)
 }
 
 // handleGetDAGMetrics returns recent task metrics and aggregate stats for a DAG.
@@ -797,6 +903,7 @@ func (s *Server) handleGetDAGMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	series = s.projectCurrentTimeSeries(series)
 	response := map[string]interface{}{
 		"aggregate":   agg,
 		"time_series": series,
@@ -828,7 +935,37 @@ func (s *Server) handleGetMetricsTimeSeries(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	series = s.projectCurrentTimeSeries(series)
 	writeJSON(w, series)
+}
+
+func projectTaskMetrics(metrics *models.TaskMetrics, storageTask models.TaskInstance) *models.TaskMetrics {
+	if metrics == nil {
+		return nil
+	}
+	projected := *metrics
+	identity := storageTask
+	identity.ID = metrics.TaskInstanceID
+	publicTask := scheduler.ProjectTaskInstance(identity)
+	projected.TaskInstanceID = publicTask.ID
+	projected.TaskID = scheduler.PublicTaskID(metrics.TaskID)
+	return &projected
+}
+
+func (s *Server) projectCurrentTimeSeries(series []models.TimeSeriesPoint) []models.TimeSeriesPoint {
+	projected := make([]models.TimeSeriesPoint, 0, len(series))
+	for _, point := range series {
+		publicID := scheduler.PublicTaskID(point.TaskID)
+		if s.scheduler != nil {
+			resolvedID, resolveErr := s.scheduler.ResolveTaskID(point.RunID, publicID)
+			if resolveErr == nil && resolvedID != point.TaskID {
+				continue
+			}
+		}
+		point.TaskID = publicID
+		projected = append(projected, point)
+	}
+	return projected
 }
 
 // handleAutoscalerStatus returns a snapshot of the autoscaler's current state.
@@ -903,15 +1040,10 @@ func parseLimit(r *http.Request) int {
 	return 500
 }
 
-// Start launches the HTTP server
-func (s *Server) Start(addr string, frontendFS fs.FS) error {
-	if len(s.allowedOrigins) == 0 {
-		log.Println("WARNING: cors.allowed_origins is not configured — CORS is open to all origins (*). Set allowed_origins in nagare.yaml for production use.")
-	}
-	if s.apiKey == "" {
-		log.Println("WARNING: api_key is not configured — all API routes are unauthenticated. Set api_key in nagare.yaml or use --api-key for production use.")
-	}
-
+// routes builds the production route tree. Keeping construction separate from
+// listening lets route registration and middleware composition be tested
+// without opening a real socket.
+func (s *Server) routes(frontendFS fs.FS) http.Handler {
 	// auth composes apiKeyMiddleware + corsMiddleware.
 	// Applied to every /api/* route except /api/webhooks/ (which uses HMAC).
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
@@ -935,6 +1067,7 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	// Run endpoints
 	mux.HandleFunc("GET /api/runs", auth(s.handleGetRuns))
 	mux.HandleFunc("GET /api/runs/{id}", auth(s.handleGetRun))
+	mux.HandleFunc("GET /api/runs/{runID}/inspection", auth(s.handleGetRunInspection))
 	mux.HandleFunc("GET /api/runs/{runID}/tasks", auth(s.handleGetRunTasks))
 	mux.HandleFunc("GET /api/runs/{runID}/tasks/{taskID}/logs", auth(s.handleTaskLogs))
 	mux.HandleFunc("GET /api/runs/{runID}/tasks/{taskID}/attempts", auth(s.handleGetTaskAttempts))
@@ -964,10 +1097,22 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 		mux.Handle("/api/workers/", s.coordinator.Handler())
 	}
 
+	return mux
+}
+
+// Start launches the HTTP server
+func (s *Server) Start(addr string, frontendFS fs.FS) error {
+	if len(s.allowedOrigins) == 0 {
+		log.Println("WARNING: cors.allowed_origins is not configured — CORS is open to all origins (*). Set allowed_origins in nagare.yaml for production use.")
+	}
+	if s.apiKey == "" {
+		log.Println("WARNING: api_key is not configured — all API routes are unauthenticated. Set api_key in nagare.yaml or use --api-key for production use.")
+	}
+
 	log.Printf("Starting Nagare API on %s", addr)
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: mux,
+		Handler: s.routes(frontendFS),
 		// Prevent slow-loris / header-flooding attacks and stale keepalive
 		// connections from exhausting goroutines. WriteTimeout is intentionally
 		// absent so that long-lived SSE streams (handleTaskLogs) are not killed.

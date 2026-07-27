@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,67 @@ import (
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
 )
+
+func TestWorkerPoolExecutesLegitimateBracketTaskID(t *testing.T) {
+	store, err := models.NewStore(filepath.Join(t.TempDir(), "bracket-worker.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	dag := &models.DAGDef{
+		ID: "bracket-dag",
+		Tasks: []models.TaskDef{{
+			ID: "foo[bar]", Command: "printf bracket-ok",
+		}},
+	}
+	getDAG := func(id string) (*models.DAGDef, bool) {
+		return dag, id == dag.ID
+	}
+	pool := NewPool(
+		store,
+		getDAG,
+		func(string, string, map[string]string) (*models.DagRun, error) { return nil, nil },
+		map[string]int{"default": 1},
+		logbroker.NewBroker(),
+	)
+	now := time.Now().UTC()
+	if err := store.CreateDagRun(&models.DagRun{
+		ID: "run", DAGID: dag.ID, Status: models.RunRunning,
+		ExecDate: now, TriggerType: "manual", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateDagRun: %v", err)
+	}
+	if err := store.CreateTaskInstance(&models.TaskInstance{
+		ID: "attempt", RunID: "run", TaskID: "foo[bar]",
+		Status: models.TaskQueued, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateTaskInstance: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+	if err := pool.Dispatch(); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		attempt, err := store.GetTaskInstance("attempt")
+		if err != nil {
+			t.Fatalf("GetTaskInstance: %v", err)
+		}
+		if attempt.Status == models.TaskSuccess {
+			if !strings.Contains(attempt.Output, "bracket-ok") {
+				t.Fatalf("output = %q, want bracket-ok", attempt.Output)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	attempt, _ := store.GetTaskInstance("attempt")
+	t.Fatalf("bracket task status = %s, output = %q", attempt.Status, attempt.Output)
+}
 
 func TestWorkerPoolExecution(t *testing.T) {
 	store, _ := models.NewStore("file::memory:?cache=shared")

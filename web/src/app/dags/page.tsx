@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { apiFetch } from "../../lib/apiFetch";
 import { useVisibilityPoll } from "../../lib/useVisibilityPoll";
@@ -40,8 +40,9 @@ import {
   Handle,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import dagre from "dagre";
 import { notifications } from "@mantine/notifications";
+import { layoutTopologyStages } from "../../components/executionTopologyLayout";
+import { projectExecutionTopology } from "../../lib/executionTopology";
 import SyntaxHighlighter from "react-syntax-highlighter";
 import { atomOneDark, atomOneLight } from "react-syntax-highlighter/dist/esm/styles/hljs";
 
@@ -51,6 +52,7 @@ interface TaskDef {
   Type: string;
   Command: string;
   DependsOn: string[];
+  MapOver?: string;
 }
 
 interface Dag {
@@ -65,39 +67,6 @@ interface Dag {
 
 const nodeWidth = 280;
 const nodeHeight = 60;
-
-const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = "TB") => {
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  const isHorizontal = direction === "LR";
-  g.setGraph({ rankdir: direction });
-
-  nodes.forEach((node) => {
-    g.setNode(node.id, { width: nodeWidth, height: nodeHeight });
-  });
-
-  edges.forEach((edge) => {
-    g.setEdge(edge.source, edge.target);
-  });
-
-  dagre.layout(g);
-
-  nodes.forEach((node) => {
-    const nodeWithPosition = g.node(node.id);
-    node.targetPosition = isHorizontal ? Position.Left : Position.Top;
-    node.sourcePosition = isHorizontal ? Position.Right : Position.Bottom;
-
-    // Shift to center the node properly
-    node.position = {
-      x: nodeWithPosition.x - nodeWidth / 2,
-      y: nodeWithPosition.y - nodeHeight / 2,
-    };
-
-    return node;
-  });
-
-  return { nodes, edges };
-};
 
 // Custom node with tooltip
 function DagNodeComponent({
@@ -428,6 +397,11 @@ function DagDetailsContent() {
   const [error, setError] = useState<string | null>(null);
   const [triggering, setTriggering] = useState(false);
   const [dagYAML, setDagYAML] = useState<string | null>(null);
+  const [runtimeTasks, setRuntimeTasks] = useState<
+    { ID: string; TaskID: string; Status: string }[]
+  >([]);
+  const activeDagIDRef = useRef<string | null>(id);
+  const runsRequestGenerationRef = useRef(0);
 
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState<string | null>("all");
@@ -438,12 +412,85 @@ function DagDetailsContent() {
   // React Flow strict local states
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const topology = useMemo(
+    () => projectExecutionTopology(dag?.Tasks ?? [], runtimeTasks),
+    [dag, runtimeTasks]
+  );
+
+  useEffect(() => {
+    const definitionByID = new Map(dag?.Tasks.map((task) => [task.ID, task]) ?? []);
+    const projectedNodes: Node[] = topology.nodes.map((node) => {
+      const task = node.definitionId ? definitionByID.get(node.definitionId) : undefined;
+      const status = node.status;
+      let borderColor = "var(--mantine-color-blue-filled)";
+      let background = "var(--node-bg)";
+      let animation = "none";
+      if (status === "success") {
+        borderColor = "var(--mantine-color-green-filled)";
+        background = "rgba(43, 138, 62, 0.1)";
+      } else if (status === "failed") {
+        borderColor = "var(--mantine-color-red-filled)";
+        background = "rgba(224, 49, 49, 0.08)";
+      } else if (status === "running") animation = "pulseBlue 2s infinite";
+      else if (status === "queued" || status === "pending")
+        borderColor = "var(--mantine-color-gray-6)";
+      return {
+        id: node.id,
+        type: "dagNode",
+        data: { label: node.id, taskType: task?.Type, command: task?.Command, status },
+        position: { x: 0, y: 0 },
+        style: {
+          background,
+          color: "var(--node-text)",
+          border: `1px solid ${borderColor}`,
+          borderRadius: "8px",
+          fontSize: "12px",
+          fontWeight: 600,
+          fontFamily: "var(--font-outfit)",
+          width: nodeWidth,
+          wordBreak: "break-word" as const,
+          whiteSpace: "pre-wrap" as const,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          textAlign: "center" as const,
+          animation,
+          transition: "all 0.3s ease",
+        },
+      };
+    });
+    const statusByID = new Map(topology.nodes.map((node) => [node.id, node.status]));
+    const projectedEdges: Edge[] = topology.edges.map((edge) => {
+      const status = statusByID.get(edge.source);
+      const color =
+        status === "success"
+          ? "var(--mantine-color-green-filled)"
+          : status === "failed"
+            ? "var(--mantine-color-red-filled)"
+            : status
+              ? "var(--mantine-color-gray-6)"
+              : "var(--mantine-color-blue-filled)";
+      return {
+        ...edge,
+        animated: runs.some((run) => run.Status === "running"),
+        style: { stroke: color, transition: "stroke 0.3s ease" },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 20, height: 20, color },
+      };
+    });
+    setNodes(layoutTopologyStages(projectedNodes, topology.stages, nodeWidth, nodeHeight));
+    setEdges(projectedEdges);
+  }, [dag, topology, runs, setNodes, setEdges]);
 
   // Responsive graph height based on task count
   const graphHeight = Math.max(400, Math.min(800, (dag?.Tasks?.length || 5) * 100));
 
   useEffect(() => {
     if (!id) return;
+    activeDagIDRef.current = id;
+    runsRequestGenerationRef.current += 1;
+    setDag(null);
+    setRuntimeTasks([]);
+    setDagYAML(null);
 
     // Initial fetch of DAG specific definitions
     const initializeView = async () => {
@@ -451,6 +498,7 @@ function DagDetailsContent() {
       try {
         const dagsRes = await apiFetch("/api/dags");
         const allDags: Dag[] = await dagsRes.json();
+        if (activeDagIDRef.current !== id) return;
 
         const targetDag = allDags.find((d) => d.ID === id);
         if (!targetDag) {
@@ -463,84 +511,39 @@ function DagDetailsContent() {
         // Fetch raw YAML source for the Definition tab
         try {
           const yamlRes = await apiFetch(`/api/dags/${id}/yaml`);
-          if (yamlRes.ok) setDagYAML(await yamlRes.text());
+          if (yamlRes.ok) {
+            const yaml = await yamlRes.text();
+            if (activeDagIDRef.current === id) setDagYAML(yaml);
+          }
         } catch {
           // Non-critical — the graph still works without the YAML
         }
-
-        // Build react flow nodes off schema dynamically
-        const initialNodes =
-          targetDag.Tasks?.map((task) => ({
-            id: task.ID,
-            type: "dagNode",
-            data: { label: task.ID, taskType: task.Type, command: task.Command },
-            position: { x: 0, y: 0 },
-            style: {
-              background: "var(--node-bg)",
-              color: "var(--node-text)",
-              border: "1px solid var(--mantine-color-blue-filled)",
-              borderRadius: "8px",
-              fontSize: "12px",
-              fontWeight: 600,
-              fontFamily: "var(--font-outfit)",
-              width: nodeWidth,
-              wordBreak: "break-word" as const,
-              whiteSpace: "pre-wrap" as const,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              textAlign: "center" as const,
-            },
-          })) || [];
-
-        const initialEdges: Edge[] = [];
-        targetDag.Tasks?.forEach((task) => {
-          if (task.DependsOn && task.DependsOn.length > 0) {
-            task.DependsOn.forEach((dep) => {
-              initialEdges.push({
-                id: `e-${dep}-${task.ID}`,
-                source: dep,
-                target: task.ID,
-                animated: true,
-                style: { stroke: "var(--mantine-color-blue-filled)" },
-                markerEnd: {
-                  type: MarkerType.ArrowClosed,
-                  width: 20,
-                  height: 20,
-                  color: "var(--mantine-color-blue-filled)",
-                },
-              });
-            });
-          }
-        });
-
-        const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-          initialNodes,
-          initialEdges,
-          "TB" // top-down direction
-        );
-
-        setNodes(layoutedNodes);
-        setEdges(layoutedEdges);
       } catch (err) {
         console.error(err);
-        setError("Failed to load DAG schema from database.");
+        if (activeDagIDRef.current === id) setError("Failed to load DAG schema from database.");
       } finally {
-        setLoading(false);
+        if (activeDagIDRef.current === id) setLoading(false);
       }
     };
 
     initializeView();
-  }, [id, setNodes, setEdges]);
+  }, [id]);
 
   // Periodic fetching runs list to sync paginated data
   const fetchRuns = useCallback(async () => {
     if (!id) return;
+    const requestedID = id;
+    const requestGeneration = ++runsRequestGenerationRef.current;
+    const isCurrentRequest = () =>
+      activeDagIDRef.current === requestedID &&
+      runsRequestGenerationRef.current === requestGeneration;
     try {
       const url = `/api/runs?page=${page}&limit=${limit}&dag_id=${id}&status=${statusFilter || "all"}&trigger=${triggerFilter || "all"}`;
       const runsRes = await apiFetch(url);
+      if (!isCurrentRequest()) return;
       if (runsRes.ok) {
         const runsData = await runsRes.json();
+        if (!isCurrentRequest()) return;
         setRuns(runsData.data || []);
         setTotalRuns(runsData.total || 0);
 
@@ -553,85 +556,24 @@ function DagDetailsContent() {
 
         if (targetRun) {
           const tasksRes = await apiFetch(`/api/runs/${targetRun.ID}/tasks`);
+          if (!isCurrentRequest()) return;
           if (tasksRes.ok) {
             const tasksData = await tasksRes.json();
-
-            // Map LIVE states to React Flow nodes
-            setNodes((nds) =>
-              nds.map((n) => {
-                const taskState = tasksData.find(
-                  (t: { TaskID: string; Status: string }) => t.TaskID === n.id
-                );
-                const status = taskState?.Status;
-
-                let borderColor = "var(--mantine-color-blue-filled)";
-                let background = "var(--node-bg)";
-                let animation = "none";
-
-                if (status === "success") {
-                  borderColor = "var(--mantine-color-green-filled)";
-                  background = "rgba(43, 138, 62, 0.1)";
-                } else if (status === "failed") {
-                  borderColor = "var(--mantine-color-red-filled)";
-                  background = "rgba(224, 49, 49, 0.08)";
-                } else if (status === "running") {
-                  animation = "pulseBlue 2s infinite";
-                } else if (status === "queued" || status === "pending") {
-                  borderColor = "var(--mantine-color-gray-6)";
-                }
-
-                return {
-                  ...n,
-                  data: { ...n.data, status },
-                  style: {
-                    ...n.style,
-                    border: `1px solid ${borderColor}`,
-                    background,
-                    animation,
-                    transition: "all 0.3s ease",
-                  },
-                };
-              })
-            );
-
-            // Map LIVE states to React Flow edges
-            const isRunActive = targetRun.Status === "running";
-            setEdges((eds) =>
-              eds.map((e) => {
-                const sourceState = tasksData.find(
-                  (t: { TaskID: string; Status: string }) => t.TaskID === e.source
-                );
-                const sourceStatus = sourceState?.Status;
-
-                let strokeColor = "var(--mantine-color-blue-filled)";
-                if (sourceStatus === "success") strokeColor = "var(--mantine-color-green-filled)";
-                if (sourceStatus === "failed") strokeColor = "var(--mantine-color-red-filled)";
-                if (!sourceStatus || sourceStatus === "pending")
-                  strokeColor = "var(--mantine-color-gray-6)";
-
-                return {
-                  ...e,
-                  animated: isRunActive,
-                  style: { stroke: strokeColor, transition: "stroke 0.3s ease" },
-                  markerEnd: {
-                    type: MarkerType.ArrowClosed,
-                    width: 20,
-                    height: 20,
-                    color: strokeColor,
-                  },
-                };
-              })
-            );
-          }
-        }
+            if (isCurrentRequest()) setRuntimeTasks(tasksData);
+          } else if (isCurrentRequest()) setRuntimeTasks([]);
+        } else if (isCurrentRequest()) setRuntimeTasks([]);
       } else {
-        setRuns([]);
-        setTotalRuns(0);
+        if (isCurrentRequest()) {
+          setRuns([]);
+          setTotalRuns(0);
+          setRuntimeTasks([]);
+        }
       }
     } catch (err) {
       console.error("Failed to query runs", err);
+      if (isCurrentRequest()) setRuntimeTasks([]);
     }
-  }, [id, page, statusFilter, triggerFilter, setNodes, setEdges]);
+  }, [id, page, statusFilter, triggerFilter]);
 
   useVisibilityPoll(fetchRuns, 5000, [fetchRuns]);
 
