@@ -1,0 +1,217 @@
+{
+  "version": 1,
+  "name": "nagare-architecture-refactor",
+  "maxParallelTasks": 2,
+  "maxRepairAttempts": 3,
+  "globalChecks": [
+    "git diff --check",
+    "make build",
+    "make test",
+    "make lint",
+    "cd web && npm run format:check && npm run test:ci"
+  ],
+  "tasks": [
+    {
+      "id": "task-attempt-transition-core",
+      "title": "Extract persisted task-attempt transitions",
+      "wave": 1,
+      "dependsOn": [],
+      "objective": "Create the authoritative module for persisted task-attempt claims, promotions, and completion transitions while preserving current external behavior.",
+      "architecture": "Place a deep task-attempt transition module immediately above narrow transactional Store primitives. It owns transition validity, persisted compare-and-set behavior, and completion policy; it does not own caller side effects, transport, scheduling, or command execution.",
+      "acceptance": [
+        "Claiming queued to running is a persisted compare-and-set: exactly one caller receives Applied, while a losing or replayed claim never authorizes dispatch.",
+        "Promoting pending to queued is conditional and cannot overwrite cancellation or another terminal state.",
+        "Completion centrally derives success, ordinary failure to up-for-retry or exhausted failure, terminal timeout failure, and cancellation replay from authoritative inputs.",
+        "An exact terminal replay returns AlreadyApplied, while a conflicting terminal outcome fails explicitly.",
+        "Invalid transitions leave status, output, timestamps, and attempt history unchanged.",
+        "The Store gains only the narrow atomic primitives required by the lifecycle module.",
+        "New deterministic module-boundary evals cover sequential claim replay and timeout with retries; baseline failure must not depend on scheduler timing or a stress-only race."
+      ],
+      "nonGoals": [
+        "Do not split the entire Store abstraction.",
+        "Do not wire workers, the scheduler, or HTTP handlers in this task.",
+        "Do not own metrics, logs, transport, scheduling, or command execution."
+      ],
+      "ownedPaths": [
+        "internal/tasklifecycle/",
+        "internal/models/store.go"
+      ],
+      "checks": ["CGO_ENABLED=1 go test ./internal/..."],
+      "allowDependencies": false
+    },
+    {
+      "id": "task-attempt-current-control",
+      "title": "Add atomic current-attempt control",
+      "wave": 2,
+      "dependsOn": ["task-attempt-transition-core"],
+      "objective": "Deepen the lifecycle module with atomic logical-task cancellation and manual retry operations over the current attempt.",
+      "architecture": "Extend the same task-attempt module rather than creating a second seam. Resolve current-attempt identity and perform cancellation or successor creation in database transactions so callers never reconstruct attempt history or coordinate correctness with process-local locks.",
+      "acceptance": [
+        "Cancellation resolves and changes only the latest current attempt atomically for pending, queued, running, and up-for-retry states.",
+        "Repeated cancellation is idempotent and never rewrites historical attempts.",
+        "Manual retry validates the current attempt and inserts at most one successor atomically.",
+        "Cancellation racing retry cannot leave a queued or running successor after cancellation wins.",
+        "Manual retry preserves existing eligibility: current running or queued attempts are rejected, while pending, cancelled, up-for-retry, failed, and successful attempts remain retryable.",
+        "Database correctness does not rely on a process-local mutex.",
+        "New module-boundary evals deterministically exercise logical current-attempt cancellation, retry idempotency, and retry-versus-cancel serialization."
+      ],
+      "nonGoals": [
+        "Do not wire worker, scheduler, or HTTP callers in this task.",
+        "Do not change public API payloads.",
+        "Do not broaden the lifecycle module into run-level progression."
+      ],
+      "ownedPaths": [
+        "internal/tasklifecycle/",
+        "internal/models/store.go"
+      ],
+      "checks": ["CGO_ENABLED=1 go test ./internal/..."],
+      "allowDependencies": false
+    },
+    {
+      "id": "task-attempt-local-adapter",
+      "title": "Route local execution through task lifecycle",
+      "wave": 3,
+      "dependsOn": ["task-attempt-current-control"],
+      "objective": "Make the local worker a thin execution adapter over the task-attempt lifecycle while preserving its broker, executor, metrics, and process-cancellation responsibilities.",
+      "architecture": "The worker may claim and complete attempts only through the lifecycle interface. Keep queue mechanics and external side effects local, ordered after authoritative persistence, and idempotently cleaned up.",
+      "acceptance": [
+        "Dispatch claims through lifecycle before enqueue and delivers work only when the claim result is Applied.",
+        "Queue backpressure cannot strand an attempt in running: reserve capacity before claim or conditionally release an undispatched claim while preserving queued behavior.",
+        "An attempt cancelled after claim or enqueue but before running registration never executes.",
+        "Trigger-DAG, setup, empty-command, success, ordinary failure, timeout, and cancellation paths complete through lifecycle with local and remote retry parity.",
+        "A late local completion after cancellation preserves cancelled state and performs broker cleanup.",
+        "Broker cleanup is unconditional and idempotent; terminal metrics and logs occur only for a newly Applied lifecycle result.",
+        "Lifecycle persistence errors are propagated rather than discarded, with deterministic adapter evals for the claimed-then-cancelled execution window."
+      ],
+      "nonGoals": [
+        "Do not change the lifecycle module or Store implementation.",
+        "Do not modify remote-worker transport.",
+        "Do not redesign executor interfaces beyond the smallest lifecycle adapter."
+      ],
+      "ownedPaths": ["internal/worker/"],
+      "checks": ["CGO_ENABLED=1 go test ./internal/..."],
+      "allowDependencies": false
+    },
+    {
+      "id": "task-attempt-remote-adapter",
+      "title": "Route remote execution through task lifecycle",
+      "wave": 3,
+      "dependsOn": ["task-attempt-current-control"],
+      "objective": "Make Coordinator remote assignment and result handling a thin transport adapter over the task-attempt lifecycle.",
+      "architecture": "Coordinator owns assignment identity, worker association, authoritative retry policy captured at claim, and idempotent transport-side cleanup. Persisted claim and completion validity remain inside the lifecycle module.",
+      "acceptance": [
+        "Polling claims through lifecycle and returns work only when the claim result is Applied.",
+        "Coordinator records assignment ownership by attempt and worker and captures authoritative retry policy at claim; result handling never trusts worker-supplied retry counts.",
+        "Result ownership is validated and lifecycle persistence succeeds before live assignment state is discarded.",
+        "Ordinary remote failure matches local retry behavior and remote timeout remains terminal.",
+        "A replayed or late result releases worker accounting exactly once, cannot decrement a newer assignment, and still performs idempotent broker cleanup.",
+        "A late result after cancellation is accepted without overwriting cancellation; terminal metrics and logs occur only for an Applied result.",
+        "Deterministic adapter evals cover claimed retry policy and a replayed result while a newer assignment is active; concurrent polling may be a stress check but not the sole baseline-failure gate."
+      ],
+      "nonGoals": [
+        "Do not change the lifecycle module or Store implementation.",
+        "Do not redesign the worker transport protocol.",
+        "Do not change public payloads unless an ownership identifier is demonstrably missing."
+      ],
+      "ownedPaths": ["internal/cluster/"],
+      "checks": ["CGO_ENABLED=1 go test ./internal/..."],
+      "allowDependencies": false
+    },
+    {
+      "id": "task-attempt-orchestration",
+      "title": "Wire lifecycle into scheduler and API orchestration",
+      "wave": 4,
+      "dependsOn": [
+        "task-attempt-local-adapter",
+        "task-attempt-remote-adapter"
+      ],
+      "objective": "Route scheduler and HTTP task-attempt orchestration through one production lifecycle service while preserving public behavior.",
+      "architecture": "Production wiring shares the authoritative lifecycle service across Scheduler, local Pool, and Coordinator. Scheduler retains cadence and run-level concerns; HTTP remains a logical-task adapter and never reconstructs attempt identity.",
+      "acceptance": [
+        "One lifecycle service is wired into Scheduler, local Pool, and Coordinator in production.",
+        "Pending promotion, setup failure, map-parent start and completion, delayed or manual retry, and run cancellation delegate attempt transitions to lifecycle.",
+        "Scheduler snapshots and broker side effects update only after authoritative persistence reports Applied; a lost transition race retains or reloads persisted state.",
+        "Killing a run cancels the latest current attempt in pending, queued, running, or up-for-retry state without rewriting attempt history.",
+        "The task-kill HTTP route uses run ID and logical task ID to cancel the current attempt, including a remote attempt.",
+        "Public request and response payloads and current manual-retry behavior remain unchanged.",
+        "Deterministic evals cover cancelling the latest retry attempt and resolving a logical task ID to its current attempt ID."
+      ],
+      "nonGoals": [
+        "Do not add run-level progression policy in this task.",
+        "Do not redesign API payloads or scheduler cadence.",
+        "Do not change worker transport."
+      ],
+      "ownedPaths": [
+        "internal/scheduler/",
+        "internal/api/",
+        "main.go"
+      ],
+      "checks": ["CGO_ENABLED=1 go test ./internal/..."],
+      "allowDependencies": false
+    },
+    {
+      "id": "run-progression",
+      "title": "Extract authoritative run progression",
+      "wave": 5,
+      "dependsOn": ["task-attempt-orchestration"],
+      "objective": "Create one authoritative service for promoting runnable tasks and deriving a run's terminal state after task-attempt changes.",
+      "architecture": "Separate run-level dependency and terminal-state policy from scheduler ticking and persistence mechanics. Feed it task definitions and attempt snapshots; apply returned transitions through injected storage operations.",
+      "acceptance": [
+        "A task becomes runnable exactly when every required predecessor has succeeded.",
+        "Failed, killed, and exhausted predecessor attempts prevent invalid downstream promotion.",
+        "Run terminal status is derived consistently after completion, retry exhaustion, and cancellation.",
+        "Repeated progression is idempotent and does not duplicate task instances.",
+        "Scheduler and retry paths use the same progression policy."
+      ],
+      "nonGoals": [
+        "Do not replace cron scheduling.",
+        "Do not rewrite DAG parsing.",
+        "Do not introduce a general workflow engine abstraction."
+      ],
+      "ownedPaths": [
+        "internal/runprogression/",
+        "internal/scheduler/",
+        "internal/models/store.go",
+        "internal/models/dag.go",
+        "internal/api/server.go"
+      ],
+      "checks": ["CGO_ENABLED=1 go test ./internal/..."],
+      "allowDependencies": false
+    },
+    {
+      "id": "run-inspection",
+      "title": "Extract the run-inspection read model",
+      "wave": 6,
+      "dependsOn": ["run-progression"],
+      "objective": "Create a cohesive read model for run details so the API and frontend consume consistent task, attempt, dependency, timing, and topology information.",
+      "architecture": "Build the read model behind a narrow query interface. Keep storage queries and frontend rendering outside it; expose stable DTOs that can be projected into the shared execution topology.",
+      "acceptance": [
+        "Run detail data distinguishes logical tasks from attempts without losing retry history.",
+        "Dependencies, timing, status, and logs metadata are assembled consistently in one query path.",
+        "The run page consumes the read model without reconstructing lifecycle semantics.",
+        "Existing run endpoints remain compatible or receive explicit compatibility adapters.",
+        "Read-model tests cover retries, mapped children, missing optional timing, and cancelled runs."
+      ],
+      "nonGoals": [
+        "Do not build a general reporting subsystem.",
+        "Do not redesign unrelated dashboard pages.",
+        "Do not add a new database."
+      ],
+      "ownedPaths": [
+        "internal/runinspection/",
+        "internal/api/",
+        "internal/models/store.go",
+        "web/src/app/runs/page.tsx",
+        "web/src/lib/executionTopology/",
+        "web/src/lib/runInspection/"
+      ],
+      "checks": [
+        "CGO_ENABLED=1 go test ./internal/...",
+        "cd web && npm run test:ci",
+        "cd web && npx tsc --noEmit",
+        "cd web && npm run lint"
+      ],
+      "allowDependencies": false
+    }
+  ]
+}

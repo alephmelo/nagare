@@ -1,0 +1,153 @@
+id: architecture_refactor_swarm
+description: "Guarded, restartable Codex architecture refactor swarm"
+schedule: "workflow_dispatch"
+
+tasks:
+  - id: initialize
+    type: command
+    pool: control
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" init-run'
+    retries: 1
+    retry_delay_seconds: 10
+    timeout_seconds: 300
+
+  - id: task_attempt_transition_core
+    type: command
+    pool: agents
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" execute-task task-attempt-transition-core'
+    depends_on:
+      - initialize
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 21600
+
+  - id: integrate_wave_1
+    type: command
+    pool: integration
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" integrate-wave 1'
+    depends_on:
+      - task_attempt_transition_core
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 7200
+
+  - id: task_attempt_current_control
+    type: command
+    pool: agents
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" execute-task task-attempt-current-control'
+    depends_on:
+      - integrate_wave_1
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 21600
+
+  - id: integrate_wave_2
+    type: command
+    pool: integration
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" integrate-wave 2'
+    depends_on:
+      - task_attempt_current_control
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 7200
+
+  - id: task_attempt_local_adapter
+    type: command
+    pool: agents
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" execute-task task-attempt-local-adapter'
+    depends_on:
+      - integrate_wave_2
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 21600
+
+  - id: task_attempt_remote_adapter
+    type: command
+    pool: agents
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" execute-task task-attempt-remote-adapter'
+    depends_on:
+      - integrate_wave_2
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 21600
+
+  - id: integrate_wave_3
+    type: command
+    pool: integration
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" integrate-wave 3'
+    depends_on:
+      - task_attempt_local_adapter
+      - task_attempt_remote_adapter
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 7200
+
+  - id: task_attempt_orchestration
+    type: command
+    pool: agents
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" execute-task task-attempt-orchestration'
+    depends_on:
+      - integrate_wave_3
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 21600
+
+  - id: integrate_wave_4
+    type: command
+    pool: integration
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" integrate-wave 4'
+    depends_on:
+      - task_attempt_orchestration
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 7200
+
+  - id: run_progression
+    type: command
+    pool: agents
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" execute-task run-progression'
+    depends_on:
+      - integrate_wave_4
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 21600
+
+  - id: integrate_wave_5
+    type: command
+    pool: integration
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" integrate-wave 5'
+    depends_on:
+      - run_progression
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 7200
+
+  - id: run_inspection
+    type: command
+    pool: agents
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" execute-task run-inspection'
+    depends_on:
+      - integrate_wave_5
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 21600
+
+  - id: integrate_wave_6
+    type: command
+    pool: integration
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" integrate-wave 6'
+    depends_on:
+      - run_inspection
+    retries: 1
+    retry_delay_seconds: 30
+    timeout_seconds: 7200
+
+  - id: finalize
+    type: command
+    pool: control
+    command: 'node "$SWARM_RELEASE/scripts/swarmctl.mjs" finalize'
+    depends_on:
+      - integrate_wave_6
+    retries: 1
+    retry_delay_seconds: 15
+    timeout_seconds: 900

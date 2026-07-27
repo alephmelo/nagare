@@ -1,0 +1,17 @@
+{
+  "description": "Early scope and frozen-eval checks for unattended Nagare swarm sessions.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/swarm-stop-check.mjs\"",
+            "timeout": 30,
+            "statusMessage": "Checking swarm task boundaries"
+          }
+        ]
+      }
+    ]
+  }
+}

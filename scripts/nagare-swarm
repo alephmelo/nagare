@@ -1,0 +1,436 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(git -C "$script_dir/.." rev-parse --show-toplevel)"
+swarm_home="${SWARM_HOME:-${XDG_DATA_HOME:-${HOME}/.local/share}/nagare-swarm}"
+port="${SWARM_PORT:-18080}"
+api_url="http://127.0.0.1:${port}"
+codex_bin="${CODEX_BIN:-$(command -v codex || true)}"
+
+usage() {
+  printf '%s\n' \
+    "Usage: scripts/nagare-swarm <command> [arguments]" \
+    "" \
+    "Commands:" \
+    "  install --binary PATH  Pin a built Nagare binary and control bundle" \
+    "  start                  Start the pinned local control plane" \
+    "  foreground             Run the pinned control plane in this terminal" \
+    "  stop                   Stop the local control plane" \
+    "  validate [--ready]     Validate the pinned bundle and optional run preflight" \
+    "  copy-api-key           Copy the local UI API key to the clipboard" \
+    "  trigger                Start or resume the architecture swarm" \
+    "  status                 Show swarm state and Nagare health" \
+    "  runs                   List Nagare runs for the swarm DAG" \
+    "  tasks RUN_ID           List tasks for a Nagare run" \
+    "  logs RUN_ID TASK_ID    Stream one Nagare task's logs" \
+    "  cancel RUN_ID          Kill a Nagare run; completed work remains resumable"
+}
+
+current_release() {
+  if [[ ! -L "$swarm_home/current" ]]; then
+    printf 'No pinned swarm release. Run scripts/nagare-swarm install --binary PATH first.\n' >&2
+    exit 1
+  fi
+  readlink "$swarm_home/current"
+}
+
+validate_release_integrity() {
+  local release="$1"
+  local manifest="$release/manifest.json"
+  local relative expected actual
+  local expected_file_count=9
+  local expected_directory_count=3
+
+  [[ -d "$release" && ! -L "$release" ]] || {
+    printf 'Pinned release is not a regular directory: %s\n' "$release" >&2
+    exit 1
+  }
+  [[ -f "$manifest" && ! -L "$manifest" ]] || {
+    printf 'Pinned release manifest is missing or unsafe: %s\n' "$manifest" >&2
+    exit 1
+  }
+  [[ "$(find "$release" -mindepth 1 -type f | wc -l | tr -d ' ')" == "$expected_file_count" ]] || {
+    printf 'Pinned release contains an unexpected file set: %s\n' "$release" >&2
+    exit 1
+  }
+  [[ "$(find "$release" -mindepth 1 -type d | wc -l | tr -d ' ')" == "$expected_directory_count" ]] || {
+    printf 'Pinned release contains unexpected directories: %s\n' "$release" >&2
+    exit 1
+  }
+  [[ "$(find "$release" -mindepth 1 -type l | wc -l | tr -d ' ')" == "0" ]] || {
+    printf 'Pinned release must not contain symlinks: %s\n' "$release" >&2
+    exit 1
+  }
+  [[ "$(find "$release" -mindepth 1 ! -type f ! -type d ! -type l | wc -l | tr -d ' ')" == "0" ]] || {
+    printf 'Pinned release contains unsupported filesystem entries: %s\n' "$release" >&2
+    exit 1
+  }
+  [[ "$(jq -er '.version == 1 and (.sourceCommit | test("^[0-9a-f]{40}$")) and (.files | type == "object") and (.files | length == 8)' "$manifest")" == "true" ]] || {
+    printf 'Pinned release manifest is malformed: %s\n' "$manifest" >&2
+    exit 1
+  }
+
+  for relative in \
+    nagare \
+    nagare.yaml \
+    dags/architecture-swarm.yaml \
+    backlog.json \
+    scripts/swarmctl.mjs \
+    references/planner.schema.json \
+    references/agent.schema.json \
+    references/reviewer.schema.json
+  do
+    [[ -f "$release/$relative" && ! -L "$release/$relative" ]] || {
+      printf 'Pinned release is missing %s\n' "$relative" >&2
+      exit 1
+    }
+    expected="$(jq -er --arg path "$relative" '.files[$path] | select(type == "string" and test("^[0-9a-f]{64}$"))' "$manifest")" || {
+      printf 'Pinned release manifest is missing a valid hash for %s\n' "$relative" >&2
+      exit 1
+    }
+    actual="$(shasum -a 256 "$release/$relative" | awk '{print $1}')"
+    [[ "$actual" == "$expected" ]] || {
+      printf 'Pinned release integrity check failed for %s\n' "$relative" >&2
+      exit 1
+    }
+  done
+}
+
+api_key() {
+  if [[ ! -f "$swarm_home/api-key" ]]; then
+    printf 'Missing Nagare API key at %s\n' "$swarm_home/api-key" >&2
+    exit 1
+  fi
+  tr -d '\n' < "$swarm_home/api-key"
+}
+
+ensure_api_key() {
+  if [[ ! -f "$swarm_home/api-key" ]]; then
+    umask 077
+    mkdir -p "$swarm_home"
+    openssl rand -hex 32 > "$swarm_home/api-key"
+    printf 'Generated a new local Nagare UI API key.\n'
+  fi
+}
+
+daemon_running() {
+  [[ -f "$swarm_home/nagare.pid" && -f "$swarm_home/daemon-release" ]] || return 1
+  local daemon_pid daemon_release command_line
+  daemon_pid="$(tr -d '\n' < "$swarm_home/nagare.pid")"
+  daemon_release="$(tr -d '\n' < "$swarm_home/daemon-release")"
+  [[ "$daemon_pid" =~ ^[0-9]+$ ]] || return 1
+  [[ -x "$daemon_release/nagare" ]] || return 1
+  if ! command_line="$(ps -p "$daemon_pid" -o command= 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "$command_line" == *"$daemon_release/nagare"* ]] || return 1
+  [[ "$command_line" == *"--db $swarm_home/state/nagare.db"* ]] || return 1
+}
+
+require_matching_daemon_release() {
+  daemon_running || {
+    printf 'Nagare swarm control plane is not running.\n' >&2
+    exit 1
+  }
+  local current daemon_release
+  current="$(current_release)"
+  daemon_release="$(tr -d '\n' < "$swarm_home/daemon-release")"
+  if [[ "$current" != "$daemon_release" ]]; then
+    printf 'Pinned release and running daemon differ; stop and restart Nagare.\n' >&2
+    exit 1
+  fi
+}
+
+nagare_cli() {
+  local release key
+  release="$(current_release)"
+  validate_release_integrity "$release"
+  key="$(api_key)"
+  NAGARE_API_KEY="$key" "$release/nagare" "$@" "--api=$api_url"
+}
+
+install_release() {
+  local binary=""
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --binary)
+        binary="${2:-}"
+        shift 2
+        ;;
+      *)
+        printf 'Unknown install argument: %s\n' "$1" >&2
+        exit 1
+        ;;
+    esac
+  done
+  if [[ -z "$binary" || ! -f "$binary" || ! -x "$binary" ]]; then
+    printf 'install requires an executable --binary PATH\n' >&2
+    exit 1
+  fi
+  if [[ -z "$codex_bin" || ! -x "$codex_bin" ]]; then
+    printf 'Codex CLI is not available; set CODEX_BIN to its executable.\n' >&2
+    exit 1
+  fi
+  if daemon_running; then
+    printf 'Stop the running Nagare control plane before installing a new release.\n' >&2
+    exit 1
+  fi
+
+  local source_sha release_id release_dir bundle_dirty
+  local binary_module binary_revision binary_modified
+  source_sha="$(git -C "$repo_root" rev-parse HEAD)"
+  binary_module="$(go version -m "$binary" | awk '$1 == "path" { print $2; exit }')"
+  binary_revision="$(go version -m "$binary" | awk '$1 == "build" && $2 ~ /^vcs\.revision=/ { sub(/^vcs\.revision=/, "", $2); print $2; exit }')"
+  binary_modified="$(go version -m "$binary" | awk '$1 == "build" && $2 ~ /^vcs\.modified=/ { sub(/^vcs\.modified=/, "", $2); print $2; exit }')"
+  if [[ "$binary_module" != "github.com/alephmelo/nagare" ||
+        "$binary_revision" != "$source_sha" ||
+        "$binary_modified" != "false" ]]; then
+    printf '%s\n' \
+      "Refusing an unverified Nagare binary." \
+      "Expected module github.com/alephmelo/nagare at clean revision $source_sha." \
+      "Observed module=${binary_module:-missing} revision=${binary_revision:-missing} modified=${binary_modified:-missing}." >&2
+    exit 1
+  fi
+  release_id="${source_sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
+  release_dir="$swarm_home/releases/$release_id"
+  bundle_dirty="$(git -C "$repo_root" status --porcelain --untracked-files=all | wc -l | tr -d ' ')"
+
+  umask 077
+  mkdir -p "$release_dir/scripts" "$release_dir/references" "$release_dir/dags" "$swarm_home/logs" "$swarm_home/runs" "$swarm_home/worktrees"
+  cp "$binary" "$release_dir/nagare"
+  cp "$repo_root/swarm/nagare-swarm.yaml" "$release_dir/nagare.yaml"
+  cp "$repo_root/swarm/dags/architecture-swarm.yaml" "$release_dir/dags/architecture-swarm.yaml"
+  cp "$repo_root/swarm/backlog.json" "$release_dir/backlog.json"
+  cp "$repo_root/.agents/skills/run-nagare-swarm/scripts/swarmctl.mjs" "$release_dir/scripts/swarmctl.mjs"
+  cp "$repo_root/.agents/skills/run-nagare-swarm/references/"*.json "$release_dir/references/"
+  chmod 0755 "$release_dir/nagare" "$release_dir/scripts/swarmctl.mjs"
+
+  SWARM_HOME="$swarm_home" SWARM_REPO="$repo_root" SWARM_RELEASE="$release_dir" CODEX_BIN="$codex_bin" \
+    node "$release_dir/scripts/swarmctl.mjs" create-manifest "$source_sha" "$bundle_dirty"
+  validate_release_integrity "$release_dir"
+  SWARM_HOME="$swarm_home" SWARM_REPO="$repo_root" SWARM_RELEASE="$release_dir" CODEX_BIN="$codex_bin" \
+    node "$release_dir/scripts/swarmctl.mjs" validate
+  SWARM_HOME="$swarm_home" SWARM_REPO="$repo_root" SWARM_RELEASE="$release_dir" CODEX_BIN="$codex_bin" \
+    node "$release_dir/scripts/swarmctl.mjs" sandbox-smoke
+
+  ensure_api_key
+  ln -sfn "$release_dir" "$swarm_home/current"
+  printf 'Pinned Nagare swarm release: %s\n' "$release_dir"
+}
+
+start_daemon() {
+  if daemon_running; then
+    printf 'Nagare swarm control plane is already running (pid %s).\n' "$(tr -d '\n' < "$swarm_home/nagare.pid")"
+    return
+  fi
+  if [[ -f "$swarm_home/nagare.pid" ]]; then
+    printf 'Discarding stale Nagare pidfile without signaling its process.\n'
+    rm -f "$swarm_home/nagare.pid" "$swarm_home/daemon-release"
+  fi
+
+  local release key log_path
+  release="$(current_release)"
+  validate_release_integrity "$release"
+  ensure_api_key
+  key="$(api_key)"
+  log_path="$swarm_home/logs/nagare.log"
+  mkdir -p "$swarm_home/logs" "$swarm_home/state"
+
+  (
+    cd "$release"
+    nohup env \
+      SWARM_HOME="$swarm_home" \
+      SWARM_REPO="$repo_root" \
+      SWARM_RELEASE="$release" \
+      SWARM_CONTROL_PORT="$port" \
+      CODEX_BIN="$codex_bin" \
+      NAGARE_API_KEY="$key" \
+      "$release/nagare" \
+        --port "127.0.0.1:${port}" \
+        --db "$swarm_home/state/nagare.db" \
+        --dags "$release/dags" \
+        > "$log_path" 2>&1 &
+    printf '%s\n' "$!" > "$swarm_home/nagare.pid"
+    printf '%s\n' "$release" > "$swarm_home/daemon-release"
+  )
+
+  local attempt
+  for attempt in $(seq 1 30); do
+    if curl -fsS -H "Authorization: Bearer $key" "$api_url/api/stats" >/dev/null 2>&1; then
+      printf 'Nagare swarm control plane is running at %s (pid %s).\n' "$api_url" "$(tr -d '\n' < "$swarm_home/nagare.pid")"
+      return
+    fi
+    sleep 1
+  done
+  printf 'Nagare did not become ready. Inspect %s\n' "$log_path" >&2
+  exit 1
+}
+
+foreground_daemon() {
+  if daemon_running; then
+    printf 'Nagare swarm control plane is already running (pid %s).\n' "$(tr -d '\n' < "$swarm_home/nagare.pid")"
+    return
+  fi
+  if [[ -f "$swarm_home/nagare.pid" ]]; then
+    printf 'Discarding stale Nagare pidfile without signaling its process.\n'
+    rm -f "$swarm_home/nagare.pid" "$swarm_home/daemon-release"
+  fi
+
+  local release key
+  release="$(current_release)"
+  validate_release_integrity "$release"
+  ensure_api_key
+  key="$(api_key)"
+  mkdir -p "$swarm_home/logs" "$swarm_home/state"
+  printf '%s\n' "$$" > "$swarm_home/nagare.pid"
+  printf '%s\n' "$release" > "$swarm_home/daemon-release"
+  cd "$release"
+  exec env \
+    SWARM_HOME="$swarm_home" \
+    SWARM_REPO="$repo_root" \
+    SWARM_RELEASE="$release" \
+    SWARM_CONTROL_PORT="$port" \
+    CODEX_BIN="$codex_bin" \
+    NAGARE_API_KEY="$key" \
+    "$release/nagare" \
+      --port "127.0.0.1:${port}" \
+      --db "$swarm_home/state/nagare.db" \
+      --dags "$release/dags"
+}
+
+stop_daemon() {
+  if ! daemon_running; then
+    if [[ -f "$swarm_home/nagare.pid" ]]; then
+      rm -f "$swarm_home/nagare.pid" "$swarm_home/daemon-release"
+      printf 'Discarded a stale Nagare pidfile without signaling its process.\n'
+      return
+    fi
+    printf 'Nagare swarm control plane is not running.\n'
+    return
+  fi
+  local daemon_pid attempt
+  daemon_pid="$(tr -d '\n' < "$swarm_home/nagare.pid")"
+  kill -TERM "$daemon_pid"
+  for attempt in $(seq 1 30); do
+    if ! kill -0 "$daemon_pid" 2>/dev/null; then
+      rm -f "$swarm_home/nagare.pid" "$swarm_home/daemon-release"
+      printf 'Stopped Nagare swarm control plane.\n'
+      return
+    fi
+    sleep 1
+  done
+  printf 'Nagare did not stop after 30 seconds; pid %s is still present.\n' "$daemon_pid" >&2
+  exit 1
+}
+
+run_validate() {
+  local release ready_flag="${2:-}"
+  release="$(current_release)"
+  validate_release_integrity "$release"
+  SWARM_HOME="$swarm_home" SWARM_REPO="$repo_root" SWARM_RELEASE="$release" CODEX_BIN="$codex_bin" \
+    node "$release/scripts/swarmctl.mjs" validate "$ready_flag"
+  "$release/nagare" --help >/dev/null 2>&1
+  if daemon_running; then
+    require_matching_daemon_release
+    nagare_cli dags
+  fi
+}
+
+trigger_swarm() {
+  require_matching_daemon_release
+  run_validate validate --ready
+  local running_json running_total
+  running_json="$(nagare_cli runs --dag=architecture_refactor_swarm --status=running --limit=1 --json)"
+  running_total="$(printf '%s' "$running_json" | jq -r '.total // (.data | length) // 0')"
+  if [[ "$running_total" != "0" ]]; then
+    printf 'An architecture swarm DAG run is already active; refusing a duplicate trigger.\n' >&2
+    exit 1
+  fi
+  SWARM_HOME="$swarm_home" SWARM_REPO="$repo_root" SWARM_RELEASE="$(current_release)" CODEX_BIN="$codex_bin" \
+    node "$(current_release)/scripts/swarmctl.mjs" prepare-trigger
+  nagare_cli trigger architecture_refactor_swarm
+  rm -f "$swarm_home/api-key"
+  printf 'Sealed the API key after launch; the authenticated UI session remains usable.\n'
+}
+
+show_status() {
+  local release
+  release="$(current_release)"
+  validate_release_integrity "$release"
+  SWARM_HOME="$swarm_home" SWARM_REPO="$repo_root" SWARM_RELEASE="$release" CODEX_BIN="$codex_bin" \
+    node "$release/scripts/swarmctl.mjs" status
+  if daemon_running; then
+    require_matching_daemon_release
+    if [[ -f "$swarm_home/api-key" ]]; then
+      nagare_cli stats
+      nagare_cli runs --dag=architecture_refactor_swarm --limit=10
+    else
+      printf 'Nagare daemon: running; API key sealed after launch. Monitor in the authenticated UI.\n'
+    fi
+  else
+    printf 'Nagare daemon: stopped\n'
+  fi
+}
+
+copy_api_key() {
+  if [[ ! -f "$swarm_home/api-key" ]]; then
+    printf 'The API key is sealed for an active run. Stop and restart Nagare to rotate it.\n' >&2
+    exit 1
+  fi
+  command -v pbcopy >/dev/null 2>&1 || {
+    printf 'pbcopy is unavailable; read the key from %s\n' "$swarm_home/api-key" >&2
+    exit 1
+  }
+  pbcopy < "$swarm_home/api-key"
+  printf 'Copied the local Nagare UI API key to the clipboard.\n'
+}
+
+command="${1:-}"
+case "$command" in
+  install)
+    install_release "$@"
+    ;;
+  start)
+    start_daemon
+    ;;
+  foreground)
+    foreground_daemon
+    ;;
+  stop)
+    stop_daemon
+    ;;
+  validate)
+    run_validate "$@"
+    ;;
+  copy-api-key)
+    copy_api_key
+    ;;
+  trigger)
+    trigger_swarm
+    ;;
+  status)
+    show_status
+    ;;
+  runs)
+    nagare_cli runs --dag=architecture_refactor_swarm --limit=50
+    ;;
+  tasks)
+    [[ $# -eq 2 ]] || { usage; exit 1; }
+    nagare_cli tasks "$2"
+    ;;
+  logs)
+    [[ $# -eq 3 ]] || { usage; exit 1; }
+    nagare_cli logs "$2" "$3"
+    ;;
+  cancel)
+    [[ $# -eq 2 ]] || { usage; exit 1; }
+    nagare_cli kill "$2"
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
