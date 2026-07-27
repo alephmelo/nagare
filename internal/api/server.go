@@ -4,8 +4,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -22,6 +24,7 @@ import (
 	"github.com/alephmelo/nagare/internal/cluster"
 	"github.com/alephmelo/nagare/internal/logbroker"
 	"github.com/alephmelo/nagare/internal/models"
+	"github.com/alephmelo/nagare/internal/runinspection"
 	"github.com/alephmelo/nagare/internal/scheduler"
 	"github.com/alephmelo/nagare/internal/worker"
 	"github.com/itchyny/gojq"
@@ -163,6 +166,15 @@ type enrichedTask struct {
 	models.TaskInstance
 	Command string              `json:"Command"`
 	Metrics *models.TaskMetrics `json:"Metrics,omitempty"`
+}
+
+type inspectionDefinitions struct {
+	scheduler *scheduler.Scheduler
+}
+
+func (d inspectionDefinitions) DAG(id string) (*models.DAGDef, bool) {
+	dag, ok := d.scheduler.GetDAGs()[id]
+	return dag, ok
 }
 
 func (s *Server) handleGetDAGs(w http.ResponseWriter, r *http.Request) {
@@ -395,6 +407,27 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, run)
+}
+
+// handleGetRunInspection exposes the cohesive lifecycle read used by the run
+// page. Existing run/task endpoints remain as compatibility contracts.
+func (s *Server) handleGetRunInspection(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 5 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	query := runinspection.NewQuery(s.store, inspectionDefinitions{scheduler: s.scheduler})
+	inspection, err := query.Inspect(r.Context(), parts[3])
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, inspection)
 }
 
 func (s *Server) handleGetRunTasks(w http.ResponseWriter, r *http.Request) {
@@ -698,20 +731,31 @@ func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
+	runID := parts[3]
 	taskInstanceID := parts[5]
-	if s.scheduler != nil {
-		resolvedID, err := s.scheduler.ResolveTaskInstanceID(parts[3], taskInstanceID)
+
+	var inst *models.TaskInstance
+	var err error
+	if r.URL.Query().Get("exact") == "true" {
+		inst, err = s.store.GetTaskInstance(taskInstanceID)
+		if err != nil || inst.RunID != runID {
+			http.Error(w, "Task not found", http.StatusNotFound)
+			return
+		}
+	} else {
+		if s.scheduler != nil {
+			resolvedID, resolveErr := s.scheduler.ResolveTaskInstanceID(runID, taskInstanceID)
+			if resolveErr != nil {
+				http.Error(w, "Task not found", http.StatusNotFound)
+				return
+			}
+			taskInstanceID = resolvedID
+		}
+		inst, err = s.store.GetTaskInstance(taskInstanceID)
 		if err != nil {
 			http.Error(w, "Task not found", http.StatusNotFound)
 			return
 		}
-		taskInstanceID = resolvedID
-	}
-
-	inst, err := s.store.GetTaskInstance(taskInstanceID)
-	if err != nil {
-		http.Error(w, "Task not found", http.StatusNotFound)
-		return
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -996,15 +1040,10 @@ func parseLimit(r *http.Request) int {
 	return 500
 }
 
-// Start launches the HTTP server
-func (s *Server) Start(addr string, frontendFS fs.FS) error {
-	if len(s.allowedOrigins) == 0 {
-		log.Println("WARNING: cors.allowed_origins is not configured — CORS is open to all origins (*). Set allowed_origins in nagare.yaml for production use.")
-	}
-	if s.apiKey == "" {
-		log.Println("WARNING: api_key is not configured — all API routes are unauthenticated. Set api_key in nagare.yaml or use --api-key for production use.")
-	}
-
+// routes builds the production route tree. Keeping construction separate from
+// listening lets route registration and middleware composition be tested
+// without opening a real socket.
+func (s *Server) routes(frontendFS fs.FS) http.Handler {
 	// auth composes apiKeyMiddleware + corsMiddleware.
 	// Applied to every /api/* route except /api/webhooks/ (which uses HMAC).
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
@@ -1028,6 +1067,7 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 	// Run endpoints
 	mux.HandleFunc("GET /api/runs", auth(s.handleGetRuns))
 	mux.HandleFunc("GET /api/runs/{id}", auth(s.handleGetRun))
+	mux.HandleFunc("GET /api/runs/{runID}/inspection", auth(s.handleGetRunInspection))
 	mux.HandleFunc("GET /api/runs/{runID}/tasks", auth(s.handleGetRunTasks))
 	mux.HandleFunc("GET /api/runs/{runID}/tasks/{taskID}/logs", auth(s.handleTaskLogs))
 	mux.HandleFunc("GET /api/runs/{runID}/tasks/{taskID}/attempts", auth(s.handleGetTaskAttempts))
@@ -1057,10 +1097,22 @@ func (s *Server) Start(addr string, frontendFS fs.FS) error {
 		mux.Handle("/api/workers/", s.coordinator.Handler())
 	}
 
+	return mux
+}
+
+// Start launches the HTTP server
+func (s *Server) Start(addr string, frontendFS fs.FS) error {
+	if len(s.allowedOrigins) == 0 {
+		log.Println("WARNING: cors.allowed_origins is not configured — CORS is open to all origins (*). Set allowed_origins in nagare.yaml for production use.")
+	}
+	if s.apiKey == "" {
+		log.Println("WARNING: api_key is not configured — all API routes are unauthenticated. Set api_key in nagare.yaml or use --api-key for production use.")
+	}
+
 	log.Printf("Starting Nagare API on %s", addr)
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: mux,
+		Handler: s.routes(frontendFS),
 		// Prevent slow-loris / header-flooding attacks and stale keepalive
 		// connections from exhausting goroutines. WriteTimeout is intentionally
 		// absent so that long-lived SSE streams (handleTaskLogs) are not killed.

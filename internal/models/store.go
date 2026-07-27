@@ -202,6 +202,15 @@ type Store struct {
 	db *sql.DB
 }
 
+// RunInspectionInputs is the persisted portion of a run detail read. Keeping
+// this bulk read in Store prevents read-model callers from issuing one query
+// per task or metric.
+type RunInspectionInputs struct {
+	Run      DagRun
+	Attempts []TaskInstance
+	Metrics  []TaskMetrics
+}
+
 // NewStore initializes an SQLite database and creates necessary tables
 func NewStore(dbPath string) (*Store, error) {
 	registerDriver()
@@ -878,6 +887,102 @@ func (s *Store) GetActiveDagRuns() ([]DagRun, error) {
 // Returns the latest attempt for each task (for backward compatibility).
 func (s *Store) GetTaskInstancesByRun(runID string) ([]TaskInstance, error) {
 	return s.GetLatestTaskAttempts(runID)
+}
+
+// GetRunInspectionInputs reads all lifecycle rows needed to inspect one run.
+// The individual statements share a read transaction, so an active run cannot
+// produce a response containing attempts and metrics from different snapshots.
+func (s *Store) GetRunInspectionInputs(ctx context.Context, runID string) (*RunInspectionInputs, error) {
+	return s.getRunInspectionInputs(ctx, runID, nil)
+}
+
+func (s *Store) getRunInspectionInputs(
+	ctx context.Context,
+	runID string,
+	afterRunRead func(),
+) (*RunInspectionInputs, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var result RunInspectionInputs
+	var confJSON string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, dag_id, status, exec_date, trigger_type, conf, created_at, completed_at
+		FROM dag_runs WHERE id = ?`, runID).Scan(
+		&result.Run.ID, &result.Run.DAGID, &result.Run.Status,
+		&result.Run.ExecDate, &result.Run.TriggerType, &confJSON,
+		&result.Run.CreatedAt, &result.Run.CompletedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if afterRunRead != nil {
+		afterRunRead()
+	}
+	if confJSON != "" {
+		if err := json.Unmarshal([]byte(confJSON), &result.Run.Conf); err != nil {
+			return nil, fmt.Errorf("decode run conf: %w", err)
+		}
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, run_id, task_id, status, COALESCE(output,''), item_value,
+			attempt, created_at, updated_at, started_at
+		FROM task_instances WHERE run_id = ?
+		ORDER BY created_at ASC, task_id ASC, attempt ASC, id ASC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var attempt TaskInstance
+		if err := rows.Scan(
+			&attempt.ID, &attempt.RunID, &attempt.TaskID, &attempt.Status,
+			&attempt.Output, &attempt.ItemValue, &attempt.Attempt,
+			&attempt.CreatedAt, &attempt.UpdatedAt, &attempt.StartedAt,
+		); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		result.Attempts = append(result.Attempts, attempt)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	metricRows, err := tx.QueryContext(ctx, `
+		SELECT task_instance_id, run_id, dag_id, task_id, duration_ms,
+			cpu_user_ms, cpu_system_ms, peak_memory_bytes, exit_code,
+			executor_type, created_at
+		FROM task_metrics WHERE run_id = ? ORDER BY created_at ASC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer metricRows.Close()
+	for metricRows.Next() {
+		var metric TaskMetrics
+		if err := metricRows.Scan(
+			&metric.TaskInstanceID, &metric.RunID, &metric.DAGID, &metric.TaskID,
+			&metric.DurationMs, &metric.CpuUserMs, &metric.CpuSystemMs,
+			&metric.PeakMemoryBytes, &metric.ExitCode, &metric.ExecutorType,
+			&metric.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		result.Metrics = append(result.Metrics, metric)
+	}
+	if err := metricRows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // GetLatestTaskAttempts returns the most recent attempt for each task in a run.

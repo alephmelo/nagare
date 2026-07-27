@@ -8,6 +8,8 @@ export interface ExecutionRuntimeTask {
   ID: string;
   TaskID: string;
   Status?: string;
+  InspectionKind?: "definition" | "mapped-child" | "runtime-only";
+  ParentID?: string;
 }
 
 export interface ProjectedNode<T extends ExecutionRuntimeTask = ExecutionRuntimeTask> {
@@ -40,21 +42,34 @@ export function projectExecutionTopology<T extends ExecutionRuntimeTask>(
     definitions.filter((definition) => definition.MapOver).map((definition) => definition.ID)
   );
   const latestRuntime = new Map<string, T>();
+  const runtimeOrder = new Map<string, number>();
+  runtimeTasks.forEach((task, index) => runtimeOrder.set(task.TaskID, index));
   for (const task of runtimeTasks) latestRuntime.set(task.TaskID, task);
 
   const children = new Map<string, T[]>();
   for (const task of latestRuntime.values()) {
-    const match = childMatch(task.TaskID);
-    if (!match || !mappedDefinitionIds.has(match[1])) continue;
-    const group = children.get(match[1]) ?? [];
+    const legacyMatch = task.InspectionKind === undefined ? childMatch(task.TaskID) : undefined;
+    const parentID =
+      task.InspectionKind === "mapped-child"
+        ? task.ParentID
+        : task.InspectionKind === undefined &&
+            legacyMatch &&
+            mappedDefinitionIds.has(legacyMatch[1])
+          ? legacyMatch[1]
+          : undefined;
+    if (!parentID || !mappedDefinitionIds.has(parentID)) continue;
+    const group = children.get(parentID) ?? [];
     group.push(task);
-    children.set(match[1], group);
+    children.set(parentID, group);
   }
   for (const group of children.values()) {
     group.sort((a, b) => {
-      const ai = Number(childMatch(a.TaskID)?.[2]);
-      const bi = Number(childMatch(b.TaskID)?.[2]);
-      return ai - bi || a.TaskID.localeCompare(b.TaskID);
+      if (a.InspectionKind === undefined && b.InspectionKind === undefined) {
+        const ai = Number(childMatch(a.TaskID)?.[2]);
+        const bi = Number(childMatch(b.TaskID)?.[2]);
+        return ai - bi || a.TaskID.localeCompare(b.TaskID);
+      }
+      return (runtimeOrder.get(a.TaskID) ?? 0) - (runtimeOrder.get(b.TaskID) ?? 0);
     });
   }
 
@@ -88,8 +103,10 @@ export function projectExecutionTopology<T extends ExecutionRuntimeTask>(
   }
   for (const task of latestRuntime.values()) {
     if (renderedIds.has(task.TaskID)) continue;
-    const match = childMatch(task.TaskID);
-    if (match && mappedDefinitionIds.has(match[1])) continue;
+    if (task.InspectionKind === undefined) {
+      const match = childMatch(task.TaskID);
+      if (match && mappedDefinitionIds.has(match[1])) continue;
+    }
     nodes.push({
       id: task.TaskID,
       kind: "runtime-only",
