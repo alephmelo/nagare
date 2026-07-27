@@ -109,6 +109,63 @@ func TestRunCommand_MultilineOutput(t *testing.T) {
 	}
 }
 
+func TestRunCommand_DrainsOutputAfterProcessExit(t *testing.T) {
+	firstLineSeen := make(chan struct{})
+	releaseScanner := make(chan struct{})
+	type commandResult struct {
+		result RunResult
+		err    error
+		lines  []string
+	}
+	done := make(chan commandResult, 1)
+
+	go func() {
+		var lines []string
+		result, err := RunCommand(
+			context.Background(),
+			"printf 'first\\n'; sleep 0.05; printf 'second\\n'",
+			nil,
+			0,
+			func(line string) {
+				lines = append(lines, line)
+				if line == "first" {
+					close(firstLineSeen)
+					<-releaseScanner
+				}
+			},
+			nil,
+		)
+		done <- commandResult{result: result, err: err, lines: lines}
+	}()
+
+	select {
+	case <-firstLineSeen:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the first output line")
+	}
+
+	// Keep the scanner occupied until the command has emitted its second line
+	// and exited. RunCommand must drain that buffered output before closing the
+	// pipe reader.
+	time.Sleep(100 * time.Millisecond)
+	close(releaseScanner)
+
+	select {
+	case outcome := <-done:
+		if outcome.err != nil {
+			t.Fatalf("unexpected error: %v", outcome.err)
+		}
+		if len(outcome.lines) != 2 {
+			t.Fatalf("expected both callback lines, got %v", outcome.lines)
+		}
+		if outcome.result.Output != "first\nsecond\n" {
+			t.Fatalf("expected complete output, got %q", outcome.result.Output)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for command completion")
+	}
+}
+
 // TestRunCommand_OnStart verifies that onStart is called with a live cmd.
 func TestRunCommand_OnStart(t *testing.T) {
 	ctx := context.Background()

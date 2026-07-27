@@ -96,15 +96,22 @@ type RunResult struct {
 	ExecutorType    string // "local" or "docker"
 }
 
+const outputDrainGracePeriod = time.Second
+
+func killLocalProcessGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return os.ErrProcessDone
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		return cmd.Process.Kill()
+	}
+	return nil
+}
+
 // killLocalProcess terminates a running local process and its entire process
 // group, then closes the pipe reader to unblock the output scanner goroutine.
 func killLocalProcess(cmd *exec.Cmd, pr *os.File) {
-	if cmd != nil && cmd.Process != nil {
-		pgid := cmd.Process.Pid
-		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-			_ = cmd.Process.Kill() // best-effort fallback; original error is non-recoverable
-		}
-	}
+	_ = killLocalProcessGroup(cmd)
 	if pr != nil {
 		pr.Close()
 	}
@@ -152,6 +159,9 @@ func RunCommand(ctx context.Context, cmdStr string, extraEnv []string, timeoutSe
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
+	cmd.Cancel = func() error {
+		return killLocalProcessGroup(cmd)
+	}
 
 	startTime := time.Now()
 
@@ -186,8 +196,20 @@ func RunCommand(ctx context.Context, cmdStr string, extraEnv []string, timeoutSe
 
 	runErr := cmd.Wait()
 	durationMs := time.Since(startTime).Milliseconds()
-	pr.Close() // signal EOF to scanner
-	<-scanDone
+
+	// The shell can exit while output is still buffered in the pipe. Give the
+	// scanner a bounded opportunity to drain it before closing the reader.
+	// The bound prevents a detached descendant that inherited stdout from
+	// keeping task completion open indefinitely.
+	drainTimer := time.NewTimer(outputDrainGracePeriod)
+	select {
+	case <-scanDone:
+		drainTimer.Stop()
+	case <-drainTimer.C:
+		pr.Close()
+		<-scanDone
+	}
+	pr.Close()
 
 	result := RunResult{
 		Output:       buf.String(),
