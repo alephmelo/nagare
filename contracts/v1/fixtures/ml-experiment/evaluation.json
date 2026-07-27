@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "id": "ml-experiment-quality-evaluation",
+  "subject_artifacts": [
+    {
+      "id": "ml-experiment-report",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "evaluator": {
+    "kind": "deterministic",
+    "adapter": "fixture-metric-threshold"
+  },
+  "criteria": [
+    {
+      "name": "Candidate meets the minimum recall threshold",
+      "verdict": "passed",
+      "evidence": [
+        {
+          "id": "ml-experiment-report",
+          "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      ]
+    },
+    {
+      "name": "Latency remains below the serving budget",
+      "verdict": "passed",
+      "evidence": [
+        {
+          "id": "ml-experiment-report",
+          "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      ]
+    }
+  ],
+  "verdict": "passed",
+  "completed_at": "2026-07-27T15:35:00Z"
+}

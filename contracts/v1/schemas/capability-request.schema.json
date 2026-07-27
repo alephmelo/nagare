@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nagare.dev/contracts/v1/capability-request.schema.json",
+  "title": "Nagare Capability Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "subject",
+    "capabilities",
+    "requested_at",
+    "idempotency_key"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schema_version"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {
+          "enum": ["pack", "workflow", "task", "assignment"]
+        },
+        "id": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "common.schema.json#/$defs/capability"
+      },
+      "uniqueItems": true
+    },
+    "requested_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 255
+    }
+  }
+}

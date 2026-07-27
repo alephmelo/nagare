@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "id": "software-change-patch",
+  "kind": "source-patch",
+  "media_type": "text/x-diff",
+  "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "size_bytes": 4821,
+  "producer": {
+    "run_id": "software-change-run-001",
+    "task_attempt_id": "software-change-implement-attempt-1",
+    "assignment_id": "software-change-implement"
+  },
+  "created_at": "2026-07-27T14:30:00Z",
+  "location": {
+    "kind": "external",
+    "uri": "file:///fixture/artifacts/software-change.patch"
+  },
+  "metadata": {
+    "base_revision": "0123456789abcdef",
+    "changed_files": 2
+  }
+}

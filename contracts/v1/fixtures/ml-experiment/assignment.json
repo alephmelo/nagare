@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0",
+  "id": "ml-experiment-evaluate",
+  "objective": "Evaluate two deterministic candidate models and recommend one from recorded evidence.",
+  "inputs": [
+    {
+      "id": "ml-experiment-dataset",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "context_refs": [
+    "fixture://datasets/binary-classification-v1",
+    "fixture://requirements/model-quality-v1"
+  ],
+  "owned_paths": [
+    "fixture-output/ml-experiment/"
+  ],
+  "capabilities": [
+    {
+      "name": "dataset",
+      "access": "read",
+      "constraints": {
+        "datasets": ["binary-classification-v1"]
+      }
+    },
+    {
+      "name": "workspace",
+      "access": "write",
+      "constraints": {
+        "paths": ["fixture-output/ml-experiment/"]
+      }
+    },
+    {
+      "name": "process",
+      "access": "execute",
+      "constraints": {
+        "commands": ["python -m fixture.evaluate"]
+      }
+    }
+  ],
+  "budget": {
+    "max_duration_seconds": 3600,
+    "max_attempts": 1,
+    "max_tokens": 40000,
+    "max_cost_microunits": 2000000
+  },
+  "output_contract": {
+    "artifacts": [
+      {
+        "kind": "model-evaluation-report",
+        "media_type": "application/json",
+        "schema": "https://nagare.dev/contracts/examples/model-evaluation.schema.json"
+      },
+      {
+        "kind": "model-recommendation",
+        "media_type": "text/markdown"
+      }
+    ]
+  },
+  "acceptance_criteria": [
+    "Both candidates are evaluated against the same immutable dataset digest.",
+    "The report includes accuracy, precision, recall, and latency.",
+    "The recommendation cites the recorded metrics and quality threshold."
+  ],
+  "idempotency_key": "ml-experiment-evaluate-v1"
+}

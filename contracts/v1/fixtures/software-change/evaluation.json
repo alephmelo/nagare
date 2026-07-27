@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "id": "software-change-evaluation",
+  "subject_artifacts": [
+    {
+      "id": "software-change-patch",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "evaluator": {
+    "kind": "deterministic",
+    "adapter": "fixture-go-test"
+  },
+  "criteria": [
+    {
+      "name": "Focused tests pass under the race detector",
+      "verdict": "passed",
+      "evidence": [
+        {
+          "id": "software-change-patch",
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ]
+    },
+    {
+      "name": "Only owned paths changed",
+      "verdict": "passed",
+      "evidence": [
+        {
+          "id": "software-change-patch",
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ]
+    }
+  ],
+  "verdict": "passed",
+  "completed_at": "2026-07-27T14:35:00Z"
+}

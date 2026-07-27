@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "id": "software-change-capabilities",
+  "subject": {
+    "kind": "assignment",
+    "id": "software-change-implement"
+  },
+  "capabilities": [
+    {
+      "name": "repository",
+      "access": "read",
+      "constraints": {
+        "repositories": ["fixture/nagare"]
+      }
+    },
+    {
+      "name": "workspace",
+      "access": "write",
+      "constraints": {
+        "paths": ["internal/example/"]
+      }
+    },
+    {
+      "name": "process",
+      "access": "execute",
+      "constraints": {
+        "commands": ["go test ./internal/example"]
+      }
+    }
+  ],
+  "requested_at": "2026-07-27T14:00:00Z",
+  "idempotency_key": "software-change-capabilities-v1"
+}

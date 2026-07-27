@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nagare.dev/contracts/v1/common.schema.json",
+  "title": "Nagare Agentic Workflow Common Definitions v1",
+  "$defs": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "access", "constraints"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/identifier"
+        },
+        "access": {
+          "enum": ["read", "write", "execute"]
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "digest"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "channel"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "channel": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    }
+  }
+}

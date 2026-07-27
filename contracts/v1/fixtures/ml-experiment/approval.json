@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "id": "ml-experiment-execution-approval",
+  "proposal_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "actor": {
+    "id": "fixture-ml-engineer",
+    "channel": "nagare-ui"
+  },
+  "decision": "approved",
+  "granted_capabilities": [
+    {
+      "name": "dataset",
+      "access": "read",
+      "constraints": {
+        "datasets": ["binary-classification-v1"]
+      }
+    },
+    {
+      "name": "workspace",
+      "access": "write",
+      "constraints": {
+        "paths": ["fixture-output/ml-experiment/"]
+      }
+    },
+    {
+      "name": "process",
+      "access": "execute",
+      "constraints": {
+        "commands": ["python -m fixture.evaluate"]
+      }
+    }
+  ],
+  "decided_at": "2026-07-27T15:05:00Z",
+  "expires_at": "2026-07-28T15:05:00Z",
+  "idempotency_key": "ml-experiment-execution-approval-v1"
+}

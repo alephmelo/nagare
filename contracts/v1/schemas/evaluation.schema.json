@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nagare.dev/contracts/v1/evaluation.schema.json",
+  "title": "Nagare Evaluation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "subject_artifacts",
+    "evaluator",
+    "criteria",
+    "verdict",
+    "completed_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schema_version"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "subject_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "common.schema.json#/$defs/artifact_ref"
+      },
+      "uniqueItems": true
+    },
+    "evaluator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "adapter"],
+      "properties": {
+        "kind": {
+          "enum": ["deterministic", "agent", "human"]
+        },
+        "adapter": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        }
+      }
+    },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "verdict", "evidence"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "verdict": {
+            "enum": ["passed", "failed", "inconclusive"]
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "common.schema.json#/$defs/artifact_ref"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "verdict": {
+      "enum": ["passed", "failed", "inconclusive"]
+    },
+    "completed_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  }
+}
